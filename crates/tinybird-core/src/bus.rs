@@ -33,6 +33,9 @@ pub type BusResult<T> = Result<T, BusError>;
 const AUDIO_IO_START: usize = 0x60;
 const AUDIO_IO_END: usize = 0xA8;
 const AUDIO_IO_LEN: usize = AUDIO_IO_END - AUDIO_IO_START;
+const PPU_IO_START: usize = 0x00;
+const PPU_IO_END: usize = 0x56;
+const PPU_IO_LEN: usize = PPU_IO_END - PPU_IO_START;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 struct DirtyRange {
@@ -193,6 +196,10 @@ pub struct SimpleBus {
     oam_dirty: DirtyRange,
     /// Dirty byte span for sound I/O registers since the last APU sync.
     audio_io_dirty: DirtyRange,
+    /// Dirty byte span for PPU control registers since the last render-side sync.
+    ppu_io_dirty: DirtyRange,
+    /// Set when any timer control register (TMxCNT_H) was written by the CPU.
+    timer_control_dirty: bool,
     /// Set when any DMA register (I/O 0xB0..=0xDF) was written; cleared by take_dma_dirty.
     dma_dirty: bool,
     /// Game Pak ROM (variable size, using max for simplicity)
@@ -317,6 +324,8 @@ impl<'de> Deserialize<'de> for SimpleBus {
             vram_dirty: helper.vram_dirty,
             oam_dirty: helper.oam_dirty,
             audio_io_dirty: helper.audio_io_dirty,
+            ppu_io_dirty: DirtyRange::default(),
+            timer_control_dirty: false,
             dma_dirty: helper.dma_dirty,
             rom: helper.rom,
             save_memory: helper.save_memory,
@@ -363,6 +372,8 @@ impl SimpleBus {
             vram_dirty: DirtyRange::default(),
             oam_dirty: DirtyRange::default(),
             audio_io_dirty: DirtyRange::default(),
+            ppu_io_dirty: DirtyRange::default(),
+            timer_control_dirty: false,
             dma_dirty: false,
             rom: rom.unwrap_or_default(),
             save_memory: vec![0xFF; REGION_SRAM_SIZE],
@@ -617,6 +628,18 @@ impl SimpleBus {
         self.audio_io_dirty.take()
     }
 
+    /// Return and clear the dirty byte range for display-control I/O mirrors.
+    pub fn take_ppu_io_dirty_range(&mut self) -> Option<(usize, usize)> {
+        self.ppu_io_dirty.take()
+    }
+
+    /// Take and clear the timer-control dirty flag.
+    pub fn take_timer_control_dirty(&mut self) -> bool {
+        let dirty = self.timer_control_dirty;
+        self.timer_control_dirty = false;
+        dirty
+    }
+
     /// Take and clear the DMA-dirty flag. Returns true if any DMA register was written.
     pub fn take_dma_dirty(&mut self) -> bool {
         let dirty = self.dma_dirty;
@@ -638,6 +661,25 @@ impl SimpleBus {
         if start < end {
             self.audio_io_dirty
                 .mark(start - AUDIO_IO_START, end - start, AUDIO_IO_LEN);
+        }
+    }
+
+    fn mark_ppu_io_dirty(&mut self, offset: usize, len: usize) {
+        let start = offset.max(PPU_IO_START);
+        let end = offset.saturating_add(len).min(PPU_IO_END);
+        if start < end {
+            self.ppu_io_dirty
+                .mark(start - PPU_IO_START, end - start, PPU_IO_LEN);
+        }
+    }
+
+    fn mark_timer_control_dirty(&mut self, offset: usize, len: usize) {
+        let end = offset.saturating_add(len);
+        for base in [0x102usize, 0x106, 0x10A, 0x10E] {
+            if offset < base + 2 && base < end {
+                self.timer_control_dirty = true;
+                break;
+            }
         }
     }
 
@@ -1445,6 +1487,8 @@ impl Bus for SimpleBus {
                     }
                 }
                 self.mark_audio_io_dirty(masked_addr as usize, 1);
+                self.mark_ppu_io_dirty(masked_addr as usize, 1);
+                self.mark_timer_control_dirty(masked_addr as usize, 1);
                 self.mark_dma_dirty(masked_addr as usize);
             }
             REGION_PALETTE_START..=REGION_PALETTE_END => {
@@ -1531,6 +1575,8 @@ impl Bus for SimpleBus {
                     self.io[idx + 1] = bytes[1];
                 }
                 self.mark_audio_io_dirty(idx, 2);
+                self.mark_ppu_io_dirty(idx, 2);
+                self.mark_timer_control_dirty(idx, 2);
                 self.mark_dma_dirty(idx);
             }
             REGION_PALETTE_START..=REGION_PALETTE_END => {
@@ -1634,6 +1680,8 @@ impl Bus for SimpleBus {
                     self.io[idx..idx + 4].copy_from_slice(&bytes);
                 }
                 self.mark_audio_io_dirty(idx, 4);
+                self.mark_ppu_io_dirty(idx, 4);
+                self.mark_timer_control_dirty(idx, 4);
                 self.mark_dma_dirty(idx);
             }
             REGION_PALETTE_START..=REGION_PALETTE_END => {
@@ -1786,6 +1834,38 @@ mod tests {
 
         assert_eq!(bus.take_audio_io_dirty_range(), Some((0, 0x24)));
         assert_eq!(bus.take_audio_io_dirty_range(), None);
+    }
+
+    #[test]
+    fn test_take_ppu_io_dirty_range_tracks_cpu_mmio_but_not_internal_mirrors() {
+        let mut bus = SimpleBus::new(None);
+
+        bus.write_u16(0x0400_0008, 0x1234);
+        bus.write_u8(0x0400_0045, 0x56);
+
+        assert_eq!(bus.take_ppu_io_dirty_range(), Some((0x08, 0x46)));
+        assert_eq!(bus.take_ppu_io_dirty_range(), None);
+
+        bus.write_io_direct_u16(0x004, 0x1234);
+        assert_eq!(bus.take_ppu_io_dirty_range(), None);
+    }
+
+    #[test]
+    fn test_take_timer_control_dirty_tracks_tmcnt_h_cpu_writes_only() {
+        let mut bus = SimpleBus::new(None);
+
+        bus.write_u16(0x0400_0102, 0x0080);
+        assert!(bus.take_timer_control_dirty());
+        assert!(!bus.take_timer_control_dirty());
+
+        bus.write_u16(0x0400_0100, 0x1234);
+        assert!(!bus.take_timer_control_dirty());
+
+        bus.write_u32(0x0400_0100, 0x0080_1234);
+        assert!(bus.take_timer_control_dirty());
+
+        bus.write_io_direct_u16(0x0102, 0x0080);
+        assert!(!bus.take_timer_control_dirty());
     }
 
     #[test]

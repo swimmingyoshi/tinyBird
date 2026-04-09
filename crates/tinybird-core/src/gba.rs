@@ -325,11 +325,6 @@ impl Default for Gba {
 }
 
 impl Gba {
-    #[inline(always)]
-    fn crossed_interval(start: u64, end: u64, interval: u64) -> bool {
-        start / interval != end / interval
-    }
-
     /// Create a new GBA emulator
     pub fn new() -> Self {
         Self {
@@ -446,7 +441,6 @@ impl Gba {
             return;
         }
 
-        let start_cycles = self.total_cycles;
         self.apply_bios_intr_wait_gate();
 
         // Sync PPU runtime status to I/O (must be current for polling games).
@@ -561,8 +555,8 @@ impl Gba {
             }
         }
 
-        // Sync timer controls from I/O (check frequently to catch enable transitions)
-        if Self::crossed_interval(start_cycles, self.total_cycles, 16) {
+        // Sync timer controls only when the CPU actually wrote TMxCNT_H.
+        if self.bus.take_timer_control_dirty() {
             self.sync_timer_controls();
         }
 
@@ -586,7 +580,7 @@ impl Gba {
         // menu) take effect on the very next pixels we render.
         let prev_scanline = self.ppu.scanline;
         let prev_cycle = self.ppu.cycle;
-        self.sync_ppu_control_regs_to_ppu();
+        self.sync_dirty_ppu_control_regs_to_ppu();
         let crosses_hblank_start = self.ppu.scanline < crate::ppu::VISIBLE_SCANLINES
             && prev_cycle < crate::ppu::HBLANK_START
             && prev_cycle + cpu_cycles as u32 >= crate::ppu::HBLANK_START;
@@ -1099,8 +1093,13 @@ impl Gba {
         }
     }
 
-    /// Sync PPU control registers from bus to the render-side mirror.
-    fn sync_ppu_control_regs_to_ppu(&mut self) {
+    #[inline(always)]
+    fn io_range_dirty(start: usize, end: usize, dirty_start: usize, dirty_end: usize) -> bool {
+        dirty_start < end && start < dirty_end
+    }
+
+    /// Sync all PPU control registers from bus to the render-side mirror.
+    fn sync_all_ppu_control_regs_to_ppu(&mut self) {
         self.sync_lcd_state_to_ppu();
 
         // BG0CNT-BG3CNT (0x04000008-0x0400000E)
@@ -1163,9 +1162,92 @@ impl Gba {
         self.ppu.write_bldy(self.bus.read_io_direct_u16(0x054));
     }
 
+    /// Sync only the PPU control register groups that changed since the last mirror update.
+    fn sync_dirty_ppu_control_regs_to_ppu(&mut self) {
+        let Some((dirty_start, dirty_end)) = self.bus.take_ppu_io_dirty_range() else {
+            return;
+        };
+
+        if Self::io_range_dirty(0x000, 0x002, dirty_start, dirty_end) {
+            let dispcnt = self.bus.read_io_direct_u16(0x000);
+            if self.last_dispcnt != dispcnt {
+                self.ppu.write_dispcnt(dispcnt);
+                self.last_dispcnt = dispcnt;
+            }
+        }
+
+        if Self::io_range_dirty(0x004, 0x006, dirty_start, dirty_end) {
+            let dispstat = self.bus.read_io_direct_u16(0x004) & !0x0007;
+            if self.last_dispstat_control != dispstat {
+                self.ppu.display_status.vblank_irq = (dispstat & (1 << 3)) != 0;
+                self.ppu.display_status.hblank_irq = (dispstat & (1 << 4)) != 0;
+                self.ppu.display_status.vcounter_irq = (dispstat & (1 << 5)) != 0;
+                self.ppu.display_status.vcounter_compare = (dispstat >> 8) as u8;
+                self.last_dispstat_control = dispstat;
+            }
+        }
+
+        if Self::io_range_dirty(0x008, 0x010, dirty_start, dirty_end) {
+            for i in 0..4 {
+                let bgcnt = self.bus.read_io_direct_u16(0x008 + i * 2);
+                self.ppu.write_bgcnt(i as usize, bgcnt);
+            }
+        }
+
+        if Self::io_range_dirty(0x010, 0x020, dirty_start, dirty_end) {
+            for i in 0..4 {
+                let hofs = self.bus.read_io_direct_u16(0x010 + i * 4);
+                let vofs = self.bus.read_io_direct_u16(0x012 + i * 4);
+                self.ppu.write_bghofs(i as usize, hofs);
+                self.ppu.write_bgvofs(i as usize, vofs);
+            }
+        }
+
+        if Self::io_range_dirty(0x020, 0x030, dirty_start, dirty_end) {
+            self.ppu.backgrounds[2].pa = self.bus.read_io_direct_u16(0x020) as i16;
+            self.ppu.backgrounds[2].pb = self.bus.read_io_direct_u16(0x022) as i16;
+            self.ppu.backgrounds[2].pc = self.bus.read_io_direct_u16(0x024) as i16;
+            self.ppu.backgrounds[2].pd = self.bus.read_io_direct_u16(0x026) as i16;
+            let lo = self.bus.read_io_direct_u16(0x028) as u32;
+            let hi = self.bus.read_io_direct_u16(0x02A) as u32;
+            self.ppu.backgrounds[2].ref_x = ((lo | (hi << 16)) as i32) << 4 >> 4;
+            let lo = self.bus.read_io_direct_u16(0x02C) as u32;
+            let hi = self.bus.read_io_direct_u16(0x02E) as u32;
+            self.ppu.backgrounds[2].ref_y = ((lo | (hi << 16)) as i32) << 4 >> 4;
+        }
+
+        if Self::io_range_dirty(0x030, 0x040, dirty_start, dirty_end) {
+            self.ppu.backgrounds[3].pa = self.bus.read_io_direct_u16(0x030) as i16;
+            self.ppu.backgrounds[3].pb = self.bus.read_io_direct_u16(0x032) as i16;
+            self.ppu.backgrounds[3].pc = self.bus.read_io_direct_u16(0x034) as i16;
+            self.ppu.backgrounds[3].pd = self.bus.read_io_direct_u16(0x036) as i16;
+            let lo = self.bus.read_io_direct_u16(0x038) as u32;
+            let hi = self.bus.read_io_direct_u16(0x03A) as u32;
+            self.ppu.backgrounds[3].ref_x = ((lo | (hi << 16)) as i32) << 4 >> 4;
+            let lo = self.bus.read_io_direct_u16(0x03C) as u32;
+            let hi = self.bus.read_io_direct_u16(0x03E) as u32;
+            self.ppu.backgrounds[3].ref_y = ((lo | (hi << 16)) as i32) << 4 >> 4;
+        }
+
+        if Self::io_range_dirty(0x040, 0x04C, dirty_start, dirty_end) {
+            self.ppu.write_win0h(self.bus.read_io_direct_u16(0x040));
+            self.ppu.write_win1h(self.bus.read_io_direct_u16(0x042));
+            self.ppu.write_win0v(self.bus.read_io_direct_u16(0x044));
+            self.ppu.write_win1v(self.bus.read_io_direct_u16(0x046));
+            self.ppu.write_winin(self.bus.read_io_direct_u16(0x048));
+            self.ppu.write_winout(self.bus.read_io_direct_u16(0x04A));
+        }
+
+        if Self::io_range_dirty(0x050, 0x056, dirty_start, dirty_end) {
+            self.ppu.write_bldcnt(self.bus.read_io_direct_u16(0x050));
+            self.ppu.write_bldalpha(self.bus.read_io_direct_u16(0x052));
+            self.ppu.write_bldy(self.bus.read_io_direct_u16(0x054));
+        }
+    }
+
     /// Sync I/O registers from bus to PPU.
     fn sync_io_to_ppu(&mut self) {
-        self.sync_ppu_control_regs_to_ppu();
+        self.sync_all_ppu_control_regs_to_ppu();
         // Sync VRAM, palette, and OAM from bus to PPU
         self.sync_video_memory();
     }
@@ -1391,7 +1473,7 @@ mod tests {
         gba.ppu.scanline = 10;
         gba.ppu.cycle = 100;
 
-        gba.bus.write_io_direct_u16(0x044, 0x3A4A);
+        gba.bus.write_u16(0x0400_0044, 0x3A4A);
 
         gba.step();
 
@@ -1404,8 +1486,8 @@ mod tests {
         let mut gba = Gba::new();
         gba.start();
 
-        gba.bus.write_io_direct_u16(0x000, 0x0100); // mode 0, BG0 on
-        gba.bus.write_io_direct_u16(0x008, 0x0100); // BG0 char base 0, screen base 1, priority 0
+        gba.bus.write_u16(0x0400_0000, 0x0100); // mode 0, BG0 on
+        gba.bus.write_u16(0x0400_0008, 0x0100); // BG0 char base 0, screen base 1, priority 0
 
         // BG palette entry 1 = bright red, backdrop entry 0 = black.
         gba.bus.write_u16(0x0500_0000, 0x0000);

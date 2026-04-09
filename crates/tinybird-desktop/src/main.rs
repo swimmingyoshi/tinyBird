@@ -9,6 +9,7 @@ use std::fs;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use gilrs::{Axis as GamepadAxis, EventType, GamepadId, Gilrs};
@@ -31,6 +32,40 @@ const FRAME_DURATION: Duration = Duration::from_nanos(
 const FRAME_PACING_TOLERANCE: Duration = Duration::from_micros(750);
 const FRAME_CATCHUP_LIMIT: u32 = 3;
 const AUDIO_BACKPRESSURE_MILLIS: u32 = 94;
+const RGB555_COLOR_COUNT: usize = 1 << 15;
+
+fn build_rgb555_lookup(color_correction: bool) -> [u32; RGB555_COLOR_COUNT] {
+    let mut table = [0u32; RGB555_COLOR_COUNT];
+    for (rgb555, slot) in table.iter_mut().enumerate() {
+        let r = (rgb555 as u32) & 0x1F;
+        let g = ((rgb555 as u32) >> 5) & 0x1F;
+        let b = ((rgb555 as u32) >> 10) & 0x1F;
+        let r = (r << 3) | (r >> 2);
+        let g = (g << 3) | (g >> 2);
+        let b = (b << 3) | (b >> 2);
+
+        *slot = if color_correction {
+            let r2 = ((r * 26 + g * 4 + b * 2) / 32).min(255);
+            let g2 = ((g * 24 + b * 8) / 32).min(255);
+            let b2 = ((r * 6 + g * 4 + b * 22) / 32).min(255);
+            (r2 << 16) | (g2 << 8) | b2
+        } else {
+            (r << 16) | (g << 8) | b
+        };
+    }
+    table
+}
+
+fn rgb555_lookup(color_correction: bool) -> &'static [u32; RGB555_COLOR_COUNT] {
+    static RGB555_LOOKUP: OnceLock<[u32; RGB555_COLOR_COUNT]> = OnceLock::new();
+    static RGB555_LOOKUP_CC: OnceLock<[u32; RGB555_COLOR_COUNT]> = OnceLock::new();
+
+    if color_correction {
+        RGB555_LOOKUP_CC.get_or_init(|| build_rgb555_lookup(true))
+    } else {
+        RGB555_LOOKUP.get_or_init(|| build_rgb555_lookup(false))
+    }
+}
 
 enum QuicksaveLoadResult {
     Loaded,
@@ -459,9 +494,9 @@ impl App {
 
         let win_w = surface_size.0 as usize;
         let win_h = surface_size.1 as usize;
-        buffer.fill(0x000000);
 
         let Some(framebuffer) = framebuffer else {
+            buffer.fill(0x000000);
             let _ = buffer.present();
             return;
         };
@@ -482,37 +517,35 @@ impl App {
         let offset_x = (win_w.saturating_sub(draw_w)) / 2;
         let offset_y = (win_h.saturating_sub(draw_h)) / 2;
         let pixels = framebuffer.as_slice();
-
-        let convert_pixel = |r: u8, g: u8, b: u8| -> u32 {
-            if color_correction {
-                let r = r as u32;
-                let g = g as u32;
-                let b = b as u32;
-                let r2 = ((r * 26 + g * 4 + b * 2) / 32).min(255) as u8;
-                let g2 = ((g * 24 + b * 8) / 32).min(255) as u8;
-                let b2 = ((r * 6 + g * 4 + b * 22) / 32).min(255) as u8;
-                ((r2 as u32) << 16) | ((g2 as u32) << 8) | (b2 as u32)
-            } else {
-                ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-            }
-        };
+        let color_lookup = rgb555_lookup(color_correction);
+        let needs_clear = offset_x != 0 || offset_y != 0 || draw_w != win_w || draw_h != win_h;
+        if needs_clear {
+            buffer.fill(0x000000);
+        }
 
         if draw_w % src_w == 0 && draw_h % src_h == 0 && draw_w / src_w == draw_h / src_h {
             let scale = draw_w / src_w;
             if scale > 0 {
+                let mut converted_row = [0u32; SCREEN_WIDTH as usize];
                 for src_y in 0..src_h {
                     let src_row = src_y * src_w;
                     let dst_y_base = offset_y + src_y * scale;
+                    let first_dst_row = dst_y_base * win_w + offset_x;
 
-                    for dy in 0..scale {
+                    for src_x in 0..src_w {
+                        converted_row[src_x] =
+                            color_lookup[pixels[src_row + src_x].color.to_rgb555() as usize];
+                    }
+
+                    let mut dst_x = 0;
+                    for color in converted_row.iter().take(src_w) {
+                        buffer[first_dst_row + dst_x..first_dst_row + dst_x + scale].fill(*color);
+                        dst_x += scale;
+                    }
+
+                    for dy in 1..scale {
                         let dst_row = (dst_y_base + dy) * win_w + offset_x;
-                        let mut dst_x = 0;
-                        for src_x in 0..src_w {
-                            let (r, g, b) = pixels[src_row + src_x].color.to_rgb888();
-                            let color = convert_pixel(r, g, b);
-                            buffer[dst_row + dst_x..dst_row + dst_x + scale].fill(color);
-                            dst_x += scale;
-                        }
+                        buffer.copy_within(first_dst_row..first_dst_row + draw_w, dst_row);
                     }
                 }
 
@@ -539,8 +572,8 @@ impl App {
             let dst_row = (offset_y + y) * win_w + offset_x;
             for x in 0..draw_w {
                 let src_x = x * src_w / draw_w;
-                let (r, g, b) = pixels[src_row + src_x].color.to_rgb888();
-                buffer[dst_row + x] = convert_pixel(r, g, b);
+                buffer[dst_row + x] =
+                    color_lookup[pixels[src_row + src_x].color.to_rgb555() as usize];
             }
         }
 
