@@ -3,8 +3,8 @@
 //! The GBA bus connects the CPU to all memory regions and peripherals.
 //! It handles address decoding, wait states, and open bus behavior.
 
-use crate::memory_map::*;
 use crate::debug::config as debug_config;
+use crate::memory_map::*;
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -252,10 +252,13 @@ struct SimpleBusSerde {
     vcount_cycles: u64,
 }
 
-fn vec_to_boxed_array<const N: usize, E: DeError>(vec: Vec<u8>, name: &str) -> Result<Box<[u8; N]>, E> {
-    let arr: [u8; N] = vec
-        .try_into()
-        .map_err(|v: Vec<u8>| E::custom(format!("{} had length {}, expected {}", name, v.len(), N)))?;
+fn vec_to_boxed_array<const N: usize, E: DeError>(
+    vec: Vec<u8>,
+    name: &str,
+) -> Result<Box<[u8; N]>, E> {
+    let arr: [u8; N] = vec.try_into().map_err(|v: Vec<u8>| {
+        E::custom(format!("{} had length {}, expected {}", name, v.len(), N))
+    })?;
     Ok(Box::new(arr))
 }
 
@@ -304,7 +307,10 @@ impl<'de> Deserialize<'de> for SimpleBus {
             ewram: vec_to_boxed_array::<REGION_EWRAM_SIZE, D::Error>(helper.ewram, "ewram")?,
             iwram: vec_to_boxed_array::<REGION_IWRAM_SIZE, D::Error>(helper.iwram, "iwram")?,
             io: vec_to_boxed_array::<REGION_IO_SIZE, D::Error>(helper.io, "io")?,
-            palette: vec_to_boxed_array::<REGION_PALETTE_SIZE, D::Error>(helper.palette, "palette")?,
+            palette: vec_to_boxed_array::<REGION_PALETTE_SIZE, D::Error>(
+                helper.palette,
+                "palette",
+            )?,
             vram: vec_to_boxed_array::<REGION_VRAM_SIZE, D::Error>(helper.vram, "vram")?,
             oam: vec_to_boxed_array::<REGION_OAM_SIZE, D::Error>(helper.oam, "oam")?,
             palette_dirty: helper.palette_dirty,
@@ -439,7 +445,11 @@ impl SimpleBus {
     }
 
     fn detect_save_type(&mut self) {
-        let save_type = if self.rom.windows(b"FLASH1M_V".len()).any(|w| w == b"FLASH1M_V") {
+        let save_type = if self
+            .rom
+            .windows(b"FLASH1M_V".len())
+            .any(|w| w == b"FLASH1M_V")
+        {
             SaveType::Flash128K
         } else if self.rom.windows(b"FLASH_V".len()).any(|w| w == b"FLASH_V")
             || self
@@ -450,7 +460,11 @@ impl SimpleBus {
             SaveType::Flash64K
         } else if self.rom.windows(b"SRAM_V".len()).any(|w| w == b"SRAM_V") {
             SaveType::Sram
-        } else if self.rom.windows(b"EEPROM_V".len()).any(|w| w == b"EEPROM_V") {
+        } else if self
+            .rom
+            .windows(b"EEPROM_V".len())
+            .any(|w| w == b"EEPROM_V")
+        {
             SaveType::Eeprom
         } else {
             SaveType::None
@@ -499,7 +513,8 @@ impl SimpleBus {
 
     /// Return a snapshot of the cartridge save memory for persistence.
     pub fn save_data(&self) -> Option<&[u8]> {
-        self.has_persistent_save().then_some(self.save_memory.as_slice())
+        self.has_persistent_save()
+            .then_some(self.save_memory.as_slice())
     }
 
     /// Replace the cartridge save memory from persisted data.
@@ -762,9 +777,7 @@ impl SimpleBus {
                 // any save-data byte that happens to equal 0xF0 cancels the program
                 // sequence instead of being written — the game then fails its verify
                 // pass and reports a save error.
-                if value == 0xF0
-                    && !matches!(self.flash_cmd_state, FlashCommandState::Program)
-                {
+                if value == 0xF0 && !matches!(self.flash_cmd_state, FlashCommandState::Program) {
                     self.flash_id_mode = false;
                     self.flash_cmd_state = FlashCommandState::Ready;
                     return;
@@ -966,11 +979,21 @@ impl SimpleBus {
                 _ => 1,
             },
             AccessRegion::Rom(area) => {
-                let prefetch_hit = kind == AccessKind::Opcode && self.prefetch_enabled() && sequential;
+                let prefetch_hit =
+                    kind == AccessKind::Opcode && self.prefetch_enabled() && sequential;
                 match width {
                     AccessWidth::Word => {
-                        let first = if prefetch_hit { 1 } else { self.gamepak_wait_cycles(area, sequential) };
-                        first + if prefetch_hit { 1 } else { self.gamepak_wait_cycles(area, true) }
+                        let first = if prefetch_hit {
+                            1
+                        } else {
+                            self.gamepak_wait_cycles(area, sequential)
+                        };
+                        first
+                            + if prefetch_hit {
+                                1
+                            } else {
+                                self.gamepak_wait_cycles(area, true)
+                            }
                     }
                     AccessWidth::Half | AccessWidth::Byte => {
                         if prefetch_hit {
@@ -990,11 +1013,10 @@ impl SimpleBus {
 
         self.cpu_timing_cycles
             .set(self.cpu_timing_cycles.get().saturating_add(cycles));
-        self.cpu_last_access
-            .set(Some(AccessStamp {
-                region,
-                next_addr: Self::next_sequential_addr(addr, width, region),
-            }));
+        self.cpu_last_access.set(Some(AccessStamp {
+            region,
+            next_addr: Self::next_sequential_addr(addr, width, region),
+        }));
     }
 }
 
@@ -1459,15 +1481,15 @@ impl Bus for SimpleBus {
         let bytes = value.to_le_bytes();
 
         // Trace DMA register writes when TINYBIRD_DMA_DEBUG is set
-        if debug_config().dma_debug
-            && addr >= 0x040000B0
-            && addr <= 0x040000DE
-        {
-            let names = ["SAD_L","SAD_H","DAD_L","DAD_H","CNT_L","CNT_H"];
+        if debug_config().dma_debug && addr >= 0x040000B0 && addr <= 0x040000DE {
+            let names = ["SAD_L", "SAD_H", "DAD_L", "DAD_H", "CNT_L", "CNT_H"];
             let ch = ((addr - 0x040000B0) / 12) as usize;
             let reg = (((addr - 0x040000B0) % 12) / 2) as usize;
             let name = if ch < 4 && reg < 6 { names[reg] } else { "???" };
-            eprintln!("DMA{} {} write: addr={:08x} val={:04x}", ch, name, addr, value);
+            eprintln!(
+                "DMA{} {} write: addr={:08x} val={:04x}",
+                ch, name, addr, value
+            );
         }
 
         match addr {
@@ -1551,10 +1573,7 @@ impl Bus for SimpleBus {
         let bytes = value.to_le_bytes();
 
         // Trace DMA register writes when TINYBIRD_DMA_DEBUG is set
-        if debug_config().dma_debug
-            && addr >= 0x040000B0
-            && addr <= 0x040000DE
-        {
+        if debug_config().dma_debug && addr >= 0x040000B0 && addr <= 0x040000DE {
             eprintln!("DMA u32 write: addr={:08x} val={:08x}", addr, value);
         }
 
@@ -1582,7 +1601,10 @@ impl Bus for SimpleBus {
                     // Write at IF directly
                     let written = u32::from_le_bytes(bytes);
                     let current = u32::from_le_bytes([
-                        self.io[0x202], self.io[0x203], self.io[0x204], self.io[0x205],
+                        self.io[0x202],
+                        self.io[0x203],
+                        self.io[0x204],
+                        self.io[0x205],
                     ]);
                     let if_cleared = (current & 0x0000_FFFF) & !(written & 0x0000_FFFF);
                     let rest = (current & 0xFFFF_0000) & !(written & 0xFFFF_0000);

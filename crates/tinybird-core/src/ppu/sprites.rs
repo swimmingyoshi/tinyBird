@@ -202,16 +202,17 @@ impl<'de> Deserialize<'de> for SpriteRenderer {
         D: Deserializer<'de>,
     {
         let helper = SpriteRendererSerde::deserialize(deserializer)?;
-        let sprites: [Option<ObjectAttribute>; OAM_COUNT] = helper
-            .sprites
-            .try_into()
-            .map_err(|v: Vec<Option<ObjectAttribute>>| {
-                D::Error::custom(format!(
-                    "sprite cache had length {}, expected {}",
-                    v.len(),
-                    OAM_COUNT
-                ))
-            })?;
+        let sprites: [Option<ObjectAttribute>; OAM_COUNT] =
+            helper
+                .sprites
+                .try_into()
+                .map_err(|v: Vec<Option<ObjectAttribute>>| {
+                    D::Error::custom(format!(
+                        "sprite cache had length {}, expected {}",
+                        v.len(),
+                        OAM_COUNT
+                    ))
+                })?;
         Ok(Self {
             sprites,
             cache_valid: helper.cache_valid,
@@ -291,7 +292,16 @@ impl SpriteRenderer {
 
         // Render sprites (reverse order so higher priority renders on top)
         for (_, sprite) in sprite_list.iter().rev() {
-            self.render_sprite(framebuffer, vram, oam, palette, sprite, y, bg_mode, obj_mapping);
+            self.render_sprite(
+                framebuffer,
+                vram,
+                oam,
+                palette,
+                sprite,
+                y,
+                bg_mode,
+                obj_mapping,
+            );
         }
     }
 
@@ -571,10 +581,8 @@ impl SpriteRenderer {
 
             let tile_col = tex_x / 8;
             let tile_row = tex_y / 8;
-            let tile_addr = obj_base
-                + tile_num * 32
-                + tile_row * row_stride_bytes
-                + tile_col * bytes_per_tile;
+            let tile_addr =
+                obj_base + tile_num * 32 + tile_row * row_stride_bytes + tile_col * bytes_per_tile;
 
             let pixel_x = tex_x % 8;
             let pixel_y = tex_y % 8;
@@ -687,10 +695,8 @@ impl SpriteRenderer {
             let tex_y = tex_y as usize;
             let tile_col = tex_x / 8;
             let tile_row = tex_y / 8;
-            let tile_addr = obj_base
-                + tile_num * 32
-                + tile_row * row_stride_bytes
-                + tile_col * bytes_per_tile;
+            let tile_addr =
+                obj_base + tile_num * 32 + tile_row * row_stride_bytes + tile_col * bytes_per_tile;
 
             let pixel_x = tex_x % 8;
             let pixel_y = tex_y % 8;
@@ -766,7 +772,11 @@ impl SpriteRenderer {
             let x = start_x + px;
 
             // Check bounds
-            if x < 0 || x >= SCREEN_WIDTH as i32 || scanline_y < 0 || scanline_y >= SCREEN_HEIGHT as i32 {
+            if x < 0
+                || x >= SCREEN_WIDTH as i32
+                || scanline_y < 0
+                || scanline_y >= SCREEN_HEIGHT as i32
+            {
                 continue;
             }
 
@@ -783,10 +793,8 @@ impl SpriteRenderer {
             // Get tile number (handle 2D vs 1D mapping)
             let tile_row = tile_y / 8;
             let tile_col = tile_x / 8;
-            let tile_addr = obj_base
-                + tile_num * 32
-                + tile_row * row_stride_bytes
-                + tile_col * bytes_per_tile;
+            let tile_addr =
+                obj_base + tile_num * 32 + tile_row * row_stride_bytes + tile_col * bytes_per_tile;
 
             // Get pixel within tile
             let pixel_x = tile_x % 8;
@@ -891,10 +899,8 @@ impl SpriteRenderer {
             };
             let tile_row = tile_y / 8;
             let tile_col = tile_x / 8;
-            let tile_addr = obj_base
-                + tile_num * 32
-                + tile_row * row_stride_bytes
-                + tile_col * bytes_per_tile;
+            let tile_addr =
+                obj_base + tile_num * 32 + tile_row * row_stride_bytes + tile_col * bytes_per_tile;
             let pixel_x = tile_x % 8;
             let pixel_y = tile_y % 8;
 
@@ -1053,5 +1059,4 @@ mod tests {
         assert!(mask[..8].iter().all(|&covered| covered));
         assert!(mask[8..].iter().all(|&covered| !covered));
     }
-
 }

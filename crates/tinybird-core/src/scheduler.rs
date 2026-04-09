@@ -6,9 +6,9 @@
 //! - DMA transfers
 //! - Serial communication
 
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use serde::{Deserialize, Serialize};
 
 /// Maximum number of pending events
 const MAX_EVENTS: usize = 64;

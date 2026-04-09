@@ -348,9 +348,9 @@ impl WaveChannel {
         let centered = self.sample_buffer as i16 - 8; // -8..+7
         match self.volume {
             0 => 0,
-            1 => centered,       // 100%
-            2 => centered / 2,   // 50%
-            3 => centered / 4,   // 25%
+            1 => centered,     // 100%
+            2 => centered / 2, // 50%
+            3 => centered / 4, // 25%
             _ => 0,
         }
     }
@@ -1130,8 +1130,7 @@ impl Apu {
 
             // SOUND1CNT_X - Frequency/Control
             SOUND1CNT_X => {
-                self.square1.frequency =
-                    (self.square1.frequency & 0x0700) | value as u16;
+                self.square1.frequency = (self.square1.frequency & 0x0700) | value as u16;
             }
             0x0400_0065 => {
                 self.square1.frequency =
@@ -1155,8 +1154,7 @@ impl Apu {
 
             // SOUND2CNT_H - Frequency/Control
             SOUND2CNT_H => {
-                self.square2.frequency =
-                    (self.square2.frequency & 0x0700) | value as u16;
+                self.square2.frequency = (self.square2.frequency & 0x0700) | value as u16;
             }
             0x0400_006D => {
                 self.square2.frequency =
@@ -1186,12 +1184,10 @@ impl Apu {
 
             // SOUND3CNT_X
             SOUND3CNT_X => {
-                self.wave.frequency =
-                    (self.wave.frequency & 0x0700) | value as u16;
+                self.wave.frequency = (self.wave.frequency & 0x0700) | value as u16;
             }
             0x0400_0075 => {
-                self.wave.frequency =
-                    (self.wave.frequency & 0x00FF) | (((value & 7) as u16) << 8);
+                self.wave.frequency = (self.wave.frequency & 0x00FF) | (((value & 7) as u16) << 8);
                 self.wave.length_enable = value & 0x40 != 0;
                 if value & 0x80 != 0 {
                     self.wave.trigger();
@@ -1633,10 +1629,7 @@ mod tests {
             apu.write_register(WAVE_RAM_START + i as u32, i * 0x11);
         }
         for i in 0..16u8 {
-            assert_eq!(
-                apu.read_register(WAVE_RAM_START + i as u32),
-                i * 0x11
-            );
+            assert_eq!(apu.read_register(WAVE_RAM_START + i as u32), i * 0x11);
         }
     }
 

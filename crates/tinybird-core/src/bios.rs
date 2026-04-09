@@ -9,7 +9,7 @@
 
 use crate::bus::Bus;
 use crate::bus::DEBUG_CYCLE;
-use crate::cpu::registers::{R0, R1, R2, R3, R13, R14, R15};
+use crate::cpu::registers::{R0, R1, R13, R14, R15, R2, R3};
 use crate::cpu::Registers;
 use crate::debug::config as debug_config;
 
@@ -548,9 +548,9 @@ mod tests {
         regs.set_reg(R0, 10);
         regs.set_reg(R1, 3);
         Bios::handle_swi(0x06, &mut regs, &mut bus);
-        assert_eq!(regs.get_reg(R0) as i32, 3);  // quotient
-        assert_eq!(regs.get_reg(R1) as i32, 1);  // remainder
-        assert_eq!(regs.get_reg(R3), 3);          // abs(quotient)
+        assert_eq!(regs.get_reg(R0) as i32, 3); // quotient
+        assert_eq!(regs.get_reg(R1) as i32, 1); // remainder
+        assert_eq!(regs.get_reg(R3), 3); // abs(quotient)
     }
 
     #[test]
@@ -559,9 +559,9 @@ mod tests {
         regs.set_reg(R0, (-10i32) as u32);
         regs.set_reg(R1, 3);
         Bios::handle_swi(0x06, &mut regs, &mut bus);
-        assert_eq!(regs.get_reg(R0) as i32, -3);  // quotient
-        assert_eq!(regs.get_reg(R1) as i32, -1);  // remainder
-        assert_eq!(regs.get_reg(R3), 3);           // abs(quotient)
+        assert_eq!(regs.get_reg(R0) as i32, -3); // quotient
+        assert_eq!(regs.get_reg(R1) as i32, -1); // remainder
+        assert_eq!(regs.get_reg(R3), 3); // abs(quotient)
     }
 
     #[test]
@@ -582,8 +582,8 @@ mod tests {
         regs.set_reg(R0, 3);
         regs.set_reg(R1, 10);
         Bios::handle_swi(0x07, &mut regs, &mut bus);
-        assert_eq!(regs.get_reg(R0) as i32, 3);  // 10/3
-        assert_eq!(regs.get_reg(R1) as i32, 1);  // 10%3
+        assert_eq!(regs.get_reg(R0) as i32, 3); // 10/3
+        assert_eq!(regs.get_reg(R1) as i32, 1); // 10%3
         assert_eq!(regs.get_reg(R3), 3);
     }
 
@@ -840,9 +840,8 @@ mod tests {
         // - 32 bytes of 0x11
         // - 32 bytes of 0x22
         let stream: [u8; 24] = [
-            0x10, 0x60, 0x00, 0x00,
-            0x33, 0x00, 0x00, 0xF0, 0x01, 0x90, 0x01, 0x11, 0x11, 0xF0, 0x01, 0x90, 0x01,
-            0x30, 0x22, 0x22, 0xF0, 0x01, 0x90, 0x01,
+            0x10, 0x60, 0x00, 0x00, 0x33, 0x00, 0x00, 0xF0, 0x01, 0x90, 0x01, 0x11, 0x11, 0xF0,
+            0x01, 0x90, 0x01, 0x30, 0x22, 0x22, 0xF0, 0x01, 0x90, 0x01,
         ];
         for (i, byte) in stream.into_iter().enumerate() {
             bus.write_u8(src + i as u32, byte);

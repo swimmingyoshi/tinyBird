@@ -6,13 +6,13 @@
 
 use crate::bios::Bios;
 use crate::bus::Bus;
-use crate::cpu::{armv4_load_halfword, armv4_load_signed_halfword, armv4_load_word};
-use crate::debug::config as debug_config;
 use crate::cpu::pipeline::{
     decode_utils::{apply_shift, bit, bits},
     DecodedInstruction, Instruction, InstructionCategory, Pipeline, ShiftInfo, ShiftType,
 };
 use crate::cpu::registers::{CpuMode, Registers};
+use crate::cpu::{armv4_load_halfword, armv4_load_signed_halfword, armv4_load_word};
+use crate::debug::config as debug_config;
 
 /// Decode a Thumb instruction directly from the opcode bits
 fn decode_thumb_instruction(opcode: u16) -> Option<DecodedInstruction> {
@@ -76,7 +76,7 @@ fn decode_thumb_instruction(opcode: u16) -> Option<DecodedInstruction> {
     // Format 12: Load address (1010x) - bits [15:12] = 0b1010
     if top_bits >= 0b101000 && top_bits < 0b101100 {
         if (opcode & 0x0800) == 0 {
-            return decode_add_pc(opcode);   // ADD Rd, PC, #imm
+            return decode_add_pc(opcode); // ADD Rd, PC, #imm
         } else {
             return decode_add_sp_imm(opcode); // ADD Rd, SP, #imm
         }
@@ -195,7 +195,11 @@ fn decode_add_sub(opcode: u16) -> Option<DecodedInstruction> {
         condition: 0xE,
         rd: Some(rd),
         rn: Some(rs),
-        rm: if !i_flag { Some(rn_or_imm3 as u8) } else { None },
+        rm: if !i_flag {
+            Some(rn_or_imm3 as u8)
+        } else {
+            None
+        },
         shift: None,
         immediate: if i_flag { Some(rn_or_imm3) } else { None },
         branch_target: None,
@@ -237,31 +241,47 @@ fn decode_alu(opcode: u16) -> Option<DecodedInstruction> {
     // All Thumb ALU ops use Rd as both source and destination
     // op encodes the operation (16 opcodes)
     let category = match op {
-        0x0 => InstructionCategory::And,       // AND Rd, Rs
-        0x1 => InstructionCategory::Eor,       // EOR Rd, Rs
+        0x0 => InstructionCategory::And,        // AND Rd, Rs
+        0x1 => InstructionCategory::Eor,        // EOR Rd, Rs
         0x2 => InstructionCategory::ThumbShift, // LSL Rd, Rs (shift by register)
         0x3 => InstructionCategory::ThumbShift, // LSR Rd, Rs
         0x4 => InstructionCategory::ThumbShift, // ASR Rd, Rs
-        0x5 => InstructionCategory::Adc,       // ADC Rd, Rs
-        0x6 => InstructionCategory::Sbc,       // SBC Rd, Rs
+        0x5 => InstructionCategory::Adc,        // ADC Rd, Rs
+        0x6 => InstructionCategory::Sbc,        // SBC Rd, Rs
         0x7 => InstructionCategory::ThumbShift, // ROR Rd, Rs
-        0x8 => InstructionCategory::Tst,       // TST Rd, Rs
-        0x9 => InstructionCategory::Sub,       // NEG Rd, Rs (Rd = 0 - Rs)
-        0xA => InstructionCategory::Cmp,       // CMP Rd, Rs
-        0xB => InstructionCategory::Cmn,       // CMN Rd, Rs
-        0xC => InstructionCategory::Orr,       // ORR Rd, Rs
-        0xD => InstructionCategory::Mul,       // MUL Rd, Rs
-        0xE => InstructionCategory::Bic,       // BIC Rd, Rs
-        0xF => InstructionCategory::Mvn,       // MVN Rd, Rs
+        0x8 => InstructionCategory::Tst,        // TST Rd, Rs
+        0x9 => InstructionCategory::Sub,        // NEG Rd, Rs (Rd = 0 - Rs)
+        0xA => InstructionCategory::Cmp,        // CMP Rd, Rs
+        0xB => InstructionCategory::Cmn,        // CMN Rd, Rs
+        0xC => InstructionCategory::Orr,        // ORR Rd, Rs
+        0xD => InstructionCategory::Mul,        // MUL Rd, Rs
+        0xE => InstructionCategory::Bic,        // BIC Rd, Rs
+        0xF => InstructionCategory::Mvn,        // MVN Rd, Rs
         _ => InstructionCategory::Undefined,
     };
 
     // For shift by register, encode the shift type
     let shift = match op {
-        0x2 => Some(ShiftInfo { shift_type: ShiftType::Lsl, amount: 0, shift_reg: Some(rm) }),
-        0x3 => Some(ShiftInfo { shift_type: ShiftType::Lsr, amount: 0, shift_reg: Some(rm) }),
-        0x4 => Some(ShiftInfo { shift_type: ShiftType::Asr, amount: 0, shift_reg: Some(rm) }),
-        0x7 => Some(ShiftInfo { shift_type: ShiftType::Ror, amount: 0, shift_reg: Some(rm) }),
+        0x2 => Some(ShiftInfo {
+            shift_type: ShiftType::Lsl,
+            amount: 0,
+            shift_reg: Some(rm),
+        }),
+        0x3 => Some(ShiftInfo {
+            shift_type: ShiftType::Lsr,
+            amount: 0,
+            shift_reg: Some(rm),
+        }),
+        0x4 => Some(ShiftInfo {
+            shift_type: ShiftType::Asr,
+            amount: 0,
+            shift_reg: Some(rm),
+        }),
+        0x7 => Some(ShiftInfo {
+            shift_type: ShiftType::Ror,
+            amount: 0,
+            shift_reg: Some(rm),
+        }),
         _ => None,
     };
 
@@ -715,8 +735,9 @@ pub fn execute_thumb<B: Bus>(
             let rd_val = decoded.rd.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
             let rm_val = decoded.rm.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
             let (result, carry) = rd_val.overflowing_add(rm_val);
-            let overflow = (((rd_val as i32) >= 0) && ((rm_val as i32) >= 0) && ((result as i32) < 0))
-                || (((rd_val as i32) < 0) && ((rm_val as i32) < 0) && ((result as i32) >= 0));
+            let overflow =
+                (((rd_val as i32) >= 0) && ((rm_val as i32) >= 0) && ((result as i32) < 0))
+                    || (((rd_val as i32) < 0) && ((rm_val as i32) < 0) && ((result as i32) >= 0));
             regs.set_flags((result as i32) < 0, result == 0, carry, overflow);
         }
         InstructionCategory::Adc => exec_adc(regs, decoded),
@@ -781,7 +802,10 @@ fn exec_shift(regs: &mut Registers, decoded: &DecodedInstruction) {
         )
     } else {
         // Immediate shift (Format 1): value from Rs (rn field)
-        (decoded.rn.map(|r| regs.get_reg(r as usize)).unwrap_or(0), None)
+        (
+            decoded.rn.map(|r| regs.get_reg(r as usize)).unwrap_or(0),
+            None,
+        )
     };
 
     // Register-based shifts with amount 0 leave both value and C unchanged.
@@ -869,12 +893,15 @@ fn exec_add(regs: &mut Registers, decoded: &DecodedInstruction) {
     // Format 5 hi-reg (rn set, no imm): ADD Rd, Rm
     let (src, operand2) = if let Some(rn) = decoded.rn {
         let s = regs.get_reg(rn as usize);
-        let op2 = decoded.rm
+        let op2 = decoded
+            .rm
             .map(|r| regs.get_reg(r as usize))
-            .unwrap_or_else(|| decoded.immediate.unwrap_or_else(|| {
-                // Format 5 hi-reg ADD Rd, Rm: op2 = current Rd value (s=Rm above)
-                decoded.rd.map(|r| regs.get_reg(r as usize)).unwrap_or(0)
-            }));
+            .unwrap_or_else(|| {
+                decoded.immediate.unwrap_or_else(|| {
+                    // Format 5 hi-reg ADD Rd, Rm: op2 = current Rd value (s=Rm above)
+                    decoded.rd.map(|r| regs.get_reg(r as usize)).unwrap_or(0)
+                })
+            });
         (s, op2)
     } else {
         // Format 3: src = Rd value, operand = immediate
@@ -897,7 +924,8 @@ fn exec_add(regs: &mut Registers, decoded: &DecodedInstruction) {
 fn exec_sub(regs: &mut Registers, decoded: &DecodedInstruction) {
     let (src, operand2) = if let Some(rn) = decoded.rn {
         let s = regs.get_reg(rn as usize);
-        let op2 = decoded.rm
+        let op2 = decoded
+            .rm
             .map(|r| regs.get_reg(r as usize))
             .unwrap_or_else(|| decoded.immediate.unwrap_or(0));
         (s, op2)
@@ -1005,7 +1033,8 @@ fn exec_str<B: Bus>(
     is_half: bool,
 ) {
     let base = regs.get_reg(decoded.rn.unwrap() as usize);
-    let offset = decoded.rm
+    let offset = decoded
+        .rm
         .map(|r| regs.get_reg(r as usize))
         .unwrap_or(decoded.immediate.unwrap_or(0));
     let addr = base.wrapping_add(offset);
@@ -1242,7 +1271,12 @@ mod tests {
         execute_thumb(&instr, &mut bus, regs, &mut pipeline);
     }
 
-    fn run_thumb_with_bus(opcode: u16, regs: &mut Registers, bus: &mut SimpleBus, pipeline: &mut Pipeline) {
+    fn run_thumb_with_bus(
+        opcode: u16,
+        regs: &mut Registers,
+        bus: &mut SimpleBus,
+        pipeline: &mut Pipeline,
+    ) {
         pipeline.set_thumb_mode(true);
         regs.set_thumb_mode(true);
         let mut instr = Instruction::thumb(opcode);

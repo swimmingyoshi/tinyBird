@@ -375,7 +375,17 @@ pub fn draw_overlay(
     } else {
         ("Audio: ON    [M]", green)
     };
-    draw_text(buf, buf_w, buf_h, tx, ty, audio_label, SCALE, audio_color, bg);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        tx,
+        ty,
+        audio_label,
+        SCALE,
+        audio_color,
+        bg,
+    );
     ty += LINE;
 
     // Volume line
@@ -397,9 +407,39 @@ pub fn draw_overlay(
     ty += SCALE * 2;
 
     // Key bindings
-    draw_text(buf, buf_w, buf_h, tx, ty, "[Esc] Pause/Resume", SCALE, grey, bg);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        tx,
+        ty,
+        "[Esc] Pause/Resume",
+        SCALE,
+        grey,
+        bg,
+    );
     ty += LINE;
-    draw_text(buf, buf_w, buf_h, tx, ty, "[R] Reset  [O] Open ROM", SCALE, grey, bg);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        tx,
+        ty,
+        "[R] Reset  [O] Open ROM",
+        SCALE,
+        grey,
+        bg,
+    );
     ty += LINE;
-    draw_text(buf, buf_w, buf_h, tx, ty, "[F1] Close this menu", SCALE, grey, bg);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        tx,
+        ty,
+        "[F1] Close this menu",
+        SCALE,
+        grey,
+        bg,
+    );
 }

@@ -32,6 +32,12 @@ const FRAME_PACING_TOLERANCE: Duration = Duration::from_micros(750);
 const FRAME_CATCHUP_LIMIT: u32 = 3;
 const AUDIO_BACKPRESSURE_FRAMES: usize = 3_072;
 
+enum QuicksaveLoadResult {
+    Loaded,
+    Missing,
+    Failed,
+}
+
 struct App {
     window: Option<Arc<Window>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
@@ -199,13 +205,13 @@ impl App {
         }
     }
 
-    fn try_load_quicksave_file(&mut self) -> bool {
+    fn try_load_quicksave_file(&mut self) -> QuicksaveLoadResult {
         let Some(state_path) = &self.state_path else {
-            return false;
+            return QuicksaveLoadResult::Missing;
         };
 
         let Ok(bytes) = fs::read(state_path) else {
-            return false;
+            return QuicksaveLoadResult::Missing;
         };
 
         let mut state = self.gba.clone();
@@ -215,11 +221,11 @@ impl App {
                 state_path.display(),
                 err
             );
-            return false;
+            return QuicksaveLoadResult::Failed;
         }
 
         self.quicksave_slot = Some(state);
-        true
+        QuicksaveLoadResult::Loaded
     }
 
     fn maybe_mark_cart_save_dirty(&mut self) {
@@ -663,7 +669,9 @@ impl App {
                 }
                 Key::Named(NamedKey::F8) => {
                     if self.quicksave_slot.is_none() {
-                        self.try_load_quicksave_file();
+                        if matches!(self.try_load_quicksave_file(), QuicksaveLoadResult::Failed) {
+                            return;
+                        }
                     }
                     if let Some(state) = &self.quicksave_slot {
                         self.gba = state.clone();

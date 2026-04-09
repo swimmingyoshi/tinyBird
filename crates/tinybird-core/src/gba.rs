@@ -4,6 +4,7 @@
 //! all the subsystems: CPU, memory, display, audio, input, etc.
 
 use crate::apu::Apu;
+use crate::bios::Bios;
 use crate::bus::{Bus, SimpleBus, DEBUG_CYCLE, DEBUG_PC};
 use crate::cpu::{Cpu, CpuMode};
 use crate::debug::config as debug_config;
@@ -24,8 +25,7 @@ pub const SCREEN_HEIGHT: u32 = 160;
 pub const CLOCK_SPEED: u32 = 16_777_216; // 16.78 MHz
 
 /// Cycles per video frame (228 scanlines * 1232 cycles)
-pub const CYCLES_PER_FRAME: u32 =
-    crate::ppu::TOTAL_SCANLINES * crate::ppu::CYCLES_PER_SCANLINE;
+pub const CYCLES_PER_FRAME: u32 = crate::ppu::TOTAL_SCANLINES * crate::ppu::CYCLES_PER_SCANLINE;
 
 /// Emulation speed
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +49,54 @@ pub enum GbaState {
     Stopped,
 }
 
+const SAVESTATE_MAGIC: &[u8; 4] = b"TBSV";
+const SAVESTATE_VERSION: u32 = 2;
+
+#[derive(Clone, Serialize, Deserialize)]
+struct SavestateV2 {
+    cpu: Cpu,
+    bus: SimpleBus,
+    ppu: Ppu,
+    apu: Apu,
+    last_dispstat_status_bits: u16,
+    last_vcount: u16,
+    last_dispcnt: u16,
+    last_dispstat_control: u16,
+    bios_intr_wait_mask: Option<u16>,
+    dma: DmaController,
+    timers: TimerController,
+    input: Input,
+    scheduler: Scheduler,
+    state: GbaState,
+    speed: EmulationSpeed,
+    audio_enabled: bool,
+    total_cycles: u64,
+    frame_count: u64,
+    use_bios: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacySavestateV1 {
+    cpu: Cpu,
+    bus: SimpleBus,
+    ppu: Ppu,
+    apu: Apu,
+    last_dispstat_status_bits: u16,
+    last_vcount: u16,
+    last_dispcnt: u16,
+    last_dispstat_control: u16,
+    dma: DmaController,
+    timers: TimerController,
+    input: Input,
+    scheduler: Scheduler,
+    state: GbaState,
+    speed: EmulationSpeed,
+    audio_enabled: bool,
+    total_cycles: u64,
+    frame_count: u64,
+    use_bios: bool,
+}
+
 /// Main GBA emulator struct
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Gba {
@@ -68,6 +116,8 @@ pub struct Gba {
     last_dispcnt: u16,
     /// Last software-controlled DISPSTAT bits synced into the PPU.
     last_dispstat_control: u16,
+    /// Active BIOS IntrWait/VBlankIntrWait mask while the HLE wait is pending.
+    bios_intr_wait_mask: Option<u16>,
     /// DMA controller
     pub dma: DmaController,
     /// Timer controller
@@ -88,6 +138,109 @@ pub struct Gba {
     pub frame_count: u64,
     /// Whether BIOS is being used
     pub use_bios: bool,
+}
+
+impl From<&Gba> for SavestateV2 {
+    fn from(gba: &Gba) -> Self {
+        Self {
+            cpu: gba.cpu.clone(),
+            bus: gba.bus.clone(),
+            ppu: gba.ppu.clone(),
+            apu: gba.apu.clone(),
+            last_dispstat_status_bits: gba.last_dispstat_status_bits,
+            last_vcount: gba.last_vcount,
+            last_dispcnt: gba.last_dispcnt,
+            last_dispstat_control: gba.last_dispstat_control,
+            bios_intr_wait_mask: gba.bios_intr_wait_mask,
+            dma: gba.dma.clone(),
+            timers: gba.timers.clone(),
+            input: gba.input.clone(),
+            scheduler: gba.scheduler.clone(),
+            state: gba.state,
+            speed: gba.speed,
+            audio_enabled: gba.audio_enabled,
+            total_cycles: gba.total_cycles,
+            frame_count: gba.frame_count,
+            use_bios: gba.use_bios,
+        }
+    }
+}
+
+impl From<SavestateV2> for Gba {
+    fn from(state: SavestateV2) -> Self {
+        Self {
+            cpu: state.cpu,
+            bus: state.bus,
+            ppu: state.ppu,
+            apu: state.apu,
+            last_dispstat_status_bits: state.last_dispstat_status_bits,
+            last_vcount: state.last_vcount,
+            last_dispcnt: state.last_dispcnt,
+            last_dispstat_control: state.last_dispstat_control,
+            bios_intr_wait_mask: state.bios_intr_wait_mask,
+            dma: state.dma,
+            timers: state.timers,
+            input: state.input,
+            scheduler: state.scheduler,
+            state: state.state,
+            speed: state.speed,
+            audio_enabled: state.audio_enabled,
+            total_cycles: state.total_cycles,
+            frame_count: state.frame_count,
+            use_bios: state.use_bios,
+        }
+    }
+}
+
+impl From<LegacySavestateV1> for Gba {
+    fn from(state: LegacySavestateV1) -> Self {
+        Self {
+            cpu: state.cpu,
+            bus: state.bus,
+            ppu: state.ppu,
+            apu: state.apu,
+            last_dispstat_status_bits: state.last_dispstat_status_bits,
+            last_vcount: state.last_vcount,
+            last_dispcnt: state.last_dispcnt,
+            last_dispstat_control: state.last_dispstat_control,
+            bios_intr_wait_mask: None,
+            dma: state.dma,
+            timers: state.timers,
+            input: state.input,
+            scheduler: state.scheduler,
+            state: state.state,
+            speed: state.speed,
+            audio_enabled: state.audio_enabled,
+            total_cycles: state.total_cycles,
+            frame_count: state.frame_count,
+            use_bios: state.use_bios,
+        }
+    }
+}
+
+impl From<&Gba> for LegacySavestateV1 {
+    fn from(gba: &Gba) -> Self {
+        Self {
+            cpu: gba.cpu.clone(),
+            bus: gba.bus.clone(),
+            ppu: gba.ppu.clone(),
+            apu: gba.apu.clone(),
+            last_dispstat_status_bits: gba.last_dispstat_status_bits,
+            last_vcount: gba.last_vcount,
+            last_dispcnt: gba.last_dispcnt,
+            last_dispstat_control: gba.last_dispstat_control,
+            dma: gba.dma.clone(),
+            timers: gba.timers.clone(),
+            input: gba.input.clone(),
+            scheduler: gba.scheduler.clone(),
+            state: gba.state,
+            speed: gba.speed,
+            audio_enabled: gba.audio_enabled,
+            total_cycles: gba.total_cycles,
+            frame_count: gba.frame_count,
+            use_bios: gba.use_bios,
+        }
+    }
 }
 
 impl Default for Gba {
@@ -113,6 +266,7 @@ impl Gba {
             last_vcount: u16::MAX,
             last_dispcnt: u16::MAX,
             last_dispstat_control: u16::MAX,
+            bios_intr_wait_mask: None,
             dma: DmaController::new(),
             timers: TimerController::new(),
             input: Input::new(),
@@ -158,6 +312,7 @@ impl Gba {
         self.last_vcount = u16::MAX;
         self.last_dispcnt = u16::MAX;
         self.last_dispstat_control = u16::MAX;
+        self.bios_intr_wait_mask = None;
 
         // Start the PPU one cycle ahead to avoid pathological CPU/PPU lockstep
         // in tight polling loops that sample IRQ flags at a fixed phase.
@@ -217,6 +372,7 @@ impl Gba {
         }
 
         let start_cycles = self.total_cycles;
+        self.apply_bios_intr_wait_gate();
 
         // Sync PPU runtime status to I/O (must be current for polling games).
         // Preserve writable DISPSTAT bits set by software (IRQ enables + VCOUNT compare).
@@ -245,6 +401,9 @@ impl Gba {
 
         let dbg = debug_config();
         let pc_before = self.cpu.fetch_addr();
+        let pending_intr_wait = self
+            .current_hle_swi_comment(pc_before)
+            .filter(|comment| matches!(comment, 0x04 | 0x05));
         // Only pay TLS write cost when at least one debug trace mode is active
         if dbg.trace_range.is_some() || dbg.watch_addr.is_some() || dbg.pc_trace {
             DEBUG_CYCLE.with(|c| c.set(self.total_cycles));
@@ -279,15 +438,26 @@ impl Gba {
         if !self.cpu.halted && self.bus.read_io_direct(0x301) == 0x00 {
             self.cpu.halted = true;
             self.bus.write_io_direct(0x301, 0xFF); // clear the request
+            self.bios_intr_wait_mask = pending_intr_wait
+                .map(|_| (self.cpu.registers.get_reg(1) & 0x3FFF) as u16)
+                .filter(|mask| *mask != 0);
         }
 
         // Wake from HALT: any pending interrupt (IE & IF) resumes the CPU,
         // regardless of IME or the I flag in CPSR.
         if self.cpu.halted {
-            let if_reg = self.bus.read_io_direct_u16(0x202);
-            let ie = self.bus.read_io_direct_u16(0x200);
-            if (ie & if_reg) != 0 {
-                self.cpu.halted = false;
+            let pending = self.pending_enabled_irq_bits();
+            if pending != 0 {
+                if let Some(mask) = self.bios_intr_wait_mask {
+                    if self.cpu.registers.mode() == CpuMode::IRQ {
+                        self.cpu.halted = false;
+                    } else if (pending & mask) != 0 {
+                        self.consume_bios_intr_wait(mask);
+                        self.cpu.halted = false;
+                    }
+                } else {
+                    self.cpu.halted = false;
+                }
             }
         }
         // Track PC region changes for debugging
@@ -305,7 +475,10 @@ impl Gba {
             let was_valid = is_valid_exec(pc_before);
             let is_valid = is_valid_exec(pc_after);
             if was_valid && !is_valid {
-                eprintln!("PC WENT INVALID: {:08x} -> {:08x} (cycle {})", pc_before, pc_after, self.total_cycles);
+                eprintln!(
+                    "PC WENT INVALID: {:08x} -> {:08x} (cycle {})",
+                    pc_before, pc_after, self.total_cycles
+                );
                 for r in 0..16 {
                     eprint!("  r{}={:08x}", r, self.cpu.registers.get_reg(r));
                 }
@@ -332,13 +505,21 @@ impl Gba {
             self.check_dma();
         }
 
-        // Step PPU (runs at same clock speed as CPU)
-        // Keep timing-critical LCD control state current every cycle so
-        // DISPSTAT/DISPCNT writes from IRQ callbacks are visible immediately,
-        // while leaving the heavier BG/window sync on scanline boundaries.
+        // Step PPU (runs at same clock speed as CPU).
+        // Sync display/register state after the CPU/DMA work for this instruction
+        // so mid-frame MMIO writes (like FireRed's WIN0 updates in the options
+        // menu) take effect on the very next pixels we render.
+        let prev_scanline = self.ppu.scanline;
         let prev_cycle = self.ppu.cycle;
-        self.sync_lcd_state_to_ppu();
-        let crossed_scanline_boundary = prev_cycle + cpu_cycles as u32 >= crate::ppu::CYCLES_PER_SCANLINE;
+        self.sync_ppu_control_regs_to_ppu();
+        let crosses_hblank_start = self.ppu.scanline < crate::ppu::VISIBLE_SCANLINES
+            && prev_cycle < crate::ppu::HBLANK_START
+            && prev_cycle + cpu_cycles as u32 >= crate::ppu::HBLANK_START;
+        if crosses_hblank_start {
+            self.sync_video_memory();
+        }
+        let crossed_scanline_boundary =
+            prev_cycle + cpu_cycles as u32 >= crate::ppu::CYCLES_PER_SCANLINE;
         let ppu_events = self.ppu.step_cycles(cpu_cycles as u32);
         if !ppu_events.is_empty() {
             let mut lcd_irq_mask = 0u16;
@@ -355,8 +536,10 @@ impl Gba {
             }
 
             if ppu_events.contains(crate::ppu::PpuEvent::HBlank) {
-                self.dma.on_hblank();
-                self.run_pending_dma_channels();
+                if prev_scanline < crate::ppu::VISIBLE_SCANLINES {
+                    self.dma.on_hblank();
+                    self.run_pending_dma_channels();
+                }
 
                 // Set IF bit 1 (HBlank request) when DISPSTAT bit 4 enables it.
                 let dispstat = self.bus.read_io_direct_u16(0x004);
@@ -380,8 +563,7 @@ impl Gba {
             }
 
             if lcd_irq_mask != 0 {
-                let if_reg = self.bus.read_io_direct_u16(0x202);
-                self.bus.write_io_direct_u16(0x202, if_reg | lcd_irq_mask);
+                self.request_irq(lcd_irq_mask);
                 let ime = self.bus.read_io_direct_u16(0x208);
                 let ie = self.bus.read_io_direct_u16(0x200);
                 if dbg.irq_debug {
@@ -401,7 +583,7 @@ impl Gba {
         }
         // Sync the rest of the PPU register set at the start of each scanline.
         if crossed_scanline_boundary {
-            self.sync_io_to_ppu();
+            self.sync_video_memory();
         }
 
         self.scheduler.advance(cpu_cycles);
@@ -476,12 +658,45 @@ impl Gba {
 
     /// Serialize the full emulator state into a savestate blob.
     pub fn save_state_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
-        bincode::serialize(self)
+        let payload = bincode::serialize(&SavestateV2::from(self))?;
+        let mut bytes = Vec::with_capacity(SAVESTATE_MAGIC.len() + 4 + payload.len());
+        bytes.extend_from_slice(SAVESTATE_MAGIC);
+        bytes.extend_from_slice(&SAVESTATE_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        Ok(bytes)
     }
 
     /// Restore a full emulator state from a savestate blob.
     pub fn load_state_bytes(&mut self, bytes: &[u8]) -> Result<(), bincode::Error> {
-        *self = bincode::deserialize(bytes)?;
+        if bytes.len() >= SAVESTATE_MAGIC.len() + 4
+            && &bytes[..SAVESTATE_MAGIC.len()] == SAVESTATE_MAGIC
+        {
+            let version_offset = SAVESTATE_MAGIC.len();
+            let version = u32::from_le_bytes(
+                bytes[version_offset..version_offset + 4]
+                    .try_into()
+                    .expect("savestate header slice has fixed length"),
+            );
+            return match version {
+                SAVESTATE_VERSION => {
+                    let state: SavestateV2 = bincode::deserialize(&bytes[version_offset + 4..])?;
+                    *self = state.into();
+                    Ok(())
+                }
+                _ => Err(Box::new(bincode::ErrorKind::Custom(format!(
+                    "unsupported savestate version {}",
+                    version
+                )))),
+            };
+        }
+
+        if let Ok(state) = bincode::deserialize::<SavestateV2>(bytes) {
+            *self = state.into();
+            return Ok(());
+        }
+
+        let legacy: LegacySavestateV1 = bincode::deserialize(bytes)?;
+        *self = legacy.into();
         Ok(())
     }
 
@@ -603,7 +818,8 @@ impl Gba {
         // Write enabled timer counters back to I/O
         for i in 0..4 {
             if self.timers.timers[i].is_enabled() {
-                self.bus.write_io_direct_u16(0x100 + i * 4, self.timers.timers[i].counter);
+                self.bus
+                    .write_io_direct_u16(0x100 + i * 4, self.timers.timers[i].counter);
             }
         }
 
@@ -625,8 +841,7 @@ impl Gba {
                 }
                 if overflowed[i] != 0 && self.timers.timers[i].irq_enabled() {
                     let bit = 1u16 << (3 + i);
-                    let if_reg = self.bus.read_io_direct_u16(0x202);
-                    self.bus.write_io_direct_u16(0x202, if_reg | bit);
+                    self.request_irq(bit);
                     if ime != 0 && (ie & bit) != 0 {
                         self.cpu.irq();
                     }
@@ -676,13 +891,11 @@ impl Gba {
             if self.dma.sound_fifo_target(channel) != Some(fifo) {
                 continue;
             }
-            if let Some((_, bytes, len, irq)) = self.dma.run_sound_fifo(channel, &mut self.bus)
-            {
+            if let Some((_, bytes, len, irq)) = self.dma.run_sound_fifo(channel, &mut self.bus) {
                 self.apu.fifo_write(fifo, &bytes[..len]);
                 if irq {
                     let bit = 1u16 << (8 + channel);
-                    let if_reg = self.bus.read_io_direct_u16(0x202);
-                    self.bus.write_io_direct_u16(0x202, if_reg | bit);
+                    self.request_irq(bit);
                 }
             }
         }
@@ -703,8 +916,7 @@ impl Gba {
 
             if irq {
                 let bit = 1u16 << (8 + channel);
-                let if_reg = self.bus.read_io_direct_u16(0x202);
-                self.bus.write_io_direct_u16(0x202, if_reg | bit);
+                self.request_irq(bit);
 
                 let ime = self.bus.read_io_direct_u16(0x208);
                 let ie = self.bus.read_io_direct_u16(0x200);
@@ -732,10 +944,19 @@ impl Gba {
 
         for (ch, &(sad, dad, cnt_l, cnt_h)) in DMA_OFFSETS.iter().enumerate() {
             let io_control = self.bus.read_io_direct_u16(cnt_h);
-            let was_enabled = self.dma.channels[ch].is_enabled();
+            let prev_control = self.dma.read_control(ch);
+            let was_enabled = (prev_control & 0x8000) != 0;
+            let io_enabled = (io_control & 0x8000) != 0;
+
+            if !io_enabled {
+                if was_enabled || prev_control != io_control || self.dma.channels[ch].pending {
+                    self.dma.write_control(ch, io_control);
+                }
+                continue;
+            }
 
             // Detect rising edge: I/O has enable set but DMA controller doesn't yet
-            if (io_control & 0x8000 != 0) && !was_enabled {
+            if !was_enabled {
                 let source = self.bus.read_io_direct_u16(sad) as u32
                     | ((self.bus.read_io_direct_u16(sad + 2) as u32) << 16);
                 let dest = self.bus.read_io_direct_u16(dad) as u32
@@ -745,8 +966,10 @@ impl Gba {
                 if dma_debug {
                     let bits = if io_control & 0x0400 != 0 { 32 } else { 16 };
                     let timing = (io_control >> 12) & 3;
-                    eprintln!("DMA{} enable: src={:08x} dst={:08x} count={} {}bit timing={} ctrl={:04x}",
-                        ch, source, dest, count, bits, timing, io_control);
+                    eprintln!(
+                        "DMA{} enable: src={:08x} dst={:08x} count={} {}bit timing={} ctrl={:04x}",
+                        ch, source, dest, count, bits, timing, io_control
+                    );
                 }
 
                 self.dma.write_source(ch, source);
@@ -758,6 +981,8 @@ impl Gba {
                 if self.dma.channels[ch].pending {
                     self.run_pending_dma_channels();
                 }
+            } else if prev_control != io_control {
+                self.dma.write_control(ch, io_control);
             }
         }
     }
@@ -788,8 +1013,8 @@ impl Gba {
         }
     }
 
-    /// Sync I/O registers from bus to PPU (lightweight, called per scanline)
-    fn sync_io_to_ppu(&mut self) {
+    /// Sync PPU control registers from bus to the render-side mirror.
+    fn sync_ppu_control_regs_to_ppu(&mut self) {
         self.sync_lcd_state_to_ppu();
 
         // BG0CNT-BG3CNT (0x04000008-0x0400000E)
@@ -850,9 +1075,104 @@ impl Gba {
         self.ppu.write_bldcnt(self.bus.read_io_direct_u16(0x050));
         self.ppu.write_bldalpha(self.bus.read_io_direct_u16(0x052));
         self.ppu.write_bldy(self.bus.read_io_direct_u16(0x054));
+    }
 
+    /// Sync I/O registers from bus to PPU.
+    fn sync_io_to_ppu(&mut self) {
+        self.sync_ppu_control_regs_to_ppu();
         // Sync VRAM, palette, and OAM from bus to PPU
         self.sync_video_memory();
+    }
+
+    fn pending_enabled_irq_bits(&self) -> u16 {
+        self.bus.read_io_direct_u16(0x200) & self.bus.read_io_direct_u16(0x202)
+    }
+
+    fn request_irq(&mut self, mask: u16) {
+        if mask == 0 {
+            return;
+        }
+
+        let if_reg = self.bus.read_io_direct_u16(0x202);
+        self.bus.write_io_direct_u16(0x202, if_reg | mask);
+
+        // BIOS IRQ code mirrors acknowledged requests here; keeping it current
+        // helps HLE waits and software that inspects the mirror.
+        let irq_flags = self.bus.read_u16(0x03007FF8);
+        self.bus.write_u16(0x03007FF8, irq_flags | mask);
+    }
+
+    fn clear_irq_bits(&mut self, mask: u16) {
+        if mask == 0 {
+            return;
+        }
+
+        let if_reg = self.bus.read_io_direct_u16(0x202);
+        self.bus.write_io_direct_u16(0x202, if_reg & !mask);
+
+        let irq_flags = self.bus.read_u16(0x03007FF8);
+        self.bus.write_u16(0x03007FF8, irq_flags & !mask);
+    }
+
+    fn consume_bios_intr_wait(&mut self, mask: u16) {
+        self.clear_irq_bits(mask);
+        self.bios_intr_wait_mask = None;
+    }
+
+    fn apply_bios_intr_wait_gate(&mut self) {
+        let Some(mask) = self.bios_intr_wait_mask else {
+            return;
+        };
+
+        // Let the user IRQ handler run to completion before deciding whether the
+        // BIOS wait should resume or re-halt.
+        if self.cpu.registers.mode() == CpuMode::IRQ {
+            self.cpu.halted = false;
+            return;
+        }
+
+        if (self.pending_enabled_irq_bits() & mask) != 0 {
+            self.consume_bios_intr_wait(mask);
+            self.cpu.halted = false;
+        } else {
+            self.cpu.halted = true;
+        }
+    }
+
+    fn current_hle_swi_comment(&self, pc: u32) -> Option<u8> {
+        if self.cpu.halted {
+            return None;
+        }
+
+        let has_real_bios = self.bus.read_u32(0x0000_0000) != 0xE12F_FF1E;
+
+        if self.cpu.is_thumb_mode() {
+            let opcode = self.bus.read_u16(pc);
+            if (opcode & 0xFF00) != 0xDF00 {
+                return None;
+            }
+
+            let comment = (opcode & 0x00FF) as u8;
+            if has_real_bios && !Bios::should_hle_with_real_bios(comment) {
+                None
+            } else {
+                Some(comment)
+            }
+        } else {
+            let opcode = self.bus.read_u32(pc);
+            if (opcode >> 24) != 0xEF {
+                return None;
+            }
+
+            let high = ((opcode >> 16) & 0xFF) as u8;
+            let low = (opcode & 0xFF) as u8;
+            let comment = if high != 0 { high } else { low };
+            if has_real_bios && !Bios::should_hle_with_real_bios(comment) {
+                None
+            } else {
+                Some(comment)
+            }
+        }
     }
 
     /// Sync VRAM, palette, and OAM from bus to PPU
@@ -978,6 +1298,177 @@ mod tests {
     }
 
     #[test]
+    fn test_window_register_updates_sync_during_visible_scanline() {
+        let mut gba = Gba::new();
+        gba.start();
+        gba.cpu.halted = true;
+        gba.ppu.scanline = 10;
+        gba.ppu.cycle = 100;
+
+        gba.bus.write_io_direct_u16(0x044, 0x3A4A);
+
+        gba.step();
+
+        assert_eq!(gba.ppu.windows[0].v_range.top, 0x3A);
+        assert_eq!(gba.ppu.windows[0].v_range.bottom, 0x4A);
+    }
+
+    #[test]
+    fn test_visible_scanline_syncs_bg_state_before_hblank_render() {
+        let mut gba = Gba::new();
+        gba.start();
+
+        gba.bus.write_io_direct_u16(0x000, 0x0100); // mode 0, BG0 on
+        gba.bus.write_io_direct_u16(0x008, 0x0100); // BG0 char base 0, screen base 1, priority 0
+
+        // BG palette entry 1 = bright red, backdrop entry 0 = black.
+        gba.bus.write_u16(0x0500_0000, 0x0000);
+        gba.bus.write_u16(0x0500_0002, 0x001F);
+
+        // Tile 0 filled with palette index 1 in 4bpp.
+        for offset in 0..32u32 {
+            gba.bus.write_u8(0x0600_0000 + offset, 0x11);
+        }
+        // Screen entry 0 points at tile 0.
+        gba.bus.write_u16(0x0600_0800, 0x0000);
+
+        gba.ppu.scanline = 0;
+        gba.ppu.cycle = crate::ppu::HBLANK_START - 1;
+
+        gba.step();
+
+        let pixel = gba.ppu.framebuffer.back_buffer_slice()[0].color;
+        assert_eq!(pixel, crate::ppu::Color::from_rgb555(0x001F));
+    }
+
+    #[test]
+    fn test_hblank_dma_does_not_run_during_vblank() {
+        let mut gba = Gba::new();
+        gba.start();
+        gba.cpu.halted = true;
+
+        gba.bus.write_u16(0x0200_0000, 0x2468);
+        gba.dma.write_source(0, 0x0200_0000);
+        gba.dma.write_dest(0, 0x0300_0000);
+        gba.dma.write_count(0, 1);
+        gba.dma.write_control(0, 0x8000 | 0x0200 | (2 << 12));
+
+        gba.ppu.scanline = crate::ppu::VISIBLE_SCANLINES;
+        gba.ppu.cycle = crate::ppu::HBLANK_START - 1;
+
+        gba.step();
+
+        assert_eq!(gba.read_u16(0x0300_0000), 0);
+
+        gba.ppu.scanline = 0;
+        gba.ppu.cycle = crate::ppu::HBLANK_START - 1;
+        gba.step();
+        assert_eq!(gba.read_u16(0x0300_0000), 0x2468);
+    }
+
+    #[test]
+    fn test_dma_disable_write_rearms_hblank_channel_with_new_source() {
+        let mut gba = Gba::new();
+
+        gba.bus.write_u16(0x0200_0000, 0x1111);
+        gba.bus.write_u16(0x0200_0002, 0x9ABC);
+        gba.bus.write_u16(0x0200_0100, 0x2222);
+
+        gba.bus.write_io_direct_u16(0x0B0, 0x0000);
+        gba.bus.write_io_direct_u16(0x0B2, 0x0200);
+        gba.bus.write_io_direct_u16(0x0B4, 0x0000);
+        gba.bus.write_io_direct_u16(0x0B6, 0x0300);
+        gba.bus.write_io_direct_u16(0x0B8, 0x0001);
+        gba.bus.write_io_direct_u16(0x0BA, 0x8200 | (2 << 12));
+        gba.check_dma();
+
+        gba.dma.on_hblank();
+        gba.run_pending_dma_channels();
+        assert_eq!(gba.read_u16(0x0300_0000), 0x1111);
+
+        gba.bus.write_io_direct_u16(0x0BA, 0x0000);
+        gba.check_dma();
+        assert!(!gba.dma.channels[0].is_enabled());
+        assert!(!gba.dma.channels[0].pending);
+
+        gba.bus.write_io_direct_u16(0x0B0, 0x0100);
+        gba.bus.write_io_direct_u16(0x0B2, 0x0200);
+        gba.bus.write_io_direct_u16(0x0B4, 0x0000);
+        gba.bus.write_io_direct_u16(0x0B6, 0x0300);
+        gba.bus.write_io_direct_u16(0x0B8, 0x0001);
+        gba.bus.write_io_direct_u16(0x0BA, 0x8200 | (2 << 12));
+        gba.check_dma();
+
+        gba.dma.on_hblank();
+        gba.run_pending_dma_channels();
+        assert_eq!(gba.read_u16(0x0300_0000), 0x2222);
+    }
+
+    #[test]
+    fn test_vblank_intr_wait_consumes_irq_when_woken_later() {
+        let mut gba = Gba::new();
+        gba.start();
+
+        gba.cpu.set_thumb_mode(false);
+        gba.cpu.pipeline.set_fetch_addr(0x0300_0000);
+        gba.cpu.registers.set_pc(0x0300_0000);
+
+        // SWI 0x05 (VBlankIntrWait), then ARM NOP.
+        gba.bus.write_u32(0x0300_0000, 0xEF00_0005);
+        gba.bus.write_u32(0x0300_0004, 0xE1A0_0000);
+
+        gba.bus.write_io_direct_u16(0x200, 0x0001); // IE: VBlank
+
+        gba.step();
+
+        assert!(gba.cpu.halted);
+        assert_eq!(gba.bios_intr_wait_mask, Some(0x0001));
+
+        gba.request_irq(0x0001);
+        assert_eq!(gba.bus.read_io_direct_u16(0x202) & 0x0001, 0x0001);
+        assert_eq!(gba.bus.read_u16(0x0300_7FF8) & 0x0001, 0x0001);
+
+        gba.step();
+
+        assert!(!gba.cpu.halted);
+        assert_eq!(gba.bios_intr_wait_mask, None);
+        assert_eq!(gba.bus.read_io_direct_u16(0x202) & 0x0001, 0);
+        assert_eq!(gba.bus.read_u16(0x0300_7FF8) & 0x0001, 0);
+        assert_eq!(gba.cpu.fetch_addr(), 0x0300_0008);
+    }
+
+    #[test]
+    fn test_intr_wait_ignores_unrelated_irq_bits() {
+        let mut gba = Gba::new();
+        gba.start();
+
+        gba.cpu.set_thumb_mode(false);
+        gba.cpu.pipeline.set_fetch_addr(0x0300_0000);
+        gba.cpu.registers.set_pc(0x0300_0000);
+        gba.cpu.registers.set_reg(0, 0);
+        gba.cpu.registers.set_reg(1, 0x0001); // Wait for VBlank only
+
+        // SWI 0x04 (IntrWait), then ARM NOP.
+        gba.bus.write_u32(0x0300_0000, 0xEF00_0004);
+        gba.bus.write_u32(0x0300_0004, 0xE1A0_0000);
+
+        gba.bus.write_io_direct_u16(0x200, 0x0009); // IE: VBlank + Timer0
+
+        gba.step();
+
+        assert!(gba.cpu.halted);
+        assert_eq!(gba.bios_intr_wait_mask, Some(0x0001));
+
+        gba.request_irq(0x0008); // Timer0 only
+        gba.step();
+
+        assert!(gba.cpu.halted);
+        assert_eq!(gba.bios_intr_wait_mask, Some(0x0001));
+        assert_eq!(gba.cpu.fetch_addr(), 0x0300_0004);
+        assert_eq!(gba.bus.read_io_direct_u16(0x202) & 0x0008, 0x0008);
+    }
+
+    #[test]
     fn test_sync_video_memory_invalidates_sprite_cache_when_oam_changes() {
         let mut gba = Gba::new();
         gba.start();
@@ -1068,11 +1559,34 @@ mod tests {
         let bytes = gba.save_state_bytes().expect("serialize savestate");
 
         let mut restored = Gba::new();
-        restored.load_state_bytes(&bytes).expect("deserialize savestate");
+        restored
+            .load_state_bytes(&bytes)
+            .expect("deserialize savestate");
 
         assert_eq!(restored.read_u32(0x0300_0000), 0x1234_5678);
         assert_eq!(restored.speed, EmulationSpeed::Turbo);
         assert!(!restored.audio_enabled);
+    }
+
+    #[test]
+    fn test_load_legacy_savestate_without_intr_wait_mask() {
+        let mut gba = Gba::new();
+        gba.write_u32(0x0300_0000, 0x89AB_CDEF);
+        gba.speed = EmulationSpeed::Limited(60);
+        gba.audio_enabled = false;
+
+        let bytes =
+            bincode::serialize(&LegacySavestateV1::from(&gba)).expect("serialize legacy savestate");
+
+        let mut restored = Gba::new();
+        restored
+            .load_state_bytes(&bytes)
+            .expect("deserialize legacy savestate");
+
+        assert_eq!(restored.read_u32(0x0300_0000), 0x89AB_CDEF);
+        assert_eq!(restored.speed, EmulationSpeed::Limited(60));
+        assert!(!restored.audio_enabled);
+        assert_eq!(restored.bios_intr_wait_mask, None);
     }
 }
 
@@ -1085,7 +1599,10 @@ mod headless_tests {
     fn test_run_frames_headless() {
         let rom = match std::fs::read("../../roms/PokemonFireRed.gba") {
             Ok(r) => r,
-            Err(_) => { println!("ROM not found, skipping"); return; }
+            Err(_) => {
+                println!("ROM not found, skipping");
+                return;
+            }
         };
         let mut gba = Gba::new();
         gba.load_rom(rom);
@@ -1106,7 +1623,10 @@ mod headless_tests {
             if pre_pc == 0x080008bc && loop_count < 3 {
                 let r4 = gba.cpu.registers.get_reg(4);
                 let val = gba.bus.read_u16(r4.wrapping_add(28));
-                eprintln!("LOOP iter {}: R4={:08x} [R4+28]={:04x}", loop_count, r4, val);
+                eprintln!(
+                    "LOOP iter {}: R4={:08x} [R4+28]={:04x}",
+                    loop_count, r4, val
+                );
                 loop_count += 1;
             }
             // Count VBlank IRQs by checking when we jump to 0x18
@@ -1142,6 +1662,10 @@ mod headless_tests {
             }
         }
         let elapsed = start.elapsed();
-        eprintln!("60 frames in {:.2}ms ({:.1} fps)", elapsed.as_millis(), 60000.0 / elapsed.as_millis() as f64);
+        eprintln!(
+            "60 frames in {:.2}ms ({:.1} fps)",
+            elapsed.as_millis(),
+            60000.0 / elapsed.as_millis() as f64
+        );
     }
 }

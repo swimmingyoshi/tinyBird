@@ -180,12 +180,13 @@ impl WindowH {
 
     /// Check if x coordinate is inside the window
     pub fn contains_x(&self, x: u16) -> bool {
-        if self.left < self.right {
-            x >= self.left as u16 && x < self.right as u16
-        } else {
-            // Wraps around
-            x >= self.left as u16 || x < self.right as u16
+        let left = (self.left as u16).min(240);
+        let mut right = (self.right as u16).min(240);
+        if left > right {
+            right = 240;
         }
+
+        left < right && x >= left && x < right
     }
 }
 
@@ -214,12 +215,13 @@ impl WindowV {
 
     /// Check if y coordinate is inside the window
     pub fn contains_y(&self, y: u16) -> bool {
-        if self.top < self.bottom {
-            y >= self.top as u16 && y < self.bottom as u16
-        } else {
-            // Wraps around
-            y >= self.top as u16 || y < self.bottom as u16
+        let top = (self.top as u16).min(160);
+        let mut bottom = (self.bottom as u16).min(160);
+        if top > bottom {
+            bottom = 160;
         }
+
+        top < bottom && y >= top && y < bottom
     }
 }
 
@@ -392,9 +394,7 @@ impl Effects {
         let eva = self.blend_alpha.alpha_a as u16;
         let evb = self.blend_alpha.alpha_b as u16;
 
-        let blend = |a: u8, b: u8| {
-            ((a as u16 * eva + b as u16 * evb) / 16).min(31) as u8
-        };
+        let blend = |a: u8, b: u8| ((a as u16 * eva + b as u16 * evb) / 16).min(31) as u8;
 
         Color::new(
             blend(first.r, second.r),
@@ -500,6 +500,21 @@ mod tests {
     }
 
     #[test]
+    fn test_window_h_equal_bounds_is_empty() {
+        let wh = WindowH::from_value(0x5050);
+        assert!(!wh.contains_x(0));
+        assert!(!wh.contains_x(79));
+    }
+
+    #[test]
+    fn test_window_h_invalid_range_clamps_to_right_edge() {
+        let wh = WindowH::from_value(0xC820); // left=200, right=32 -> right becomes 240
+        assert!(!wh.contains_x(199));
+        assert!(wh.contains_x(200));
+        assert!(wh.contains_x(239));
+    }
+
+    #[test]
     fn test_window_v() {
         let value = 0x00A0; // Top = 0, Bottom = 160
         let wv = WindowV::from_value(value);
@@ -507,6 +522,24 @@ mod tests {
         assert_eq!(wv.bottom, 160);
         assert!(wv.contains_y(80));
         assert!(!wv.contains_y(160));
+    }
+
+    #[test]
+    fn test_window_v_equal_bounds_is_empty() {
+        let wv = WindowV::from_value(0x2020);
+        assert!(!wv.contains_y(0));
+        assert!(!wv.contains_y(31));
+    }
+
+    #[test]
+    fn test_window_v_invalid_range_clamps_to_bottom_edge() {
+        let wv = WindowV::from_value(0xA020); // top=160, bottom=32 -> bottom becomes 160
+        assert!(!wv.contains_y(159));
+
+        let wv = WindowV::from_value(0x9620); // top=150, bottom=32 -> bottom becomes 160
+        assert!(!wv.contains_y(149));
+        assert!(wv.contains_y(150));
+        assert!(wv.contains_y(159));
     }
 
     #[test]

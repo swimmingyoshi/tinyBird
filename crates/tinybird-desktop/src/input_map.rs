@@ -46,7 +46,10 @@ pub fn map_gamepad_button(button: GamepadButton) -> Option<GbaButton> {
 
 /// Return the stick axes we treat as the primary directional input.
 pub fn is_direction_axis(axis: Axis) -> bool {
-    matches!(axis, Axis::LeftStickX | Axis::LeftStickY | Axis::DPadX | Axis::DPadY)
+    matches!(
+        axis,
+        Axis::LeftStickX | Axis::LeftStickY | Axis::DPadX | Axis::DPadY
+    )
 }
 
 /// Convert stick and d-pad axes into directional button presses.
@@ -71,5 +74,9 @@ pub fn buttons_from_axes(left_x: f32, left_y: f32, dpad_x: f32, dpad_y: f32) -> 
 }
 
 fn strongest_axis(a: f32, b: f32) -> f32 {
-    if a.abs() >= b.abs() { a } else { b }
+    if a.abs() >= b.abs() {
+        a
+    } else {
+        b
+    }
 }

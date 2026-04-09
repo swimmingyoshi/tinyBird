@@ -188,11 +188,16 @@ impl DmaController {
     /// channel is marked as pending.
     pub fn write_control(&mut self, channel: usize, value: u16) {
         let was_enabled = self.channels[channel].is_enabled();
-        self.channels[channel].control = value;
+        let ch = &mut self.channels[channel];
+        ch.control = value;
+
+        if value & DMA_ENABLE == 0 {
+            ch.pending = false;
+            return;
+        }
 
         // Rising edge of enable bit: latch registers
         if !was_enabled && (value & DMA_ENABLE != 0) {
-            let ch = &mut self.channels[channel];
             ch.internal_source = ch.source;
             ch.internal_dest = ch.dest;
             ch.internal_count = ch.count;
@@ -223,16 +228,16 @@ impl DmaController {
         };
 
         let src_delta: i32 = match ch.src_addr_ctrl() {
-            0 => transfer_size as i32,  // Increment
+            0 => transfer_size as i32,    // Increment
             1 => -(transfer_size as i32), // Decrement
-            2 => 0,                      // Fixed
-            _ => 0,                      // Prohibited (treat as fixed)
+            2 => 0,                       // Fixed
+            _ => 0,                       // Prohibited (treat as fixed)
         };
 
         let dest_delta: i32 = match ch.dest_addr_ctrl() {
-            0 | 3 => transfer_size as i32,  // Increment or Increment/Reload
-            1 => -(transfer_size as i32),     // Decrement
-            2 => 0,                           // Fixed
+            0 | 3 => transfer_size as i32, // Increment or Increment/Reload
+            1 => -(transfer_size as i32),  // Decrement
+            2 => 0,                        // Fixed
             _ => 0,
         };
 
@@ -308,10 +313,10 @@ impl DmaController {
         };
 
         let src_delta: i32 = match ch.src_addr_ctrl() {
-            0 => 4,   // Increment
-            1 => -4,  // Decrement
-            2 => 0,   // Fixed
-            _ => 0,   // Prohibited -> treat as fixed
+            0 => 4,  // Increment
+            1 => -4, // Decrement
+            2 => 0,  // Fixed
+            _ => 0,  // Prohibited -> treat as fixed
         };
 
         let words = if ch.internal_count == 0 {
@@ -527,5 +532,37 @@ mod tests {
 
         // Channel 1 should have higher priority than 2
         assert_eq!(dma.check_pending(), Some(1));
+    }
+
+    #[test]
+    fn test_dma_disable_clears_pending_and_reenable_relatches_registers() {
+        let mut dma = DmaController::new();
+        let mut bus = SimpleBus::new(None);
+
+        bus.write_u16(0x0200_0000, 0x1111);
+        bus.write_u16(0x0200_0100, 0x2222);
+
+        let hblank_repeat = DMA_ENABLE | REPEAT_BIT | (TIMING_HBLANK << START_TIMING_SHIFT);
+
+        dma.write_source(0, 0x0200_0000);
+        dma.write_dest(0, 0x0300_0000);
+        dma.write_count(0, 1);
+        dma.write_control(0, hblank_repeat);
+        dma.on_hblank();
+        assert!(dma.channels[0].pending);
+
+        dma.write_control(0, 0);
+        assert!(!dma.channels[0].is_enabled());
+        assert!(!dma.channels[0].pending);
+
+        dma.write_source(0, 0x0200_0100);
+        dma.write_dest(0, 0x0300_0000);
+        dma.write_count(0, 1);
+        dma.write_control(0, hblank_repeat);
+        dma.on_hblank();
+        let irq = dma.run_channel(0, &mut bus);
+
+        assert!(!irq);
+        assert_eq!(bus.read_u16(0x0300_0000), 0x2222);
     }
 }
