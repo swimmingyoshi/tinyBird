@@ -6,7 +6,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use tinybird_core::apu::SAMPLE_RATE as DEFAULT_GBA_SAMPLE_RATE;
 
-const MAX_BUFFERED_FRAMES: usize = 262_144;
+// Keep the host queue intentionally small so video doesn't feel detached from
+// audio if the emulator briefly runs ahead of real time.
+const MAX_BUFFERED_FRAMES: usize = 4_096;
 const MIN_PRIME_FRAMES: usize = 512;
 
 struct SharedAudioState {
@@ -81,14 +83,11 @@ impl SharedAudioState {
         let denom = output_rate.max(1) as i64;
         let frac = self.resample_phase.min(output_rate) as i64;
         let inv_frac = denom - frac;
-        let left =
-            ((self.current_left as i64 * inv_frac) + (self.next_left as i64 * frac)) / denom;
+        let left = ((self.current_left as i64 * inv_frac) + (self.next_left as i64 * frac)) / denom;
         let right =
             ((self.current_right as i64 * inv_frac) + (self.next_right as i64 * frac)) / denom;
 
-        self.resample_phase = self
-            .resample_phase
-            .saturating_add(self.source_rate.max(1));
+        self.resample_phase = self.resample_phase.saturating_add(self.source_rate.max(1));
         while self.resample_phase >= output_rate {
             self.resample_phase -= output_rate;
             self.current_left = self.next_left;
@@ -150,19 +149,25 @@ impl AudioHandler {
         let stream = match config.sample_format() {
             SampleFormat::F32 => device.build_output_stream(
                 &stream_config,
-                move |data: &mut [f32], _| write_output_f32(data, channels, output_rate, &callback_state),
+                move |data: &mut [f32], _| {
+                    write_output_f32(data, channels, output_rate, &callback_state)
+                },
                 |err| eprintln!("Audio stream error: {}", err),
                 None,
             )?,
             SampleFormat::I16 => device.build_output_stream(
                 &stream_config,
-                move |data: &mut [i16], _| write_output_i16(data, channels, output_rate, &callback_state),
+                move |data: &mut [i16], _| {
+                    write_output_i16(data, channels, output_rate, &callback_state)
+                },
                 |err| eprintln!("Audio stream error: {}", err),
                 None,
             )?,
             SampleFormat::U16 => device.build_output_stream(
                 &stream_config,
-                move |data: &mut [u16], _| write_output_u16(data, channels, output_rate, &callback_state),
+                move |data: &mut [u16], _| {
+                    write_output_u16(data, channels, output_rate, &callback_state)
+                },
                 |err| eprintln!("Audio stream error: {}", err),
                 None,
             )?,
@@ -181,6 +186,28 @@ impl AudioHandler {
     pub fn set_volume(&self, volume: f32) {
         if let Ok(mut state) = self.shared_state.lock() {
             state.volume = volume.clamp(0.0, 1.0);
+        }
+    }
+
+    /// Return the number of stereo frames currently queued for playback.
+    pub fn buffered_frames(&self) -> usize {
+        self.shared_state
+            .lock()
+            .map(|state| state.samples.len() / 2)
+            .unwrap_or(0)
+    }
+
+    /// Drop any queued samples and reset the resampler state.
+    pub fn clear(&self) {
+        if let Ok(mut state) = self.shared_state.lock() {
+            state.samples.clear();
+            state.current_left = 0;
+            state.current_right = 0;
+            state.next_left = 0;
+            state.next_right = 0;
+            state.resample_phase = 0;
+            state.primed = false;
+            state.starved = false;
         }
     }
 

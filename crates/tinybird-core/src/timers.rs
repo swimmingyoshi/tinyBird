@@ -86,11 +86,11 @@ impl TimerController {
 
     /// Advance all timers by the given number of CPU cycles.
     ///
-    /// Returns an array indicating which timers overflowed (for IRQ generation).
+    /// Returns how many times each timer overflowed (for IRQ generation/cascade).
     /// Timer 0 cannot be in cascade mode. Cascade timers increment when the
     /// previous timer overflows rather than from the prescaler.
-    pub fn tick(&mut self, cycles: u32) -> [bool; 4] {
-        let mut overflowed = [false; 4];
+    pub fn tick(&mut self, cycles: u32) -> [u32; 4] {
+        let mut overflow_counts = [0; 4];
 
         for i in 0..4 {
             if !self.timers[i].is_enabled() {
@@ -99,14 +99,9 @@ impl TimerController {
 
             // Cascade timers are driven by the previous timer's overflow
             if self.timers[i].is_cascade() && i > 0 {
-                if overflowed[i - 1] {
-                    let (new_counter, did_overflow) = self.timers[i].counter.overflowing_add(1);
-                    if did_overflow {
-                        overflowed[i] = true;
-                        self.timers[i].counter = self.timers[i].reload;
-                    } else {
-                        self.timers[i].counter = new_counter;
-                    }
+                let increments = overflow_counts[i - 1];
+                if increments != 0 {
+                    overflow_counts[i] = Self::apply_increments(&mut self.timers[i], increments);
                 }
                 continue;
             }
@@ -114,21 +109,38 @@ impl TimerController {
             // Normal (prescaler-driven) timer
             let prescaler = self.timers[i].prescaler();
             self.timers[i].prescaler_counter += cycles;
+            let increments = self.timers[i].prescaler_counter / prescaler;
+            self.timers[i].prescaler_counter %= prescaler;
 
-            while self.timers[i].prescaler_counter >= prescaler {
-                self.timers[i].prescaler_counter -= prescaler;
-
-                let (new_counter, did_overflow) = self.timers[i].counter.overflowing_add(1);
-                if did_overflow {
-                    overflowed[i] = true;
-                    self.timers[i].counter = self.timers[i].reload;
-                } else {
-                    self.timers[i].counter = new_counter;
-                }
+            if increments != 0 {
+                overflow_counts[i] = Self::apply_increments(&mut self.timers[i], increments);
             }
         }
 
-        overflowed
+        overflow_counts
+    }
+
+    fn apply_increments(timer: &mut Timer, increments: u32) -> u32 {
+        if increments == 0 {
+            return 0;
+        }
+
+        let counter = timer.counter as u32;
+        let reload = timer.reload as u32;
+        let first_span = 0x1_0000 - counter;
+
+        if increments < first_span {
+            timer.counter = counter.wrapping_add(increments) as u16;
+            return 0;
+        }
+
+        let period = 0x1_0000 - reload;
+        let remaining = increments - first_span;
+        let additional_overflows = remaining / period;
+        let leftover = remaining % period;
+        timer.counter = reload.wrapping_add(leftover) as u16;
+
+        1 + additional_overflows
     }
 
     /// Read the current counter value for a timer
@@ -196,11 +208,11 @@ mod tests {
 
         // Counter starts at 0xFFFC, needs 4 ticks to overflow
         let ov = tc.tick(3);
-        assert!(!ov[0]);
+        assert_eq!(ov[0], 0);
         assert_eq!(tc.read_counter(0), 0xFFFF);
 
         let ov = tc.tick(1);
-        assert!(ov[0]);
+        assert_eq!(ov[0], 1);
         // After overflow, counter reloads to 0xFFFC
         assert_eq!(tc.read_counter(0), 0xFFFC);
     }
@@ -217,12 +229,12 @@ mod tests {
 
         // 63 cycles should not overflow yet
         let ov = tc.tick(63);
-        assert!(!ov[0]);
+        assert_eq!(ov[0], 0);
         assert_eq!(tc.read_counter(0), 0xFFFF);
 
         // 1 more cycle = 64 total, counter increments and overflows
         let ov = tc.tick(1);
-        assert!(ov[0]);
+        assert_eq!(ov[0], 1);
         assert_eq!(tc.read_counter(0), 0xFFFF); // reloaded
     }
 
@@ -240,22 +252,22 @@ mod tests {
 
         // Timer 0 needs 2 ticks to overflow
         let ov = tc.tick(1);
-        assert!(!ov[0]);
-        assert!(!ov[1]);
+        assert_eq!(ov[0], 0);
+        assert_eq!(ov[1], 0);
         assert_eq!(tc.read_counter(0), 0xFFFF);
         assert_eq!(tc.read_counter(1), 0xFFFE);
 
         // Timer 0 overflows, timer 1 increments
         let ov = tc.tick(1);
-        assert!(ov[0]);
-        assert!(!ov[1]);
+        assert_eq!(ov[0], 1);
+        assert_eq!(ov[1], 0);
         assert_eq!(tc.read_counter(0), 0xFFFE); // reloaded
         assert_eq!(tc.read_counter(1), 0xFFFF);
 
         // Timer 0 overflows again, timer 1 overflows too
         let ov = tc.tick(2);
-        assert!(ov[0]);
-        assert!(ov[1]);
+        assert_eq!(ov[0], 1);
+        assert_eq!(ov[1], 1);
         assert_eq!(tc.read_counter(1), 0xFFFE); // reloaded
     }
 
@@ -275,7 +287,7 @@ mod tests {
         tc.timers[0].counter = 0xFFFF;
 
         let ov = tc.tick(100);
-        assert!(!ov[0]);
+        assert_eq!(ov[0], 0);
         assert_eq!(tc.read_counter(0), 0xFFFF);
     }
 }

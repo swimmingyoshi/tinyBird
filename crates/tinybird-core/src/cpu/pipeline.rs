@@ -258,11 +258,11 @@ impl Pipeline {
 
         let instruction = if self.thumb_mode {
             // Thumb instructions are 16-bit aligned
-            let opcode = bus.read_u16(addr & !1);
+            let opcode = bus.read_opcode_u16(addr & !1);
             Instruction::thumb(opcode)
         } else {
             // ARM instructions are 32-bit aligned
-            let opcode = bus.read_u32(addr & !3);
+            let opcode = bus.read_opcode_u32(addr & !3);
             Instruction::arm(opcode)
         };
 

@@ -351,49 +351,56 @@ impl Ppu {
 
     /// Step the PPU by one cycle
     pub fn step(&mut self) -> PpuEvents {
-        self.cycle += 1;
+        self.step_cycles(1)
+    }
+
+    /// Step the PPU by multiple cycles, stopping only at timing boundaries.
+    pub fn step_cycles(&mut self, mut cycles: u32) -> PpuEvents {
         let mut events = PpuEvents::default();
 
-        // Check for HBlank start
-        if self.cycle == HBLANK_START {
-            self.display_status.hblank = true;
-
-            // Render the current scanline
-            if self.scanline < VISIBLE_SCANLINES {
-                self.render_scanline();
-            }
-
-            // Always signal HBlank; gba.rs checks DISPSTAT to decide whether to fire IRQ.
-            events.insert(PpuEvent::HBlank);
-        }
-
-        // Check for HBlank end / HDraw start
-        if self.cycle >= CYCLES_PER_SCANLINE {
-            self.cycle = 0;
-            self.display_status.hblank = false;
-            self.scanline += 1;
-
-            // VBlank start can coincide with VCounter compare on line 160.
-            if self.scanline == VBLANK_START {
-                self.display_status.vblank = true;
-                events.insert(PpuEvent::VBlank);
-            }
-
-            // Frame complete can coincide with VCounter compare on line 0.
-            if self.scanline >= TOTAL_SCANLINES {
-                self.scanline = 0;
-                self.display_status.vblank = false;
-                self.framebuffer.swap_buffers();
-                events.insert(PpuEvent::FrameComplete);
-            }
-
-            // V-Counter compare is evaluated after the scanline transition so line 0
-            // and line 160 matches are visible even when they share a boundary event.
-            if self.scanline == self.display_status.vcounter_compare as u32 {
-                self.display_status.vcounter = true;
-                events.insert(PpuEvent::VCounter);
+        while cycles != 0 {
+            let boundary = if self.cycle < HBLANK_START {
+                HBLANK_START
             } else {
-                self.display_status.vcounter = false;
+                CYCLES_PER_SCANLINE
+            };
+            let advance = (boundary - self.cycle).min(cycles);
+            self.cycle += advance;
+            cycles -= advance;
+
+            if self.cycle == HBLANK_START {
+                self.display_status.hblank = true;
+
+                if self.scanline < VISIBLE_SCANLINES {
+                    self.render_scanline();
+                }
+
+                events.insert(PpuEvent::HBlank);
+            }
+
+            if self.cycle >= CYCLES_PER_SCANLINE {
+                self.cycle = 0;
+                self.display_status.hblank = false;
+                self.scanline += 1;
+
+                if self.scanline == VBLANK_START {
+                    self.display_status.vblank = true;
+                    events.insert(PpuEvent::VBlank);
+                }
+
+                if self.scanline >= TOTAL_SCANLINES {
+                    self.scanline = 0;
+                    self.display_status.vblank = false;
+                    self.framebuffer.swap_buffers();
+                    events.insert(PpuEvent::FrameComplete);
+                }
+
+                if self.scanline == self.display_status.vcounter_compare as u32 {
+                    self.display_status.vcounter = true;
+                    events.insert(PpuEvent::VCounter);
+                } else {
+                    self.display_status.vcounter = false;
+                }
             }
         }
 
@@ -851,6 +858,22 @@ mod tests {
         let event = ppu.step();
         assert!(event.contains(PpuEvent::HBlank));
         assert!(ppu.display_status.hblank);
+    }
+
+    #[test]
+    fn test_ppu_step_cycles_crosses_multiple_boundaries() {
+        let mut ppu = Ppu::new();
+        ppu.scanline = VBLANK_START - 1;
+        ppu.cycle = HBLANK_START - 2;
+        ppu.display_status.vcounter_compare = VBLANK_START as u8;
+
+        let events = ppu.step_cycles((CYCLES_PER_SCANLINE - HBLANK_START) + 2);
+
+        assert!(events.contains(PpuEvent::HBlank));
+        assert!(events.contains(PpuEvent::VBlank));
+        assert!(events.contains(PpuEvent::VCounter));
+        assert_eq!(ppu.scanline, VBLANK_START);
+        assert_eq!(ppu.cycle, 0);
     }
 
     #[test]
