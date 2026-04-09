@@ -3,7 +3,7 @@
 //! This module provides the top-level GBA emulator structure that ties together
 //! all the subsystems: CPU, memory, display, audio, input, etc.
 
-use crate::apu::Apu;
+use crate::apu::{Apu, LegacyApuV2};
 use crate::bios::Bios;
 use crate::bus::{Bus, SimpleBus, DEBUG_CYCLE, DEBUG_PC};
 use crate::cpu::{Cpu, CpuMode};
@@ -50,10 +50,10 @@ pub enum GbaState {
 }
 
 const SAVESTATE_MAGIC: &[u8; 4] = b"TBSV";
-const SAVESTATE_VERSION: u32 = 2;
+const SAVESTATE_VERSION: u32 = 3;
 
 #[derive(Clone, Serialize, Deserialize)]
-struct SavestateV2 {
+struct SavestateV3 {
     cpu: Cpu,
     bus: SimpleBus,
     ppu: Ppu,
@@ -76,11 +76,34 @@ struct SavestateV2 {
 }
 
 #[derive(Serialize, Deserialize)]
+struct LegacySavestateV2 {
+    cpu: Cpu,
+    bus: SimpleBus,
+    ppu: Ppu,
+    apu: LegacyApuV2,
+    last_dispstat_status_bits: u16,
+    last_vcount: u16,
+    last_dispcnt: u16,
+    last_dispstat_control: u16,
+    bios_intr_wait_mask: Option<u16>,
+    dma: DmaController,
+    timers: TimerController,
+    input: Input,
+    scheduler: Scheduler,
+    state: GbaState,
+    speed: EmulationSpeed,
+    audio_enabled: bool,
+    total_cycles: u64,
+    frame_count: u64,
+    use_bios: bool,
+}
+
+#[derive(Serialize, Deserialize)]
 struct LegacySavestateV1 {
     cpu: Cpu,
     bus: SimpleBus,
     ppu: Ppu,
-    apu: Apu,
+    apu: LegacyApuV2,
     last_dispstat_status_bits: u16,
     last_vcount: u16,
     last_dispcnt: u16,
@@ -140,7 +163,7 @@ pub struct Gba {
     pub use_bios: bool,
 }
 
-impl From<&Gba> for SavestateV2 {
+impl From<&Gba> for SavestateV3 {
     fn from(gba: &Gba) -> Self {
         Self {
             cpu: gba.cpu.clone(),
@@ -166,8 +189,8 @@ impl From<&Gba> for SavestateV2 {
     }
 }
 
-impl From<SavestateV2> for Gba {
-    fn from(state: SavestateV2) -> Self {
+impl From<SavestateV3> for Gba {
+    fn from(state: SavestateV3) -> Self {
         Self {
             cpu: state.cpu,
             bus: state.bus,
@@ -192,13 +215,90 @@ impl From<SavestateV2> for Gba {
     }
 }
 
+impl From<LegacySavestateV2> for Gba {
+    fn from(state: LegacySavestateV2) -> Self {
+        Self {
+            cpu: state.cpu,
+            bus: state.bus,
+            ppu: state.ppu,
+            apu: state.apu.into(),
+            last_dispstat_status_bits: state.last_dispstat_status_bits,
+            last_vcount: state.last_vcount,
+            last_dispcnt: state.last_dispcnt,
+            last_dispstat_control: state.last_dispstat_control,
+            bios_intr_wait_mask: state.bios_intr_wait_mask,
+            dma: state.dma,
+            timers: state.timers,
+            input: state.input,
+            scheduler: state.scheduler,
+            state: state.state,
+            speed: state.speed,
+            audio_enabled: state.audio_enabled,
+            total_cycles: state.total_cycles,
+            frame_count: state.frame_count,
+            use_bios: state.use_bios,
+        }
+    }
+}
+
+impl From<&Gba> for LegacySavestateV2 {
+    fn from(gba: &Gba) -> Self {
+        Self {
+            cpu: gba.cpu.clone(),
+            bus: gba.bus.clone(),
+            ppu: gba.ppu.clone(),
+            apu: LegacyApuV2::from(&gba.apu),
+            last_dispstat_status_bits: gba.last_dispstat_status_bits,
+            last_vcount: gba.last_vcount,
+            last_dispcnt: gba.last_dispcnt,
+            last_dispstat_control: gba.last_dispstat_control,
+            bios_intr_wait_mask: gba.bios_intr_wait_mask,
+            dma: gba.dma.clone(),
+            timers: gba.timers.clone(),
+            input: gba.input.clone(),
+            scheduler: gba.scheduler.clone(),
+            state: gba.state,
+            speed: gba.speed,
+            audio_enabled: gba.audio_enabled,
+            total_cycles: gba.total_cycles,
+            frame_count: gba.frame_count,
+            use_bios: gba.use_bios,
+        }
+    }
+}
+
+impl From<&Gba> for LegacySavestateV1 {
+    fn from(gba: &Gba) -> Self {
+        Self {
+            cpu: gba.cpu.clone(),
+            bus: gba.bus.clone(),
+            ppu: gba.ppu.clone(),
+            apu: LegacyApuV2::from(&gba.apu),
+            last_dispstat_status_bits: gba.last_dispstat_status_bits,
+            last_vcount: gba.last_vcount,
+            last_dispcnt: gba.last_dispcnt,
+            last_dispstat_control: gba.last_dispstat_control,
+            dma: gba.dma.clone(),
+            timers: gba.timers.clone(),
+            input: gba.input.clone(),
+            scheduler: gba.scheduler.clone(),
+            state: gba.state,
+            speed: gba.speed,
+            audio_enabled: gba.audio_enabled,
+            total_cycles: gba.total_cycles,
+            frame_count: gba.frame_count,
+            use_bios: gba.use_bios,
+        }
+    }
+}
+
 impl From<LegacySavestateV1> for Gba {
     fn from(state: LegacySavestateV1) -> Self {
         Self {
             cpu: state.cpu,
             bus: state.bus,
             ppu: state.ppu,
-            apu: state.apu,
+            apu: state.apu.into(),
             last_dispstat_status_bits: state.last_dispstat_status_bits,
             last_vcount: state.last_vcount,
             last_dispcnt: state.last_dispcnt,
@@ -214,31 +314,6 @@ impl From<LegacySavestateV1> for Gba {
             total_cycles: state.total_cycles,
             frame_count: state.frame_count,
             use_bios: state.use_bios,
-        }
-    }
-}
-
-impl From<&Gba> for LegacySavestateV1 {
-    fn from(gba: &Gba) -> Self {
-        Self {
-            cpu: gba.cpu.clone(),
-            bus: gba.bus.clone(),
-            ppu: gba.ppu.clone(),
-            apu: gba.apu.clone(),
-            last_dispstat_status_bits: gba.last_dispstat_status_bits,
-            last_vcount: gba.last_vcount,
-            last_dispcnt: gba.last_dispcnt,
-            last_dispstat_control: gba.last_dispstat_control,
-            dma: gba.dma.clone(),
-            timers: gba.timers.clone(),
-            input: gba.input.clone(),
-            scheduler: gba.scheduler.clone(),
-            state: gba.state,
-            speed: gba.speed,
-            audio_enabled: gba.audio_enabled,
-            total_cycles: gba.total_cycles,
-            frame_count: gba.frame_count,
-            use_bios: gba.use_bios,
         }
     }
 }
@@ -658,7 +733,7 @@ impl Gba {
 
     /// Serialize the full emulator state into a savestate blob.
     pub fn save_state_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
-        let payload = bincode::serialize(&SavestateV2::from(self))?;
+        let payload = bincode::serialize(&SavestateV3::from(self))?;
         let mut bytes = Vec::with_capacity(SAVESTATE_MAGIC.len() + 4 + payload.len());
         bytes.extend_from_slice(SAVESTATE_MAGIC);
         bytes.extend_from_slice(&SAVESTATE_VERSION.to_le_bytes());
@@ -678,8 +753,14 @@ impl Gba {
                     .expect("savestate header slice has fixed length"),
             );
             return match version {
-                SAVESTATE_VERSION => {
-                    let state: SavestateV2 = bincode::deserialize(&bytes[version_offset + 4..])?;
+                3 => {
+                    let state: SavestateV3 = bincode::deserialize(&bytes[version_offset + 4..])?;
+                    *self = state.into();
+                    Ok(())
+                }
+                2 => {
+                    let state: LegacySavestateV2 =
+                        bincode::deserialize(&bytes[version_offset + 4..])?;
                     *self = state.into();
                     Ok(())
                 }
@@ -690,7 +771,12 @@ impl Gba {
             };
         }
 
-        if let Ok(state) = bincode::deserialize::<SavestateV2>(bytes) {
+        if let Ok(state) = bincode::deserialize::<SavestateV3>(bytes) {
+            *self = state.into();
+            return Ok(());
+        }
+
+        if let Ok(state) = bincode::deserialize::<LegacySavestateV2>(bytes) {
             *self = state.into();
             return Ok(());
         }
@@ -1555,6 +1641,9 @@ mod tests {
         gba.write_u32(0x0300_0000, 0x1234_5678);
         gba.speed = EmulationSpeed::Turbo;
         gba.audio_enabled = false;
+        gba.apu.wave.two_banks = true;
+        gba.apu.wave.bank_select = 1;
+        gba.apu.wave.wave_ram[16] = 0xAB;
 
         let bytes = gba.save_state_bytes().expect("serialize savestate");
 
@@ -1566,6 +1655,9 @@ mod tests {
         assert_eq!(restored.read_u32(0x0300_0000), 0x1234_5678);
         assert_eq!(restored.speed, EmulationSpeed::Turbo);
         assert!(!restored.audio_enabled);
+        assert!(restored.apu.wave.two_banks);
+        assert_eq!(restored.apu.wave.bank_select, 1);
+        assert_eq!(restored.apu.wave.wave_ram[16], 0xAB);
     }
 
     #[test]
@@ -1587,6 +1679,33 @@ mod tests {
         assert_eq!(restored.speed, EmulationSpeed::Limited(60));
         assert!(!restored.audio_enabled);
         assert_eq!(restored.bios_intr_wait_mask, None);
+    }
+
+    #[test]
+    fn test_load_v2_savestate_with_legacy_apu_layout() {
+        let mut gba = Gba::new();
+        gba.write_u32(0x0300_0000, 0x1357_9BDF);
+        gba.bios_intr_wait_mask = Some(0x0001);
+        gba.apu.wave.wave_ram[0] = 0xCD;
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(SAVESTATE_MAGIC);
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend(
+            bincode::serialize(&LegacySavestateV2::from(&gba))
+                .expect("serialize legacy v2 savestate"),
+        );
+
+        let mut restored = Gba::new();
+        restored
+            .load_state_bytes(&bytes)
+            .expect("deserialize legacy v2 savestate");
+
+        assert_eq!(restored.read_u32(0x0300_0000), 0x1357_9BDF);
+        assert_eq!(restored.bios_intr_wait_mask, Some(0x0001));
+        assert_eq!(restored.apu.wave.wave_ram[0], 0xCD);
+        assert_eq!(restored.apu.wave.wave_ram[16], 0xCD);
+        assert!(!restored.apu.wave.two_banks);
     }
 }
 

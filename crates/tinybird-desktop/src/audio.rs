@@ -8,8 +8,13 @@ use tinybird_core::apu::SAMPLE_RATE as DEFAULT_GBA_SAMPLE_RATE;
 
 // Keep the host queue intentionally small so video doesn't feel detached from
 // audio if the emulator briefly runs ahead of real time.
-const MAX_BUFFERED_FRAMES: usize = 4_096;
-const MIN_PRIME_FRAMES: usize = 512;
+const MAX_BUFFERED_MILLIS: u32 = 125;
+const MIN_PRIME_MILLIS: u32 = 16;
+
+fn frames_for_millis(sample_rate: u32, millis: u32) -> usize {
+    let frames = (sample_rate.max(1) as u64 * millis as u64).div_ceil(1000);
+    frames.max(1) as usize
+}
 
 struct SharedAudioState {
     samples: VecDeque<i16>,
@@ -54,7 +59,8 @@ impl SharedAudioState {
     }
 
     fn try_prime(&mut self) {
-        if self.primed || self.samples.len() < MIN_PRIME_FRAMES * 2 {
+        let min_prime_frames = frames_for_millis(self.source_rate, MIN_PRIME_MILLIS);
+        if self.primed || self.samples.len() < min_prime_frames * 2 {
             return;
         }
 
@@ -189,11 +195,14 @@ impl AudioHandler {
         }
     }
 
-    /// Return the number of stereo frames currently queued for playback.
-    pub fn buffered_frames(&self) -> usize {
+    /// Return the approximate playback backlog in source milliseconds.
+    pub fn buffered_millis(&self) -> u32 {
         self.shared_state
             .lock()
-            .map(|state| state.samples.len() / 2)
+            .map(|state| {
+                let frames = state.samples.len() / 2;
+                ((frames as u64) * 1000 / state.source_rate.max(1) as u64) as u32
+            })
             .unwrap_or(0)
     }
 
@@ -215,7 +224,7 @@ impl AudioHandler {
     pub fn push_samples(&self, samples: &[i16], source_rate: u32) {
         if let Ok(mut state) = self.shared_state.lock() {
             state.source_rate = source_rate.max(1);
-            let max_samples = MAX_BUFFERED_FRAMES * 2;
+            let max_samples = frames_for_millis(state.source_rate, MAX_BUFFERED_MILLIS) * 2;
             let incoming = samples.len();
             let overflow = state
                 .samples

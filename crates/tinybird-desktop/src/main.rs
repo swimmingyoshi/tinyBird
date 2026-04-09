@@ -30,7 +30,7 @@ const FRAME_DURATION: Duration = Duration::from_nanos(
 );
 const FRAME_PACING_TOLERANCE: Duration = Duration::from_micros(750);
 const FRAME_CATCHUP_LIMIT: u32 = 3;
-const AUDIO_BACKPRESSURE_FRAMES: usize = 3_072;
+const AUDIO_BACKPRESSURE_MILLIS: u32 = 94;
 
 enum QuicksaveLoadResult {
     Loaded,
@@ -842,9 +842,9 @@ impl ApplicationHandler for App {
                 let max_catchup_frames = if self
                     .audio_handler
                     .as_ref()
-                    .map(|audio_handler| audio_handler.buffered_frames())
+                    .map(|audio_handler| audio_handler.buffered_millis())
                     .unwrap_or(0)
-                    >= AUDIO_BACKPRESSURE_FRAMES
+                    >= AUDIO_BACKPRESSURE_MILLIS
                 {
                     1
                 } else {
