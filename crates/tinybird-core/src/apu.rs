@@ -286,13 +286,18 @@ pub struct WaveChannel {
     pub frequency: u16,
     /// Whether the length counter is enabled
     pub length_enable: bool,
-    /// Wave RAM: 16 bytes holding 32 4-bit samples
-    pub wave_ram: [u8; 16],
+    /// Wave RAM: two 16-byte banks holding 64 4-bit samples total
+    pub wave_ram: [u8; 32],
+    /// Wave RAM dimension: false = 1 bank / 32 samples, true = 2 banks / 64 samples
+    pub two_banks: bool,
+    /// Software-selected playback bank from SOUND3CNT_L bit 6.
+    pub bank_select: u8,
 
     // Internal
     timer: u32,
     position: u8,
     sample_buffer: u8,
+    playback_bank: u8,
 }
 
 impl WaveChannel {
@@ -305,10 +310,13 @@ impl WaveChannel {
             volume: 0,
             frequency: 0,
             length_enable: false,
-            wave_ram: [0; 16],
+            wave_ram: [0; 32],
+            two_banks: false,
+            bank_select: 0,
             timer: 0,
             position: 0,
             sample_buffer: 0,
+            playback_bank: 0,
         }
     }
 
@@ -329,13 +337,9 @@ impl WaveChannel {
         self.timer += cycles;
         while self.timer >= period {
             self.timer -= period;
-            self.position = (self.position + 1) % 32;
-            let byte_index = (self.position / 2) as usize;
-            self.sample_buffer = if self.position % 2 == 0 {
-                self.wave_ram[byte_index] >> 4
-            } else {
-                self.wave_ram[byte_index] & 0x0F
-            };
+            let sample_count = if self.two_banks { 64 } else { 32 };
+            self.position = (self.position + 1) % sample_count;
+            self.sample_buffer = self.read_wave_sample(self.position);
         }
     }
 
@@ -348,9 +352,10 @@ impl WaveChannel {
         let centered = self.sample_buffer as i16 - 8; // -8..+7
         match self.volume {
             0 => 0,
-            1 => centered,     // 100%
-            2 => centered / 2, // 50%
-            3 => centered / 4, // 25%
+            1 => centered,           // 100%
+            2 => centered / 2,       // 50%
+            3 => centered / 4,       // 25%
+            4 => (centered * 3) / 4, // GBA force-volume bit: 75%
             _ => 0,
         }
     }
@@ -363,6 +368,8 @@ impl WaveChannel {
         }
         self.timer = 0;
         self.position = 0;
+        self.playback_bank = self.bank_select & 1;
+        self.sample_buffer = self.read_wave_sample(0);
     }
 
     /// Clock the length counter.
@@ -372,6 +379,46 @@ impl WaveChannel {
             if self.length_counter == 0 {
                 self.enabled = false;
             }
+        }
+    }
+
+    fn playback_bank_for_position(&self, sample_index: u8) -> u8 {
+        if self.two_banks && sample_index >= 32 {
+            self.playback_bank ^ 1
+        } else {
+            self.playback_bank
+        }
+    }
+
+    fn read_wave_sample(&self, sample_index: u8) -> u8 {
+        let bank = self.playback_bank_for_position(sample_index) as usize;
+        let nibble = (sample_index as usize) & 31;
+        let byte_index = bank * 16 + nibble / 2;
+        let byte = self.wave_ram[byte_index];
+        if (nibble & 1) == 0 {
+            byte >> 4
+        } else {
+            byte & 0x0F
+        }
+    }
+
+    fn accessible_bank(&self) -> usize {
+        if self.enabled || self.dac_enabled {
+            (self.bank_select ^ 1) as usize
+        } else {
+            1
+        }
+    }
+
+    fn read_wave_ram_byte(&self, offset: usize) -> u8 {
+        self.wave_ram[self.accessible_bank() * 16 + offset]
+    }
+
+    fn write_wave_ram_byte(&mut self, offset: usize, value: u8) {
+        let index = self.accessible_bank() * 16 + offset;
+        self.wave_ram[index] = value;
+        if !self.enabled {
+            self.sample_buffer = self.read_wave_sample(self.position);
         }
     }
 }
@@ -722,13 +769,18 @@ impl Apu {
     /// The hardware's SOUNDBIAS high bits control the PWM carrier, but generating
     /// host samples at that carrier rate is unnecessarily expensive and caused a
     /// noticeable emulation slowdown in real games. We keep host mixing fixed at
-    /// the native 32 kHz rate and apply SOUNDBIAS only as part of the DAC model.
+    /// the hardware-selected PWM rate so the frontend can resample from the
+    /// same cadence the mixer is actually generating.
     pub fn output_sample_rate(&self) -> u32 {
-        SAMPLE_RATE
+        SAMPLE_RATE << self.soundbias_resolution()
     }
 
     fn update_sample_timing(&mut self) {
-        self.cycles_per_sample = CPU_FREQ / SAMPLE_RATE;
+        self.cycles_per_sample = 0x200 >> self.soundbias_resolution();
+    }
+
+    fn soundbias_resolution(&self) -> u32 {
+        ((self.sound_bias >> 14) & 0x3) as u32
     }
 
     /// Reset the APU to initial state.
@@ -859,10 +911,16 @@ impl Apu {
         };
         left = left * psg_numer / 4;
         right = right * psg_numer / 4;
+        // GBATEK documents that each PSG channel spans one quarter of the final
+        // signed range, so scale the mixed PSG sum into hardware-like units
+        // before applying SOUNDBIAS clipping.
+        left *= 16;
+        right *= 16;
 
         // Mix in FIFO channels
-        let fifo_a = self.fifo_a.sample() as i32;
-        let fifo_b = self.fifo_b.sample() as i32;
+        // Each FIFO can span the full signed mixer range at 100% volume.
+        let fifo_a = self.fifo_a.sample() as i32 * 4;
+        let fifo_b = self.fifo_b.sample() as i32 * 4;
 
         if self.fifo_a.enable_left {
             left += fifo_a;
@@ -977,17 +1035,21 @@ impl Apu {
 
             // SOUND3CNT_L
             SOUND3CNT_L => {
-                if self.wave.dac_enabled {
-                    0x80
-                } else {
-                    0
-                }
+                ((self.wave.two_banks as u8) << 5)
+                    | ((self.wave.bank_select & 1) << 6)
+                    | if self.wave.dac_enabled { 0x80 } else { 0 }
             }
             0x0400_0071 => 0,
 
             // SOUND3CNT_H
             SOUND3CNT_H => 0, // length write-only
-            0x0400_0073 => (self.wave.volume & 0x03) << 5,
+            0x0400_0073 => {
+                if self.wave.volume == 4 {
+                    0x80
+                } else {
+                    (self.wave.volume & 0x03) << 5
+                }
+            }
 
             // SOUND3CNT_X
             SOUND3CNT_X => 0,
@@ -1088,7 +1150,7 @@ impl Apu {
             // Wave RAM
             WAVE_RAM_START..=WAVE_RAM_END => {
                 let offset = (addr - WAVE_RAM_START) as usize;
-                self.wave.wave_ram[offset]
+                self.wave.read_wave_ram_byte(offset)
             }
 
             // FIFO registers are write-only
@@ -1103,7 +1165,9 @@ impl Apu {
     pub fn write_register(&mut self, addr: u32, value: u8) {
         if !self.master_enable && addr != SOUNDCNT_X && addr != 0x0400_0085 {
             // When master is disabled, only SOUNDCNT_X and SOUNDBIAS are writable
-            if !(SOUNDBIAS..=0x0400_0089).contains(&addr) {
+            if !(SOUNDCNT_H..=0x0400_0083).contains(&addr)
+                && !(SOUNDBIAS..=0x0400_0089).contains(&addr)
+            {
                 return;
             }
         }
@@ -1167,9 +1231,17 @@ impl Apu {
 
             // SOUND3CNT_L
             SOUND3CNT_L => {
+                self.wave.two_banks = value & 0x20 != 0;
+                self.wave.bank_select = (value >> 6) & 1;
                 self.wave.dac_enabled = value & 0x80 != 0;
                 if !self.wave.dac_enabled {
                     self.wave.enabled = false;
+                } else {
+                    self.wave.playback_bank = self.wave.bank_select;
+                    if !self.wave.two_banks {
+                        self.wave.position &= 31;
+                    }
+                    self.wave.sample_buffer = self.wave.read_wave_sample(self.wave.position);
                 }
             }
             0x0400_0071 => {}
@@ -1179,7 +1251,11 @@ impl Apu {
                 self.wave.length_counter = (256 - value as u16) & 0xFF;
             }
             0x0400_0073 => {
-                self.wave.volume = (value >> 5) & 3;
+                self.wave.volume = if value & 0x80 != 0 {
+                    4
+                } else {
+                    (value >> 5) & 3
+                };
             }
 
             // SOUND3CNT_X
@@ -1282,7 +1358,7 @@ impl Apu {
             // Wave RAM
             WAVE_RAM_START..=WAVE_RAM_END => {
                 let offset = (addr - WAVE_RAM_START) as usize;
-                self.wave.wave_ram[offset] = value;
+                self.wave.write_wave_ram_byte(offset, value);
             }
 
             // FIFO_A (write 4 bytes)
@@ -1303,6 +1379,137 @@ impl Apu {
 impl Default for Apu {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct LegacyWaveChannelV2 {
+    pub enabled: bool,
+    pub dac_enabled: bool,
+    pub length_counter: u16,
+    pub volume: u8,
+    pub frequency: u16,
+    pub length_enable: bool,
+    pub wave_ram: [u8; 16],
+    timer: u32,
+    position: u8,
+    sample_buffer: u8,
+}
+
+impl From<&WaveChannel> for LegacyWaveChannelV2 {
+    fn from(channel: &WaveChannel) -> Self {
+        let mut wave_ram = [0u8; 16];
+        wave_ram.copy_from_slice(&channel.wave_ram[..16]);
+        Self {
+            enabled: channel.enabled,
+            dac_enabled: channel.dac_enabled,
+            length_counter: channel.length_counter,
+            volume: channel.volume.min(3),
+            frequency: channel.frequency,
+            length_enable: channel.length_enable,
+            wave_ram,
+            timer: channel.timer,
+            position: channel.position & 31,
+            sample_buffer: channel.sample_buffer,
+        }
+    }
+}
+
+impl From<LegacyWaveChannelV2> for WaveChannel {
+    fn from(channel: LegacyWaveChannelV2) -> Self {
+        let mut wave_ram = [0u8; 32];
+        wave_ram[..16].copy_from_slice(&channel.wave_ram);
+        wave_ram[16..].copy_from_slice(&channel.wave_ram);
+        Self {
+            enabled: channel.enabled,
+            dac_enabled: channel.dac_enabled,
+            length_counter: channel.length_counter,
+            volume: channel.volume,
+            frequency: channel.frequency,
+            length_enable: channel.length_enable,
+            wave_ram,
+            two_banks: false,
+            bank_select: 0,
+            timer: channel.timer,
+            position: channel.position,
+            sample_buffer: channel.sample_buffer,
+            playback_bank: 0,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct LegacyApuV2 {
+    pub square1: SquareChannel,
+    pub square2: SquareChannel,
+    pub wave: LegacyWaveChannelV2,
+    pub noise: NoiseChannel,
+    pub fifo_a: FifoChannel,
+    pub fifo_b: FifoChannel,
+    pub volume_left: u8,
+    pub volume_right: u8,
+    pub psg_enable: u8,
+    pub psg_ratio: u8,
+    pub master_enable: bool,
+    pub sound_bias: u16,
+    pub sample_buffer: Vec<i16>,
+    frame_sequencer_step: u8,
+    frame_sequencer_cycles: u32,
+    sample_counter: u32,
+    cycles_per_sample: u32,
+    lp_left: i32,
+    lp_right: i32,
+}
+
+impl From<&Apu> for LegacyApuV2 {
+    fn from(apu: &Apu) -> Self {
+        Self {
+            square1: apu.square1.clone(),
+            square2: apu.square2.clone(),
+            wave: LegacyWaveChannelV2::from(&apu.wave),
+            noise: apu.noise.clone(),
+            fifo_a: apu.fifo_a.clone(),
+            fifo_b: apu.fifo_b.clone(),
+            volume_left: apu.volume_left,
+            volume_right: apu.volume_right,
+            psg_enable: apu.psg_enable,
+            psg_ratio: apu.psg_ratio,
+            master_enable: apu.master_enable,
+            sound_bias: apu.sound_bias,
+            sample_buffer: apu.sample_buffer.clone(),
+            frame_sequencer_step: apu.frame_sequencer_step,
+            frame_sequencer_cycles: apu.frame_sequencer_cycles,
+            sample_counter: apu.sample_counter,
+            cycles_per_sample: apu.cycles_per_sample,
+            lp_left: apu.lp_left,
+            lp_right: apu.lp_right,
+        }
+    }
+}
+
+impl From<LegacyApuV2> for Apu {
+    fn from(apu: LegacyApuV2) -> Self {
+        Self {
+            square1: apu.square1,
+            square2: apu.square2,
+            wave: apu.wave.into(),
+            noise: apu.noise,
+            fifo_a: apu.fifo_a,
+            fifo_b: apu.fifo_b,
+            volume_left: apu.volume_left,
+            volume_right: apu.volume_right,
+            psg_enable: apu.psg_enable,
+            psg_ratio: apu.psg_ratio,
+            master_enable: apu.master_enable,
+            sound_bias: apu.sound_bias,
+            sample_buffer: apu.sample_buffer,
+            frame_sequencer_step: apu.frame_sequencer_step,
+            frame_sequencer_cycles: apu.frame_sequencer_cycles,
+            sample_counter: apu.sample_counter,
+            cycles_per_sample: apu.cycles_per_sample,
+            lp_left: apu.lp_left,
+            lp_right: apu.lp_right,
+        }
     }
 }
 
@@ -1420,7 +1627,7 @@ mod tests {
     fn test_wave_channel_new_and_reset() {
         let mut ch = WaveChannel::new();
         assert!(!ch.enabled);
-        assert_eq!(ch.wave_ram, [0; 16]);
+        assert_eq!(ch.wave_ram, [0; 32]);
         ch.enabled = true;
         ch.wave_ram[0] = 0xFF;
         ch.reset();
@@ -1432,6 +1639,59 @@ mod tests {
     fn test_wave_channel_sample_muted() {
         let ch = WaveChannel::new();
         assert_eq!(ch.sample(), 0);
+    }
+
+    #[test]
+    fn test_wave_channel_force_volume_75_percent() {
+        let mut ch = WaveChannel::new();
+        ch.enabled = true;
+        ch.dac_enabled = true;
+        ch.sample_buffer = 15;
+        ch.volume = 4;
+
+        assert_eq!(ch.sample(), 5);
+    }
+
+    #[test]
+    fn test_wave_channel_trigger_primes_first_sample() {
+        let mut ch = WaveChannel::new();
+        ch.dac_enabled = true;
+        ch.wave_ram[0] = 0xF1;
+
+        ch.trigger();
+
+        assert!(ch.enabled);
+        assert_eq!(ch.sample_buffer, 0x0F);
+    }
+
+    #[test]
+    fn test_wave_channel_reads_and_writes_inactive_bank() {
+        let mut ch = WaveChannel::new();
+        ch.bank_select = 0;
+        ch.dac_enabled = true;
+
+        ch.write_wave_ram_byte(0, 0xAB);
+
+        assert_eq!(ch.wave_ram[0], 0x00);
+        assert_eq!(ch.wave_ram[16], 0xAB);
+        assert_eq!(ch.read_wave_ram_byte(0), 0xAB);
+    }
+
+    #[test]
+    fn test_wave_channel_two_bank_playback_flips_after_32_samples() {
+        let mut ch = WaveChannel::new();
+        ch.dac_enabled = true;
+        ch.two_banks = true;
+        ch.bank_select = 0;
+        ch.wave_ram[0] = 0xF0;
+        ch.wave_ram[16] = 0x10;
+        ch.trigger();
+
+        assert_eq!(ch.sample_buffer, 0x0F);
+        ch.position = 31;
+        ch.tick((2048 - ch.frequency as u32) * 8);
+        assert_eq!(ch.position, 32);
+        assert_eq!(ch.sample_buffer, 0x01);
     }
 
     #[test]
@@ -1634,6 +1894,31 @@ mod tests {
     }
 
     #[test]
+    fn test_apu_register_soundcnt_h_is_writable_while_master_disabled() {
+        let mut apu = Apu::new();
+        assert!(!apu.master_enable);
+
+        apu.write_register(SOUNDCNT_H, 0x09);
+        apu.write_register(0x0400_0083, 0x33);
+
+        assert_eq!(apu.psg_ratio, 1);
+        assert!(apu.fifo_b.volume_full);
+        assert!(apu.fifo_a.enable_left);
+        assert!(apu.fifo_b.enable_left);
+    }
+
+    #[test]
+    fn test_apu_wave_force_volume_register_round_trip() {
+        let mut apu = Apu::new();
+        apu.master_enable = true;
+
+        apu.write_register(0x0400_0073, 0x80);
+
+        assert_eq!(apu.wave.volume, 4);
+        assert_eq!(apu.read_register(0x0400_0073), 0x80);
+    }
+
+    #[test]
     fn test_apu_register_soundcnt_l() {
         let mut apu = Apu::new();
         apu.master_enable = true;
@@ -1664,7 +1949,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apu_soundbias_keeps_host_output_rate_stable() {
+    fn test_apu_soundbias_updates_output_rate() {
         let mut apu = Apu::new();
 
         assert_eq!(apu.output_sample_rate(), SAMPLE_RATE);
@@ -1672,11 +1957,15 @@ mod tests {
 
         apu.write_register(0x0400_0089, 0x42);
         assert_eq!(apu.sound_bias, 0x4200);
-        assert_eq!(apu.output_sample_rate(), SAMPLE_RATE);
-        assert_eq!(apu.cycles_per_sample, CPU_FREQ / SAMPLE_RATE);
+        assert_eq!(apu.output_sample_rate(), SAMPLE_RATE << 1);
+        assert_eq!(apu.cycles_per_sample, CPU_FREQ / (SAMPLE_RATE << 1));
 
         apu.write_register(0x0400_0089, 0x82);
-        assert_eq!(apu.output_sample_rate(), SAMPLE_RATE);
-        assert_eq!(apu.cycles_per_sample, CPU_FREQ / SAMPLE_RATE);
+        assert_eq!(apu.output_sample_rate(), SAMPLE_RATE << 2);
+        assert_eq!(apu.cycles_per_sample, CPU_FREQ / (SAMPLE_RATE << 2));
+
+        apu.write_register(0x0400_0089, 0xC2);
+        assert_eq!(apu.output_sample_rate(), SAMPLE_RATE << 3);
+        assert_eq!(apu.cycles_per_sample, CPU_FREQ / (SAMPLE_RATE << 3));
     }
 }
