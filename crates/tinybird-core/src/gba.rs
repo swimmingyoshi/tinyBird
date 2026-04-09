@@ -97,6 +97,11 @@ impl Default for Gba {
 }
 
 impl Gba {
+    #[inline(always)]
+    fn crossed_interval(start: u64, end: u64, interval: u64) -> bool {
+        start / interval != end / interval
+    }
+
     /// Create a new GBA emulator
     pub fn new() -> Self {
         Self {
@@ -211,6 +216,8 @@ impl Gba {
             return;
         }
 
+        let start_cycles = self.total_cycles;
+
         // Sync PPU runtime status to I/O (must be current for polling games).
         // Preserve writable DISPSTAT bits set by software (IRQ enables + VCOUNT compare).
         let ppu_status_bits = self.ppu.read_dispstat_low() & 0x0007;
@@ -260,8 +267,8 @@ impl Gba {
                     self.cpu.registers.get_reg(13), self.cpu.registers.get_reg(14));
             }
         }
-        self.cpu.step(&mut self.bus);
-        self.total_cycles += 1;
+        let cpu_cycles = self.cpu.step(&mut self.bus) as u64;
+        self.total_cycles += cpu_cycles;
         if self.audio_enabled {
             self.sync_io_to_apu();
         }
@@ -307,17 +314,17 @@ impl Gba {
         }
 
         // Sync timer controls from I/O (check frequently to catch enable transitions)
-        if (self.total_cycles & 15) == 0 {
+        if Self::crossed_interval(start_cycles, self.total_cycles, 16) {
             self.sync_timer_controls();
         }
 
-        // Tick timers every cycle
-        self.tick_timers();
+        // Tick timers for the number of cycles the instruction consumed.
+        self.tick_timers(cpu_cycles as u32);
 
-        // Tick audio every cycle so timer-driven FIFO playback and frame
+        // Tick audio for the instruction's cycle cost so timer-driven FIFO playback and frame
         // sequencer state can advance while the BIOS sound driver is active.
         if self.audio_enabled {
-            self.apu.tick(1);
+            self.apu.tick(cpu_cycles as u32);
         }
 
         // Check for DMA transfers only when a DMA register was written
@@ -331,7 +338,8 @@ impl Gba {
         // while leaving the heavier BG/window sync on scanline boundaries.
         let prev_cycle = self.ppu.cycle;
         self.sync_lcd_state_to_ppu();
-        let ppu_events = self.ppu.step();
+        let crossed_scanline_boundary = prev_cycle + cpu_cycles as u32 >= crate::ppu::CYCLES_PER_SCANLINE;
+        let ppu_events = self.ppu.step_cycles(cpu_cycles as u32);
         if !ppu_events.is_empty() {
             let mut lcd_irq_mask = 0u16;
 
@@ -368,6 +376,7 @@ impl Gba {
             if ppu_events.contains(crate::ppu::PpuEvent::FrameComplete) {
                 // Sync everything at frame boundary
                 self.sync_io_to_ppu();
+                self.frame_count += 1;
             }
 
             if lcd_irq_mask != 0 {
@@ -391,11 +400,11 @@ impl Gba {
             }
         }
         // Sync the rest of the PPU register set at the start of each scanline.
-        if self.ppu.cycle == 1 && prev_cycle != 1 {
+        if crossed_scanline_boundary {
             self.sync_io_to_ppu();
         }
 
-        self.scheduler.advance(1);
+        self.scheduler.advance(cpu_cycles);
 
         // General IRQ check: fire if any pending interrupt is enabled
         // (handles cases where IF/IE/IME changed outside of hardware event handlers)
@@ -416,15 +425,12 @@ impl Gba {
         }
 
         let start_cycles = self.total_cycles;
+        let target_frame = self.frame_count + 1;
 
-        loop {
+        while self.frame_count < target_frame {
             self.step();
-            if self.ppu.scanline == 0 && self.ppu.cycle == 0 {
-                break;
-            }
         }
 
-        self.frame_count += 1;
         self.total_cycles - start_cycles
     }
 
@@ -591,8 +597,8 @@ impl Gba {
 
     /// Tick timers and update I/O counters (called every CPU cycle)
     #[inline(always)]
-    fn tick_timers(&mut self) {
-        let overflowed = self.timers.tick(1);
+    fn tick_timers(&mut self, cycles: u32) {
+        let overflowed = self.timers.tick(cycles);
 
         // Write enabled timer counters back to I/O
         for i in 0..4 {
@@ -602,20 +608,22 @@ impl Gba {
         }
 
         // Handle timer overflow IRQs (rare path)
-        if overflowed.iter().any(|&x| x) {
+        if overflowed.iter().any(|&count| count != 0) {
             let ime = self.bus.read_io_direct_u16(0x208);
             let ie = self.bus.read_io_direct_u16(0x200);
             for i in 0..4 {
-                if self.audio_enabled && overflowed[i] && i < 2 {
-                    let (need_a, need_b) = self.apu.on_timer_overflow(i as u8);
-                    if need_a {
-                        self.service_sound_fifo_dma(0);
-                    }
-                    if need_b {
-                        self.service_sound_fifo_dma(1);
+                if self.audio_enabled && overflowed[i] != 0 && i < 2 {
+                    for _ in 0..overflowed[i] {
+                        let (need_a, need_b) = self.apu.on_timer_overflow(i as u8);
+                        if need_a {
+                            self.service_sound_fifo_dma(0);
+                        }
+                        if need_b {
+                            self.service_sound_fifo_dma(1);
+                        }
                     }
                 }
-                if overflowed[i] && self.timers.timers[i].irq_enabled() {
+                if overflowed[i] != 0 && self.timers.timers[i].irq_enabled() {
                     let bit = 1u16 << (3 + i);
                     let if_reg = self.bus.read_io_direct_u16(0x202);
                     self.bus.write_io_direct_u16(0x202, if_reg | bit);

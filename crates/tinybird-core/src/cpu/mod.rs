@@ -103,15 +103,17 @@ impl Cpu {
     }
 
     /// Execute a single instruction
-    pub fn step<B: Bus>(&mut self, bus: &mut B) {
+    pub fn step<B: Bus>(&mut self, bus: &mut B) -> u32 {
         if self.halted {
-            return;
+            return 1;
         }
 
         // no trace
 
         // Use direct fetch-decode-execute (no pipeline simulation)
+        bus.begin_instruction_timing();
         self.execute(bus);
+        bus.finish_instruction_timing()
     }
 
     /// Execute a single instruction (without pipeline simulation)

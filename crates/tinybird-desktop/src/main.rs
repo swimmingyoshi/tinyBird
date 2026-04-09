@@ -20,13 +20,17 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use tinybird_core::{Color, Framebuffer, Gba, GbaButton, GbaState};
+use tinybird_core::{Color, Framebuffer, Gba, GbaButton, GbaState, CLOCK_SPEED, CYCLES_PER_FRAME};
 
 const SCREEN_WIDTH: u32 = 240;
 const SCREEN_HEIGHT: u32 = 160;
 const SCALE: u32 = 3;
-const TARGET_FPS: f64 = 59.7275;
-const FRAME_DURATION: Duration = Duration::from_nanos((1_000_000_000.0 / TARGET_FPS) as u64);
+const FRAME_DURATION: Duration = Duration::from_nanos(
+    (CYCLES_PER_FRAME as u64 * 1_000_000_000 + (CLOCK_SPEED as u64 / 2)) / CLOCK_SPEED as u64,
+);
+const FRAME_PACING_TOLERANCE: Duration = Duration::from_micros(750);
+const FRAME_CATCHUP_LIMIT: u32 = 3;
+const AUDIO_BACKPRESSURE_FRAMES: usize = 3_072;
 
 struct App {
     window: Option<Arc<Window>>,
@@ -34,7 +38,7 @@ struct App {
     surface_size: (u32, u32),
     gba: Gba,
     speed_multiplier: u32,
-    last_frame_time: Instant,
+    next_frame_deadline: Instant,
     audio_handler: Option<audio::AudioHandler>,
     rom_loaded: bool,
     rom_title: Option<String>,
@@ -70,27 +74,34 @@ impl App {
         }
         let (rom_loaded, rom_path, rom_title, save_path, state_path, quicksave_slot) =
             if let Some((path, rom_data)) = rom {
-            gba.load_rom(rom_data);
-            let title = Self::rom_title_from_path(&path);
-            let save_path = Some(Self::save_path_for_rom(&path));
-            let state_path = Some(Self::state_path_for_rom(&path));
-            if let Some(save_path) = &save_path {
-                if let Ok(save_data) = fs::read(save_path) {
-                    gba.load_save_data(&save_data);
+                gba.load_rom(rom_data);
+                let title = Self::rom_title_from_path(&path);
+                let save_path = Some(Self::save_path_for_rom(&path));
+                let state_path = Some(Self::state_path_for_rom(&path));
+                if let Some(save_path) = &save_path {
+                    if let Ok(save_data) = fs::read(save_path) {
+                        gba.load_save_data(&save_data);
+                    }
                 }
-            }
-            let quicksave_slot = state_path
-                .as_ref()
-                .and_then(|path| fs::read(path).ok())
-                .and_then(|bytes| {
-                    let mut state = gba.clone();
-                    state.load_state_bytes(&bytes).ok()?;
-                    Some(state)
-                });
-            (true, Some(path), Some(title), save_path, state_path, quicksave_slot)
-        } else {
-            (false, None, None, None, None, None)
-        };
+                let quicksave_slot = state_path
+                    .as_ref()
+                    .and_then(|path| fs::read(path).ok())
+                    .and_then(|bytes| {
+                        let mut state = gba.clone();
+                        state.load_state_bytes(&bytes).ok()?;
+                        Some(state)
+                    });
+                (
+                    true,
+                    Some(path),
+                    Some(title),
+                    save_path,
+                    state_path,
+                    quicksave_slot,
+                )
+            } else {
+                (false, None, None, None, None, None)
+            };
 
         Self {
             window: None,
@@ -98,7 +109,7 @@ impl App {
             surface_size: (0, 0),
             gba,
             speed_multiplier: 1,
-            last_frame_time: Instant::now(),
+            next_frame_deadline: Instant::now() + FRAME_DURATION,
             audio_handler: None,
             rom_loaded,
             rom_title,
@@ -125,6 +136,27 @@ impl App {
             last_save_flush: Instant::now(),
             quicksave_slot,
         }
+    }
+
+    fn reset_timing_state(&mut self) {
+        self.next_frame_deadline = Instant::now() + FRAME_DURATION;
+    }
+
+    fn clear_audio_output(&self) {
+        if let Some(audio_handler) = &self.audio_handler {
+            audio_handler.clear();
+        }
+    }
+
+    fn set_speed_multiplier(&mut self, speed_multiplier: u32) {
+        let speed_multiplier = speed_multiplier.max(1);
+        if self.speed_multiplier == speed_multiplier {
+            return;
+        }
+
+        self.speed_multiplier = speed_multiplier;
+        self.reset_timing_state();
+        self.update_audio_emulation_state();
     }
 
     fn rom_title_from_path(path: &Path) -> String {
@@ -154,7 +186,11 @@ impl App {
                     println!("Quicksave written to {}", state_path.display());
                 }
                 Err(err) => {
-                    eprintln!("Failed to write savestate '{}': {}", state_path.display(), err);
+                    eprintln!(
+                        "Failed to write savestate '{}': {}",
+                        state_path.display(),
+                        err
+                    );
                 }
             },
             Err(err) => {
@@ -174,7 +210,11 @@ impl App {
 
         let mut state = self.gba.clone();
         if let Err(err) = state.load_state_bytes(&bytes) {
-            eprintln!("Failed to load savestate '{}': {}", state_path.display(), err);
+            eprintln!(
+                "Failed to load savestate '{}': {}",
+                state_path.display(),
+                err
+            );
             return false;
         }
 
@@ -211,7 +251,11 @@ impl App {
                 self.last_save_flush = Instant::now();
             }
             Err(err) => {
-                eprintln!("Failed to write save file '{}': {}", save_path.display(), err);
+                eprintln!(
+                    "Failed to write save file '{}': {}",
+                    save_path.display(),
+                    err
+                );
             }
         }
     }
@@ -254,12 +298,14 @@ impl App {
         self.last_save_flush = Instant::now();
         self.sync_input_state();
         self.update_audio_emulation_state();
+        self.clear_audio_output();
+        self.reset_timing_state();
         if let Some(window) = &self.window {
             window.set_title(&format!("tinyBird - {}", name));
         }
     }
 
-    fn run_emulation_batch(&mut self) -> u32 {
+    fn run_emulation_batch(&mut self, base_frames: u32) -> u32 {
         self.pump_gamepad_input();
 
         if !self.rom_loaded {
@@ -269,7 +315,7 @@ impl App {
         let mut frames_ran = 0;
         if self.gba.state == GbaState::Running {
             let frame_debug = std::env::var("TINYBIRD_FRAME_DEBUG").is_ok();
-            let frames_to_run = self.speed_multiplier.max(1);
+            let frames_to_run = base_frames.saturating_mul(self.speed_multiplier.max(1));
 
             for _ in 0..frames_to_run {
                 if frame_debug {
@@ -338,7 +384,8 @@ impl App {
     }
 
     fn update_audio_emulation_state(&mut self) {
-        let audio_active = self.audio_handler.is_some() && !self.muted && self.speed_multiplier == 1;
+        let audio_active =
+            self.audio_handler.is_some() && !self.muted && self.speed_multiplier == 1;
         self.gba.set_audio_enabled(audio_active);
 
         if let Some(audio_handler) = &self.audio_handler {
@@ -347,6 +394,7 @@ impl App {
 
         if !audio_active {
             self.gba.apu.drain_samples();
+            self.clear_audio_output();
         }
     }
 
@@ -383,8 +431,8 @@ impl App {
         );
     }
 
-    fn render_frame(&mut self) {
-        self.run_emulation_batch();
+    fn render_frame(&mut self, base_frames: u32) {
+        self.run_emulation_batch(base_frames);
         self.present_current_frame();
     }
 
@@ -491,16 +539,7 @@ impl App {
         }
 
         if let Some((fps, speed, muted, volume_pct, cc)) = overlay {
-            overlay::draw_overlay(
-                &mut buffer,
-                win_w,
-                win_h,
-                fps,
-                speed,
-                muted,
-                volume_pct,
-                cc,
-            );
+            overlay::draw_overlay(&mut buffer, win_w, win_h, fps, speed, muted, volume_pct, cc);
         }
         let _ = buffer.present();
     }
@@ -606,14 +645,17 @@ impl App {
         if pressed {
             match logical_key {
                 Key::Named(NamedKey::Tab) => {
-                    self.speed_multiplier = 4;
-                    self.update_audio_emulation_state();
+                    self.set_speed_multiplier(4);
                 }
                 Key::Named(NamedKey::Escape) => {
                     if self.gba.state == GbaState::Running {
                         self.gba.pause();
+                        self.clear_audio_output();
+                        self.reset_timing_state();
                     } else if self.gba.state == GbaState::Paused {
                         self.gba.start();
+                        self.clear_audio_output();
+                        self.reset_timing_state();
                     }
                 }
                 Key::Named(NamedKey::F5) => {
@@ -627,6 +669,8 @@ impl App {
                         self.gba = state.clone();
                         self.cart_save_dirty = true;
                         self.sync_input_state();
+                        self.clear_audio_output();
+                        self.reset_timing_state();
                         self.update_audio_emulation_state();
                         println!("Quicksave loaded");
                     } else {
@@ -637,16 +681,13 @@ impl App {
                     self.show_overlay = !self.show_overlay;
                 }
                 Key::Character(c) if c.as_str() == "1" => {
-                    self.speed_multiplier = 1;
-                    self.update_audio_emulation_state();
+                    self.set_speed_multiplier(1);
                 }
                 Key::Character(c) if c.as_str() == "2" => {
-                    self.speed_multiplier = 2;
-                    self.update_audio_emulation_state();
+                    self.set_speed_multiplier(2);
                 }
                 Key::Character(c) if c.as_str() == "3" => {
-                    self.speed_multiplier = 4;
-                    self.update_audio_emulation_state();
+                    self.set_speed_multiplier(4);
                 }
                 Key::Character(c) if c.as_str() == "m" || c.as_str() == "M" => {
                     self.muted = !self.muted;
@@ -673,6 +714,8 @@ impl App {
                 }
                 Key::Character(c) if c.as_str() == "r" || c.as_str() == "R" => {
                     self.gba.reset();
+                    self.clear_audio_output();
+                    self.reset_timing_state();
                 }
                 Key::Character(c) if c.as_str() == "o" || c.as_str() == "O" => {
                     self.open_rom();
@@ -680,8 +723,7 @@ impl App {
                 _ => {}
             }
         } else if matches!(logical_key, Key::Named(NamedKey::Tab)) {
-            self.speed_multiplier = 1;
-            self.update_audio_emulation_state();
+            self.set_speed_multiplier(1);
         }
     }
 
@@ -737,8 +779,9 @@ impl ApplicationHandler for App {
         // Try to init audio
         self.audio_handler = audio::AudioHandler::new().ok();
         self.update_audio_emulation_state();
+        self.reset_timing_state();
 
-        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_DURATION));
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_deadline));
     }
 
     fn window_event(
@@ -773,13 +816,50 @@ impl ApplicationHandler for App {
                 self.handle_key(&physical_key, &logical_key, pressed);
             }
             WindowEvent::RedrawRequested => {
-                let now = Instant::now();
-                let elapsed = now - self.last_frame_time;
-
-                if elapsed >= FRAME_DURATION || self.speed_multiplier > 1 {
-                    self.last_frame_time = now;
-                    self.render_frame();
+                if !self.rom_loaded || self.gba.state != GbaState::Running {
+                    self.render_frame(0);
+                    return;
                 }
+
+                if self.speed_multiplier > 1 {
+                    self.render_frame(1);
+                    return;
+                }
+
+                let now = Instant::now();
+                if now + FRAME_PACING_TOLERANCE < self.next_frame_deadline {
+                    return;
+                }
+
+                let max_catchup_frames = if self
+                    .audio_handler
+                    .as_ref()
+                    .map(|audio_handler| audio_handler.buffered_frames())
+                    .unwrap_or(0)
+                    >= AUDIO_BACKPRESSURE_FRAMES
+                {
+                    1
+                } else {
+                    FRAME_CATCHUP_LIMIT
+                };
+
+                let mut frames_due = 0;
+                while frames_due < max_catchup_frames
+                    && now + FRAME_PACING_TOLERANCE >= self.next_frame_deadline
+                {
+                    frames_due += 1;
+                    self.next_frame_deadline += FRAME_DURATION;
+                }
+
+                if frames_due == 0 {
+                    return;
+                }
+
+                if now + FRAME_PACING_TOLERANCE >= self.next_frame_deadline {
+                    self.next_frame_deadline = now + FRAME_DURATION;
+                }
+
+                self.render_frame(frames_due);
             }
             _ => {}
         }
@@ -792,7 +872,7 @@ impl ApplicationHandler for App {
             ControlFlow::Poll
         } else {
             // Normal: throttle to ~59.7fps
-            ControlFlow::WaitUntil(self.last_frame_time + FRAME_DURATION)
+            ControlFlow::WaitUntil(self.next_frame_deadline)
         };
         event_loop.set_control_flow(next_tick);
         if let Some(window) = &self.window {

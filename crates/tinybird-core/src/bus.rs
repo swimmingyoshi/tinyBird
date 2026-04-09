@@ -69,6 +69,39 @@ impl DirtyRange {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccessWidth {
+    Byte,
+    Half,
+    Word,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccessKind {
+    Data,
+    Opcode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccessRegion {
+    Bios,
+    Ewram,
+    Iwram,
+    Io,
+    Palette,
+    Vram,
+    Oam,
+    Rom(usize),
+    Sram,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AccessStamp {
+    region: AccessRegion,
+    next_addr: u32,
+}
+
 /// Trait for bus access
 pub trait Bus {
     /// Read a byte from the bus
@@ -79,6 +112,16 @@ pub trait Bus {
 
     /// Read a word (32-bit) from the bus (does not update open bus value)
     fn read_u32(&self, addr: u32) -> u32;
+
+    /// Read a halfword opcode from the bus.
+    fn read_opcode_u16(&self, addr: u32) -> u16 {
+        self.read_u16(addr)
+    }
+
+    /// Read a word opcode from the bus.
+    fn read_opcode_u32(&self, addr: u32) -> u32 {
+        self.read_u32(addr)
+    }
 
     /// Write a byte to the bus
     fn write_u8(&mut self, addr: u32, value: u8);
@@ -94,6 +137,14 @@ pub trait Bus {
 
     /// Check if an address is writable
     fn is_writable(&self, addr: u32) -> bool;
+
+    /// Start collecting timing for one CPU instruction.
+    fn begin_instruction_timing(&mut self) {}
+
+    /// Finish collecting timing for one CPU instruction.
+    fn finish_instruction_timing(&mut self) -> u32 {
+        1
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,6 +217,12 @@ pub struct SimpleBus {
     vcount: u16,
     /// Total cycles for VCOUNT tracking
     vcount_cycles: u64,
+    /// Whether CPU instruction timing collection is active.
+    cpu_timing_active: Cell<bool>,
+    /// Cycles accumulated for the current CPU instruction.
+    cpu_timing_cycles: Cell<u32>,
+    /// Last CPU-side memory access within the current instruction.
+    cpu_last_access: Cell<Option<AccessStamp>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -266,6 +323,9 @@ impl<'de> Deserialize<'de> for SimpleBus {
             open_bus_value: helper.open_bus_value,
             vcount: helper.vcount,
             vcount_cycles: helper.vcount_cycles,
+            cpu_timing_active: Cell::new(false),
+            cpu_timing_cycles: Cell::new(0),
+            cpu_last_access: Cell::new(None),
         })
     }
 }
@@ -309,6 +369,9 @@ impl SimpleBus {
             open_bus_value: 0,
             vcount: 0,
             vcount_cycles: 0,
+            cpu_timing_active: Cell::new(false),
+            cpu_timing_cycles: Cell::new(0),
+            cpu_last_access: Cell::new(None),
         };
         bus.detect_save_type();
         bus.init_bios_stub();
@@ -800,10 +863,156 @@ impl SimpleBus {
             width = (len as usize) * 2
         );
     }
+
+    #[inline(always)]
+    fn waitcnt(&self) -> u16 {
+        self.read_io_direct_u16(0x204)
+    }
+
+    #[inline(always)]
+    fn access_region(addr: u32) -> AccessRegion {
+        match addr {
+            REGION_BIOS_START..=REGION_BIOS_END => AccessRegion::Bios,
+            REGION_EWRAM_START..=REGION_EWRAM_END => AccessRegion::Ewram,
+            REGION_IWRAM_START..=REGION_IWRAM_END => AccessRegion::Iwram,
+            REGION_IO_START..=REGION_IO_END => AccessRegion::Io,
+            REGION_PALETTE_START..=REGION_PALETTE_END => AccessRegion::Palette,
+            REGION_VRAM_START..=REGION_VRAM_END => AccessRegion::Vram,
+            REGION_OAM_START..=REGION_OAM_END => AccessRegion::Oam,
+            0x0800_0000..=0x09FF_FFFF => AccessRegion::Rom(0),
+            0x0A00_0000..=0x0BFF_FFFF => AccessRegion::Rom(1),
+            0x0C00_0000..=0x0DFF_FFFF => AccessRegion::Rom(2),
+            REGION_SRAM_START..=REGION_SRAM_END => AccessRegion::Sram,
+            _ => AccessRegion::Other,
+        }
+    }
+
+    #[inline(always)]
+    fn next_sequential_addr(addr: u32, width: AccessWidth, region: AccessRegion) -> u32 {
+        match region {
+            AccessRegion::Rom(_) => match width {
+                AccessWidth::Word => (addr & !3).wrapping_add(4),
+                _ => (addr & !1).wrapping_add(2),
+            },
+            AccessRegion::Sram => addr.wrapping_add(1),
+            _ => match width {
+                AccessWidth::Word => (addr & !3).wrapping_add(4),
+                AccessWidth::Half => (addr & !1).wrapping_add(2),
+                AccessWidth::Byte => addr.wrapping_add(1),
+            },
+        }
+    }
+
+    #[inline(always)]
+    fn gamepak_wait_cycles(&self, area: usize, sequential: bool) -> u32 {
+        const FIRST_ACCESS_WAITS: [u32; 4] = [4, 3, 2, 8];
+        const SECOND_ACCESS_WAITS: [[u32; 2]; 3] = [[2, 1], [4, 1], [8, 1]];
+
+        let waitcnt = self.waitcnt();
+        if sequential {
+            let idx = match area {
+                0 => ((waitcnt >> 4) & 0x1) as usize,
+                1 => ((waitcnt >> 7) & 0x1) as usize,
+                _ => ((waitcnt >> 10) & 0x1) as usize,
+            };
+            1 + SECOND_ACCESS_WAITS[area][idx]
+        } else {
+            let idx = match area {
+                0 => ((waitcnt >> 2) & 0x3) as usize,
+                1 => ((waitcnt >> 5) & 0x3) as usize,
+                _ => ((waitcnt >> 8) & 0x3) as usize,
+            };
+            1 + FIRST_ACCESS_WAITS[idx]
+        }
+    }
+
+    #[inline(always)]
+    fn sram_wait_cycles(&self) -> u32 {
+        const SRAM_WAITS: [u32; 4] = [4, 3, 2, 8];
+        1 + SRAM_WAITS[(self.waitcnt() & 0x3) as usize]
+    }
+
+    #[inline(always)]
+    fn prefetch_enabled(&self) -> bool {
+        (self.waitcnt() & (1 << 14)) != 0
+    }
+
+    #[inline(always)]
+    fn record_cpu_access(&self, addr: u32, width: AccessWidth, kind: AccessKind) {
+        if !self.cpu_timing_active.get() {
+            return;
+        }
+
+        let region = Self::access_region(addr);
+        let sequential = if let Some(last) = self.cpu_last_access.get() {
+            last.region == region
+                && last.next_addr == addr
+                && match region {
+                    AccessRegion::Rom(_) => (addr & 0x1_FFFF) != 0,
+                    _ => true,
+                }
+        } else {
+            false
+        };
+
+        let cycles = match region {
+            AccessRegion::Bios | AccessRegion::Iwram | AccessRegion::Io | AccessRegion::Other => 1,
+            AccessRegion::Ewram => match width {
+                AccessWidth::Word => 6,
+                _ => 3,
+            },
+            AccessRegion::Palette | AccessRegion::Vram | AccessRegion::Oam => match width {
+                AccessWidth::Word => 2,
+                _ => 1,
+            },
+            AccessRegion::Rom(area) => {
+                let prefetch_hit = kind == AccessKind::Opcode && self.prefetch_enabled() && sequential;
+                match width {
+                    AccessWidth::Word => {
+                        let first = if prefetch_hit { 1 } else { self.gamepak_wait_cycles(area, sequential) };
+                        first + if prefetch_hit { 1 } else { self.gamepak_wait_cycles(area, true) }
+                    }
+                    AccessWidth::Half | AccessWidth::Byte => {
+                        if prefetch_hit {
+                            1
+                        } else {
+                            self.gamepak_wait_cycles(area, sequential)
+                        }
+                    }
+                }
+            }
+            AccessRegion::Sram => match width {
+                AccessWidth::Byte => self.sram_wait_cycles(),
+                AccessWidth::Half => self.sram_wait_cycles() * 2,
+                AccessWidth::Word => self.sram_wait_cycles() * 4,
+            },
+        };
+
+        self.cpu_timing_cycles
+            .set(self.cpu_timing_cycles.get().saturating_add(cycles));
+        self.cpu_last_access
+            .set(Some(AccessStamp {
+                region,
+                next_addr: Self::next_sequential_addr(addr, width, region),
+            }));
+    }
 }
 
 impl Bus for SimpleBus {
+    fn begin_instruction_timing(&mut self) {
+        self.cpu_timing_active.set(true);
+        self.cpu_timing_cycles.set(0);
+        self.cpu_last_access.set(None);
+    }
+
+    fn finish_instruction_timing(&mut self) -> u32 {
+        self.cpu_timing_active.set(false);
+        self.cpu_last_access.set(None);
+        self.cpu_timing_cycles.get().max(1)
+    }
+
     fn read_u8(&self, addr: u32) -> u8 {
+        self.record_cpu_access(addr, AccessWidth::Byte, AccessKind::Data);
         let masked_addr = self.mask_address(addr);
 
         let value = match addr {
@@ -833,6 +1042,7 @@ impl Bus for SimpleBus {
     }
 
     fn read_u16(&self, addr: u32) -> u16 {
+        self.record_cpu_access(addr & !1, AccessWidth::Half, AccessKind::Data);
         let masked_addr = self.mask_address(addr);
 
         let value = match addr {
@@ -907,6 +1117,7 @@ impl Bus for SimpleBus {
     }
 
     fn read_u32(&self, addr: u32) -> u32 {
+        self.record_cpu_access(addr & !3, AccessWidth::Word, AccessKind::Data);
         let masked_addr = self.mask_address(addr);
 
         let value = match addr {
@@ -1015,7 +1226,166 @@ impl Bus for SimpleBus {
         value
     }
 
+    fn read_opcode_u16(&self, addr: u32) -> u16 {
+        self.record_cpu_access(addr & !1, AccessWidth::Half, AccessKind::Opcode);
+        let masked_addr = self.mask_address(addr);
+
+        match addr {
+            REGION_BIOS_START..=REGION_BIOS_END => {
+                let idx = masked_addr as usize & !1;
+                u16::from_le_bytes([self.bios[idx], self.bios[idx + 1]])
+            }
+            REGION_EWRAM_START..=REGION_EWRAM_END => {
+                let idx = masked_addr as usize & !1;
+                u16::from_le_bytes([self.ewram[idx], self.ewram[idx + 1]])
+            }
+            REGION_IWRAM_START..=REGION_IWRAM_END => {
+                let idx = masked_addr as usize & !1;
+                u16::from_le_bytes([self.iwram[idx], self.iwram[idx + 1]])
+            }
+            REGION_IO_START..=REGION_IO_END => {
+                let idx = masked_addr as usize & !1;
+                u16::from_le_bytes([self.io[idx], self.io[idx + 1]])
+            }
+            REGION_PALETTE_START..=REGION_PALETTE_END => {
+                let idx = masked_addr as usize & !1;
+                u16::from_le_bytes([self.palette[idx], self.palette[idx + 1]])
+            }
+            REGION_VRAM_START..=REGION_VRAM_END => {
+                let idx = masked_addr as usize & !1;
+                u16::from_le_bytes([self.vram[idx], self.vram[idx + 1]])
+            }
+            REGION_OAM_START..=REGION_OAM_END => {
+                let idx = masked_addr as usize & !1;
+                u16::from_le_bytes([self.oam[idx], self.oam[idx + 1]])
+            }
+            REGION_ROM_START..=REGION_ROM_END => {
+                if let Some(idx) = self.rom_index(addr) {
+                    if idx + 1 < self.rom.len() {
+                        u16::from_le_bytes([self.rom[idx], self.rom[idx + 1]])
+                    } else {
+                        self.rom[idx] as u16
+                    }
+                } else {
+                    (self.open_bus_value & 0xFFFF) as u16
+                }
+            }
+            REGION_SRAM_START..=REGION_SRAM_END => {
+                let idx = masked_addr & !1;
+                u16::from_le_bytes([
+                    self.flash_read_u8(idx),
+                    self.flash_read_u8((idx + 1) & 0xFFFF),
+                ])
+            }
+            _ => (self.open_bus_value & 0xFFFF) as u16,
+        }
+    }
+
+    fn read_opcode_u32(&self, addr: u32) -> u32 {
+        self.record_cpu_access(addr & !3, AccessWidth::Word, AccessKind::Opcode);
+        let masked_addr = self.mask_address(addr);
+
+        match addr {
+            REGION_BIOS_START..=REGION_BIOS_END => {
+                let idx = masked_addr as usize & !3;
+                u32::from_le_bytes([
+                    self.bios[idx],
+                    self.bios[idx + 1],
+                    self.bios[idx + 2],
+                    self.bios[idx + 3],
+                ])
+            }
+            REGION_EWRAM_START..=REGION_EWRAM_END => {
+                let idx = masked_addr as usize & !3;
+                u32::from_le_bytes([
+                    self.ewram[idx],
+                    self.ewram[idx + 1],
+                    self.ewram[idx + 2],
+                    self.ewram[idx + 3],
+                ])
+            }
+            REGION_IWRAM_START..=REGION_IWRAM_END => {
+                let idx = masked_addr as usize & !3;
+                u32::from_le_bytes([
+                    self.iwram[idx],
+                    self.iwram[idx + 1],
+                    self.iwram[idx + 2],
+                    self.iwram[idx + 3],
+                ])
+            }
+            REGION_IO_START..=REGION_IO_END => {
+                let idx = masked_addr as usize & !3;
+                u32::from_le_bytes([
+                    self.io[idx],
+                    self.io[idx + 1],
+                    self.io[idx + 2],
+                    self.io[idx + 3],
+                ])
+            }
+            REGION_PALETTE_START..=REGION_PALETTE_END => {
+                let idx = masked_addr as usize & !3;
+                u32::from_le_bytes([
+                    self.palette[idx],
+                    self.palette[idx + 1],
+                    self.palette[idx + 2],
+                    self.palette[idx + 3],
+                ])
+            }
+            REGION_VRAM_START..=REGION_VRAM_END => {
+                let idx = masked_addr as usize & !3;
+                u32::from_le_bytes([
+                    self.vram[idx],
+                    self.vram[idx + 1],
+                    self.vram[idx + 2],
+                    self.vram[idx + 3],
+                ])
+            }
+            REGION_OAM_START..=REGION_OAM_END => {
+                let idx = masked_addr as usize & !3;
+                u32::from_le_bytes([
+                    self.oam[idx],
+                    self.oam[idx + 1],
+                    self.oam[idx + 2],
+                    self.oam[idx + 3],
+                ])
+            }
+            REGION_ROM_START..=REGION_ROM_END => {
+                if let Some(idx) = self.rom_index(addr) {
+                    if idx + 3 < self.rom.len() {
+                        u32::from_le_bytes([
+                            self.rom[idx],
+                            self.rom[idx + 1],
+                            self.rom[idx + 2],
+                            self.rom[idx + 3],
+                        ])
+                    } else {
+                        let mut bytes = [0u8; 4];
+                        for i in 0..4 {
+                            if idx + i < self.rom.len() {
+                                bytes[i] = self.rom[idx + i];
+                            }
+                        }
+                        u32::from_le_bytes(bytes)
+                    }
+                } else {
+                    self.open_bus_value
+                }
+            }
+            REGION_SRAM_START..=REGION_SRAM_END => {
+                let idx = masked_addr & !3;
+                u32::from_le_bytes([
+                    self.flash_read_u8(idx),
+                    self.flash_read_u8((idx + 1) & 0xFFFF),
+                    self.flash_read_u8((idx + 2) & 0xFFFF),
+                    self.flash_read_u8((idx + 3) & 0xFFFF),
+                ])
+            }
+            _ => self.open_bus_value,
+        }
+    }
+
     fn write_u8(&mut self, addr: u32, value: u8) {
+        self.record_cpu_access(addr, AccessWidth::Byte, AccessKind::Data);
         let masked_addr = self.mask_address(addr);
 
         // Debug logging for PPU register writes
@@ -1084,6 +1454,7 @@ impl Bus for SimpleBus {
     }
 
     fn write_u16(&mut self, addr: u32, value: u16) {
+        self.record_cpu_access(addr & !1, AccessWidth::Half, AccessKind::Data);
         let masked_addr = self.mask_address(addr);
         let bytes = value.to_le_bytes();
 
@@ -1175,6 +1546,7 @@ impl Bus for SimpleBus {
     }
 
     fn write_u32(&mut self, addr: u32, value: u32) {
+        self.record_cpu_access(addr & !3, AccessWidth::Word, AccessKind::Data);
         let masked_addr = self.mask_address(addr);
         let bytes = value.to_le_bytes();
 

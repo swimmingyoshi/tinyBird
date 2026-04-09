@@ -47,8 +47,10 @@ impl Color {
 
     /// Convert to RGB888 (for display)
     pub fn to_rgb888(&self) -> (u8, u8, u8) {
-        // Scale 5-bit to 8-bit (multiply by 255/31 ≈ 8.225)
-        let scale = |c: u8| ((c as u16 * 255) / 31) as u8;
+        // Expand 5-bit channels with bit replication. This matches the common
+        // RGB555 -> RGB888 conversion used by emulators while avoiding a divide
+        // in the hot display path.
+        let scale = |c: u8| (c << 3) | (c >> 2);
         (scale(self.r), scale(self.g), scale(self.b))
     }
 
