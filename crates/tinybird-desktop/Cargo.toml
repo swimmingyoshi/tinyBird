@@ -1,0 +1,20 @@
+[package]
+name = "tinybird-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Desktop frontend for the tinyBird GBA emulator"
+
+[[bin]]
+name = "tinybird"
+path = "src/main.rs"
+
+[dependencies]
+tinybird-core.workspace = true
+winit.workspace = true
+softbuffer.workspace = true
+cpal.workspace = true
+gilrs.workspace = true
+rfd.workspace = true
+pollster.workspace = true
