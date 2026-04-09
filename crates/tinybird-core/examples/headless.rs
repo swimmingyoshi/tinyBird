@@ -72,14 +72,22 @@ fn main() {
     gba.start();
 
     let max_cycles: u64 = std::env::var("MAX_CYCLES")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(300_000);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300_000);
 
     let trace_start: u64 = std::env::var("TRACE_START")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(u64::MAX);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(u64::MAX);
     let trace_end: u64 = std::env::var("TRACE_END")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(u64::MAX);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(u64::MAX);
     let progress_every: u64 = std::env::var("PROGRESS_EVERY")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let input_script = std::env::var("TINYBIRD_INPUT_SCRIPT")
         .ok()
         .map(|script| parse_input_script(&script))
@@ -95,25 +103,40 @@ fn main() {
     }
 
     let watch_addr: u32 = std::env::var("TINYBIRD_WATCH_ADDR")
-        .ok().and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .ok()
+        .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .unwrap_or(0);
-    let mut watch_prev = if watch_addr != 0 { gba.bus.read_u32(watch_addr) } else { 0 };
+    let mut watch_prev = if watch_addr != 0 {
+        gba.bus.read_u32(watch_addr)
+    } else {
+        0
+    };
     let stop_on_watch = std::env::var("TINYBIRD_STOP_ON_WATCH").is_ok();
     let watch_after: u64 = std::env::var("TINYBIRD_WATCH_AFTER")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
     // Track writes to a range of IWRAM
     let range_lo: u32 = std::env::var("TINYBIRD_WATCH_RANGE_LO")
-        .ok().and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .ok()
+        .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .unwrap_or(0);
     let range_hi: u32 = std::env::var("TINYBIRD_WATCH_RANGE_HI")
-        .ok().and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .ok()
+        .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .unwrap_or(0);
     // snapshot of IWRAM range for change detection
-    let range_len = if range_hi > range_lo { (range_hi - range_lo) as usize } else { 0 };
+    let range_len = if range_hi > range_lo {
+        (range_hi - range_lo) as usize
+    } else {
+        0
+    };
     let mut range_snapshot: Vec<u8> = if range_len > 0 {
         (range_lo..range_hi).map(|a| gba.bus.read_u8(a)).collect()
-    } else { vec![] };
+    } else {
+        vec![]
+    };
 
     let stop_at_rom = std::env::var("STOP_AT_ROM").is_ok();
     let watch_pc: u32 = std::env::var("WATCH_PC")
@@ -126,11 +149,7 @@ fn main() {
         {
             let (cycle, buttons) = input_script[next_input_event];
             gba.input.set_buttons(buttons);
-            eprintln!(
-                "INPUT event at cy={}: buttons={:?}",
-                cycle,
-                buttons
-            );
+            eprintln!("INPUT event at cy={}: buttons={:?}", cycle, buttons);
             next_input_event += 1;
         }
 
@@ -215,9 +234,15 @@ fn main() {
             if gba.total_cycles < watch_after {
                 watch_prev = watch_now;
             } else if watch_now != watch_prev {
-                eprintln!("WATCH[{:08x}] changed at cy={}: {:08x} -> {:08x}  (pc_before={:08x} {})",
-                    watch_addr, gba.total_cycles, watch_prev, watch_now,
-                    pc_before, if thumb { "T" } else { "A" });
+                eprintln!(
+                    "WATCH[{:08x}] changed at cy={}: {:08x} -> {:08x}  (pc_before={:08x} {})",
+                    watch_addr,
+                    gba.total_cycles,
+                    watch_prev,
+                    watch_now,
+                    pc_before,
+                    if thumb { "T" } else { "A" }
+                );
                 eprintln!(
                     "  r0={:08x} r1={:08x} r2={:08x} r3={:08x} sp={:08x} lr={:08x} cpsr={:08x}",
                     gba.cpu.registers.get_reg(0),
@@ -240,9 +265,15 @@ fn main() {
             for i in 0..range_len {
                 let cur = gba.bus.read_u8(range_lo + i as u32);
                 if cur != range_snapshot[i] {
-                    eprintln!("RANGE WRITE [{:08x}] = {:02x} (was {:02x}) at cy={} pc={:08x} {}",
-                        range_lo + i as u32, cur, range_snapshot[i],
-                        gba.total_cycles, pc_before, if thumb { "T" } else { "A" });
+                    eprintln!(
+                        "RANGE WRITE [{:08x}] = {:02x} (was {:02x}) at cy={} pc={:08x} {}",
+                        range_lo + i as u32,
+                        cur,
+                        range_snapshot[i],
+                        gba.total_cycles,
+                        pc_before,
+                        if thumb { "T" } else { "A" }
+                    );
                     range_snapshot[i] = cur;
                 }
             }
@@ -250,21 +281,38 @@ fn main() {
 
         let pc_after = gba.cpu.fetch_addr();
         if is_valid_exec(pc_before) && !is_valid_exec(pc_after) {
-            eprintln!("PC WENT INVALID: {:08x} -> {:08x} (cycle {})", pc_before, pc_after, gba.total_cycles);
+            eprintln!(
+                "PC WENT INVALID: {:08x} -> {:08x} (cycle {})",
+                pc_before, pc_after, gba.total_cycles
+            );
             for r in 0..16 {
                 eprint!("  r{}={:08x}", r, gba.cpu.registers.get_reg(r));
             }
-            eprintln!("\n  cpsr={:08x} mode={:?}", gba.cpu.registers.cpsr(), gba.cpu.registers.mode());
+            eprintln!(
+                "\n  cpsr={:08x} mode={:?}",
+                gba.cpu.registers.cpsr(),
+                gba.cpu.registers.mode()
+            );
             // Auto-trace the next few instructions from the invalid address
             eprintln!("Auto-tracing 30 instructions from invalid PC...");
             for _ in 0..30 {
                 let pc = gba.cpu.fetch_addr();
                 let t = gba.cpu.is_thumb_mode();
-                let op = if t { gba.bus.read_u16(pc) as u32 } else { gba.bus.read_u32(pc) };
-                eprintln!("  cy={} pc={:08x} {} op={:08x} sp={:08x} lr={:08x} cpsr={:08x}",
-                    gba.total_cycles, pc, if t { "T" } else { "A" }, op,
-                    gba.cpu.registers.get_reg(13), gba.cpu.registers.get_reg(14),
-                    gba.cpu.registers.cpsr());
+                let op = if t {
+                    gba.bus.read_u16(pc) as u32
+                } else {
+                    gba.bus.read_u32(pc)
+                };
+                eprintln!(
+                    "  cy={} pc={:08x} {} op={:08x} sp={:08x} lr={:08x} cpsr={:08x}",
+                    gba.total_cycles,
+                    pc,
+                    if t { "T" } else { "A" },
+                    op,
+                    gba.cpu.registers.get_reg(13),
+                    gba.cpu.registers.get_reg(14),
+                    gba.cpu.registers.cpsr()
+                );
                 gba.step();
             }
             break;
@@ -450,10 +498,12 @@ fn main() {
         }
     }
     let dump_lo: u32 = std::env::var("TINYBIRD_DUMP_RANGE_LO")
-        .ok().and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .ok()
+        .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .unwrap_or(0);
     let dump_hi: u32 = std::env::var("TINYBIRD_DUMP_RANGE_HI")
-        .ok().and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+        .ok()
+        .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .unwrap_or(0);
     if dump_hi > dump_lo {
         for addr in (dump_lo..dump_hi).step_by(16) {

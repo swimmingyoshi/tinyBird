@@ -411,20 +411,20 @@ impl Registers {
         match cond {
             0b0000 => self.flag_z(),                                    // EQ - Equal
             0b0001 => !self.flag_z(),                                   // NE - Not equal
-            0b0010 => self.flag_c(),                    // CS/HS - Carry set / Higher or same
-            0b0011 => !self.flag_c(),                  // CC/LO - Carry clear / Lower
-            0b0100 => self.flag_n(),                   // MI - Minus / Negative
-            0b0101 => !self.flag_n(),                  // PL - Plus / Positive or zero
-            0b0110 => self.flag_v(),                   // VS - Overflow
-            0b0111 => !self.flag_v(),                  // VC - No overflow
+            0b0010 => self.flag_c(),  // CS/HS - Carry set / Higher or same
+            0b0011 => !self.flag_c(), // CC/LO - Carry clear / Lower
+            0b0100 => self.flag_n(),  // MI - Minus / Negative
+            0b0101 => !self.flag_n(), // PL - Plus / Positive or zero
+            0b0110 => self.flag_v(),  // VS - Overflow
+            0b0111 => !self.flag_v(), // VC - No overflow
             0b1000 => self.flag_c() && !self.flag_z(), // HI - Higher
             0b1001 => !self.flag_c() || self.flag_z(), // LS - Lower or same
-            0b1010 => self.flag_n() == self.flag_v(),  // GE - Greater or equal
-            0b1011 => self.flag_n() != self.flag_v(),  // LT - Less than
+            0b1010 => self.flag_n() == self.flag_v(), // GE - Greater or equal
+            0b1011 => self.flag_n() != self.flag_v(), // LT - Less than
             0b1100 => !self.flag_z() && self.flag_n() == self.flag_v(), // GT - Greater than
             0b1101 => self.flag_z() || self.flag_n() != self.flag_v(), // LE - Less or equal
-            0b1110 => true,                            // AL - Always
-            0b1111 => true,                            // NV - Never (deprecated, treat as AL)
+            0b1110 => true,           // AL - Always
+            0b1111 => true,           // NV - Never (deprecated, treat as AL)
             _ => unreachable!(),
         }
     }

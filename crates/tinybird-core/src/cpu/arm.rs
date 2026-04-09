@@ -5,13 +5,15 @@
 
 use crate::bios::Bios;
 use crate::bus::Bus;
-use crate::cpu::{align_loaded_pc, armv4_load_halfword, armv4_load_signed_halfword, armv4_load_word};
-use crate::debug::config as debug_config;
 use crate::cpu::pipeline::{
     decode_utils::{apply_shift, bit, bits, sign_extend},
     DecodedInstruction, Instruction, InstructionCategory, Pipeline, ShiftInfo, ShiftType,
 };
 use crate::cpu::registers::{CpuMode, Registers};
+use crate::cpu::{
+    align_loaded_pc, armv4_load_halfword, armv4_load_signed_halfword, armv4_load_word,
+};
+use crate::debug::config as debug_config;
 
 /// Decode an ARM instruction directly from the opcode bits
 fn decode_arm_instruction(opcode: u32) -> Option<DecodedInstruction> {
@@ -95,8 +97,12 @@ fn decode_arm_instruction(opcode: u32) -> Option<DecodedInstruction> {
     Some(DecodedInstruction {
         category: InstructionCategory::Undefined,
         condition: bits(opcode, 31, 28) as u8,
-        rd: None, rn: None, rm: None,
-        shift: None, immediate: None, branch_target: None,
+        rd: None,
+        rn: None,
+        rm: None,
+        shift: None,
+        immediate: None,
+        branch_target: None,
         writes_back: false,
     })
 }
@@ -230,9 +236,9 @@ fn decode_ldr_str(opcode: u32) -> Option<DecodedInstruction> {
     let is_load = bit(opcode, 20);
     let is_byte = bit(opcode, 22);
     let is_reg_offset = bit(opcode, 25); // bit25: 0=immediate, 1=register
-    let is_up = bit(opcode, 23);         // U bit: 1=add offset, 0=subtract offset
-    let is_pre = bit(opcode, 24);        // P bit: 1=pre-index, 0=post-index
-    let writeback = bit(opcode, 21);     // W bit: writeback to base
+    let is_up = bit(opcode, 23); // U bit: 1=add offset, 0=subtract offset
+    let is_pre = bit(opcode, 24); // P bit: 1=pre-index, 0=post-index
+    let writeback = bit(opcode, 21); // W bit: writeback to base
 
     let rd = bits(opcode, 15, 12) as u8;
     let rn = bits(opcode, 19, 16) as u8;
@@ -267,7 +273,13 @@ fn decode_ldr_str(opcode: u32) -> Option<DecodedInstruction> {
             0b00 => ShiftType::Lsl,
             0b01 => ShiftType::Lsr,
             0b10 => ShiftType::Asr,
-            0b11 => if shift_imm == 0 { ShiftType::Rrx } else { ShiftType::Ror },
+            0b11 => {
+                if shift_imm == 0 {
+                    ShiftType::Rrx
+                } else {
+                    ShiftType::Ror
+                }
+            }
             _ => ShiftType::Lsl,
         };
         (
@@ -464,9 +476,9 @@ fn decode_multiply(opcode: u32) -> Option<DecodedInstruction> {
     let category = if is_long {
         match (is_signed, accumulate) {
             (false, false) => InstructionCategory::Umull,
-            (false, true)  => InstructionCategory::Umlal,
-            (true,  false) => InstructionCategory::Smull,
-            (true,  true)  => InstructionCategory::Smlal,
+            (false, true) => InstructionCategory::Umlal,
+            (true, false) => InstructionCategory::Smull,
+            (true, true) => InstructionCategory::Smlal,
         }
     } else if accumulate {
         InstructionCategory::Mla
@@ -624,7 +636,12 @@ fn exec_data_proc<B: Bus, F>(
             regs.set_reg(rd as usize, result);
             if decoded.writes_back {
                 // Logical data-processing ops write C from shifter carry.
-                regs.set_flags((result as i32) < 0, result == 0, shifter_carry, regs.flag_v());
+                regs.set_flags(
+                    (result as i32) < 0,
+                    result == 0,
+                    shifter_carry,
+                    regs.flag_v(),
+                );
             }
         } else {
             if decoded.writes_back {
@@ -756,14 +773,18 @@ fn exec_test<B: Bus, F>(
     decoded: &DecodedInstruction,
     opcode: u32,
     op: F,
-)
-where
+) where
     F: Fn(u32, u32) -> u32,
 {
     let rn_val = decoded.rn.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
     let (op2_val, shifter_carry) = get_operand2_and_carry(regs, decoded, opcode);
     let result = op(rn_val, op2_val);
-    regs.set_flags((result as i32) < 0, result == 0, shifter_carry, regs.flag_v());
+    regs.set_flags(
+        (result as i32) < 0,
+        result == 0,
+        shifter_carry,
+        regs.flag_v(),
+    );
 }
 
 fn exec_compare<B: Bus, F>(_bus: &mut B, regs: &mut Registers, decoded: &DecodedInstruction, op: F)
@@ -800,7 +821,11 @@ fn arm_ldr_str_addr(regs: &mut Registers, decoded: &DecodedInstruction) -> (u32,
         decoded.immediate.unwrap()
     } else {
         let op2 = get_operand2(regs, decoded);
-        if is_up { op2 } else { (-(op2 as i32)) as u32 }
+        if is_up {
+            op2
+        } else {
+            (-(op2 as i32)) as u32
+        }
     };
 
     let addr = if is_pre {
@@ -811,7 +836,11 @@ fn arm_ldr_str_addr(regs: &mut Registers, decoded: &DecodedInstruction) -> (u32,
 
     // Writeback: post-index always writes back, pre-index writes back if W bit set
     let wb_addr = if decoded.writes_back {
-        Some(if is_pre { addr } else { base.wrapping_add(offset) })
+        Some(if is_pre {
+            addr
+        } else {
+            base.wrapping_add(offset)
+        })
     } else {
         None
     };
@@ -917,7 +946,10 @@ fn exec_swi<B: Bus>(bus: &mut B, regs: &mut Registers, pipeline: &mut Pipeline, 
 fn exec_mul(regs: &mut Registers, decoded: &DecodedInstruction) {
     // MUL: Rd = Rm * Rs
     let rm_val = decoded.rm.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
-    let rs_val = decoded.immediate.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
+    let rs_val = decoded
+        .immediate
+        .map(|r| regs.get_reg(r as usize))
+        .unwrap_or(0);
     let result = rm_val.wrapping_mul(rs_val);
     if let Some(rd) = decoded.rd {
         regs.set_reg(rd as usize, result);
@@ -930,7 +962,10 @@ fn exec_mul(regs: &mut Registers, decoded: &DecodedInstruction) {
 fn exec_mla(regs: &mut Registers, decoded: &DecodedInstruction) {
     // MLA: Rd = Rm * Rs + Rn
     let rm_val = decoded.rm.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
-    let rs_val = decoded.immediate.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
+    let rs_val = decoded
+        .immediate
+        .map(|r| regs.get_reg(r as usize))
+        .unwrap_or(0);
     let rn_val = decoded.rn.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
     let result = rm_val.wrapping_mul(rs_val).wrapping_add(rn_val);
     if let Some(rd) = decoded.rd {
@@ -944,7 +979,10 @@ fn exec_mla(regs: &mut Registers, decoded: &DecodedInstruction) {
 fn exec_umull(regs: &mut Registers, decoded: &DecodedInstruction) {
     // UMULL: RdHi:RdLo = Rm * Rs (unsigned 64-bit)
     let rm_val = decoded.rm.map(|r| regs.get_reg(r as usize)).unwrap_or(0) as u64;
-    let rs_val = decoded.immediate.map(|r| regs.get_reg(r as usize)).unwrap_or(0) as u64;
+    let rs_val = decoded
+        .immediate
+        .map(|r| regs.get_reg(r as usize))
+        .unwrap_or(0) as u64;
     let result = rm_val * rs_val;
     let rdhi = decoded.rd.unwrap_or(0) as usize;
     let rdlo = decoded.rn.unwrap_or(0) as usize;
@@ -958,7 +996,10 @@ fn exec_umull(regs: &mut Registers, decoded: &DecodedInstruction) {
 fn exec_umlal(regs: &mut Registers, decoded: &DecodedInstruction) {
     // UMLAL: RdHi:RdLo += Rm * Rs (unsigned 64-bit)
     let rm_val = decoded.rm.map(|r| regs.get_reg(r as usize)).unwrap_or(0) as u64;
-    let rs_val = decoded.immediate.map(|r| regs.get_reg(r as usize)).unwrap_or(0) as u64;
+    let rs_val = decoded
+        .immediate
+        .map(|r| regs.get_reg(r as usize))
+        .unwrap_or(0) as u64;
     let rdhi = decoded.rd.unwrap_or(0) as usize;
     let rdlo = decoded.rn.unwrap_or(0) as usize;
     let acc = ((regs.get_reg(rdhi) as u64) << 32) | (regs.get_reg(rdlo) as u64);
@@ -973,7 +1014,10 @@ fn exec_umlal(regs: &mut Registers, decoded: &DecodedInstruction) {
 fn exec_smull(regs: &mut Registers, decoded: &DecodedInstruction) {
     // SMULL: RdHi:RdLo = Rm * Rs (signed 64-bit)
     let rm_val = decoded.rm.map(|r| regs.get_reg(r as usize)).unwrap_or(0) as i32 as i64;
-    let rs_val = decoded.immediate.map(|r| regs.get_reg(r as usize)).unwrap_or(0) as i32 as i64;
+    let rs_val = decoded
+        .immediate
+        .map(|r| regs.get_reg(r as usize))
+        .unwrap_or(0) as i32 as i64;
     let result = (rm_val * rs_val) as u64;
     let rdhi = decoded.rd.unwrap_or(0) as usize;
     let rdlo = decoded.rn.unwrap_or(0) as usize;
@@ -987,7 +1031,10 @@ fn exec_smull(regs: &mut Registers, decoded: &DecodedInstruction) {
 fn exec_smlal(regs: &mut Registers, decoded: &DecodedInstruction) {
     // SMLAL: RdHi:RdLo += Rm * Rs (signed 64-bit)
     let rm_val = decoded.rm.map(|r| regs.get_reg(r as usize)).unwrap_or(0) as i32 as i64;
-    let rs_val = decoded.immediate.map(|r| regs.get_reg(r as usize)).unwrap_or(0) as i32 as i64;
+    let rs_val = decoded
+        .immediate
+        .map(|r| regs.get_reg(r as usize))
+        .unwrap_or(0) as i32 as i64;
     let rdhi = decoded.rd.unwrap_or(0) as usize;
     let rdlo = decoded.rn.unwrap_or(0) as usize;
     let acc = (((regs.get_reg(rdhi) as u64) << 32) | (regs.get_reg(rdlo) as u64)) as i64;
@@ -1015,7 +1062,12 @@ fn exec_blx(regs: &mut Registers, pipeline: &mut Pipeline, decoded: &DecodedInst
     regs.set_thumb_mode(thumb);
 }
 
-fn exec_ldm<B: Bus>(bus: &mut B, regs: &mut Registers, pipeline: &mut Pipeline, decoded: &DecodedInstruction) {
+fn exec_ldm<B: Bus>(
+    bus: &mut B,
+    regs: &mut Registers,
+    pipeline: &mut Pipeline,
+    decoded: &DecodedInstruction,
+) {
     let rn = decoded.rd.unwrap_or(0); // Base register is in rd for our decode
     let base = regs.get_reg(rn as usize);
     let rlist = decoded.immediate.unwrap_or(0);
@@ -1027,11 +1079,19 @@ fn exec_ldm<B: Bus>(bus: &mut B, regs: &mut Registers, pipeline: &mut Pipeline, 
     let reg_count = (0..16).filter(|i| (rlist & (1 << i)) != 0).count() as u32;
 
     let mut addr = if is_up {
-        if is_pre { base.wrapping_add(4) } else { base }
+        if is_pre {
+            base.wrapping_add(4)
+        } else {
+            base
+        }
     } else {
         // Decrement: start from base - count*4
         let start = base.wrapping_sub(reg_count * 4);
-        if is_pre { start } else { start.wrapping_add(4) }
+        if is_pre {
+            start
+        } else {
+            start.wrapping_add(4)
+        }
     };
 
     for i in 0..16u32 {
@@ -1076,10 +1136,18 @@ fn exec_stm<B: Bus>(bus: &mut B, regs: &mut Registers, decoded: &DecodedInstruct
     let reg_count = (0..16).filter(|i| (rlist & (1 << i)) != 0).count() as u32;
 
     let mut addr = if is_up {
-        if is_pre { base.wrapping_add(4) } else { base }
+        if is_pre {
+            base.wrapping_add(4)
+        } else {
+            base
+        }
     } else {
         let start = base.wrapping_sub(reg_count * 4);
-        if is_pre { start } else { start.wrapping_add(4) }
+        if is_pre {
+            start
+        } else {
+            start.wrapping_add(4)
+        }
     };
 
     for i in 0..16u32 {
@@ -1133,11 +1201,7 @@ fn exec_ldr_half<B: Bus>(
     }
 }
 
-fn exec_str_half<B: Bus>(
-    bus: &mut B,
-    regs: &mut Registers,
-    decoded: &DecodedInstruction,
-) {
+fn exec_str_half<B: Bus>(bus: &mut B, regs: &mut Registers, decoded: &DecodedInstruction) {
     let (addr, wb_addr) = arm_ldr_str_addr(regs, decoded);
     let value = decoded.rd.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
     bus.write_u16(addr, value as u16);
@@ -1161,10 +1225,18 @@ fn exec_msr(regs: &mut Registers, decoded: &DecodedInstruction) {
 
     // Build a mask from field_mask bits
     let mut mask = 0u32;
-    if (field_mask & 1) != 0 { mask |= 0x000000FF; } // control
-    if (field_mask & 2) != 0 { mask |= 0x0000FF00; } // extension
-    if (field_mask & 4) != 0 { mask |= 0x00FF0000; } // status
-    if (field_mask & 8) != 0 { mask |= 0xFF000000; } // flags
+    if (field_mask & 1) != 0 {
+        mask |= 0x000000FF;
+    } // control
+    if (field_mask & 2) != 0 {
+        mask |= 0x0000FF00;
+    } // extension
+    if (field_mask & 4) != 0 {
+        mask |= 0x00FF0000;
+    } // status
+    if (field_mask & 8) != 0 {
+        mask |= 0xFF000000;
+    } // flags
 
     if use_spsr {
         let current = regs.spsr().unwrap_or(0);
@@ -1221,12 +1293,20 @@ fn get_operand2(regs: &Registers, decoded: &DecodedInstruction) -> u32 {
     0
 }
 
-fn get_operand2_and_carry(regs: &Registers, decoded: &DecodedInstruction, opcode: u32) -> (u32, bool) {
+fn get_operand2_and_carry(
+    regs: &Registers,
+    decoded: &DecodedInstruction,
+    opcode: u32,
+) -> (u32, bool) {
     if bit(opcode, 25) {
         let imm8 = bits(opcode, 7, 0);
         let rotate = bits(opcode, 11, 8) * 2;
         let value = imm8.rotate_right(rotate);
-        let carry = if rotate == 0 { regs.flag_c() } else { (value >> 31) != 0 };
+        let carry = if rotate == 0 {
+            regs.flag_c()
+        } else {
+            (value >> 31) != 0
+        };
         return (value, carry);
     }
 
@@ -1275,7 +1355,12 @@ mod tests {
         execute_arm(&instr, &mut bus, regs, &mut pipeline);
     }
 
-    fn run_arm_with_bus(opcode: u32, regs: &mut Registers, bus: &mut SimpleBus, pipeline: &mut Pipeline) {
+    fn run_arm_with_bus(
+        opcode: u32,
+        regs: &mut Registers,
+        bus: &mut SimpleBus,
+        pipeline: &mut Pipeline,
+    ) {
         let mut instr = Instruction::arm(opcode);
         decode_arm(&mut instr);
         execute_arm(&instr, bus, regs, pipeline);
@@ -1338,7 +1423,7 @@ mod tests {
         regs.set_reg(0, 5);
         regs.set_reg(1, 5);
         regs.set_reg(2, 100); // RdLo = 100
-        regs.set_reg(3, 0);   // RdHi = 0
+        regs.set_reg(3, 0); // RdHi = 0
         run_arm(0xE0A32190, &mut regs);
         // 5 * 5 + 100 = 125
         assert_eq!(regs.get_reg(2), 125);
@@ -1353,7 +1438,7 @@ mod tests {
         regs.set_reg(0, (-2i32) as u32);
         regs.set_reg(1, 3);
         regs.set_reg(2, 50); // RdLo
-        regs.set_reg(3, 0);  // RdHi
+        regs.set_reg(3, 0); // RdHi
         run_arm(0xE0E32190, &mut regs);
         // -2 * 3 + 50 = 44
         assert_eq!(regs.get_reg(2), 44);

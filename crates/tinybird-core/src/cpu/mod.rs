@@ -205,8 +205,13 @@ impl Cpu {
         // IRQ is enabled when CPSR bit 7 (I flag) is 0
         let cpsr = self.registers.cpsr();
         if debug_config().irq_debug {
-            eprintln!("[cpu.irq] cpsr={:08x} I={} pc={:08x} -> fires={}",
-                cpsr, (cpsr >> 7) & 1, self.pipeline.fetch_addr, (cpsr & (1 << 7)) == 0);
+            eprintln!(
+                "[cpu.irq] cpsr={:08x} I={} pc={:08x} -> fires={}",
+                cpsr,
+                (cpsr >> 7) & 1,
+                self.pipeline.fetch_addr,
+                (cpsr & (1 << 7)) == 0
+            );
         }
         if (cpsr & (1 << 7)) == 0 {
             let return_addr = if self.registers.is_thumb_mode() {
@@ -349,8 +354,11 @@ mod tests {
         decode_arm(&mut instr);
         execute_arm(&instr, &mut bus, &mut cpu.registers, &mut cpu.pipeline);
 
-        assert_eq!(bus.read_io_direct(0x301), 0x00,
-            "HALT SWI should write 0x00 to HALTCNT");
+        assert_eq!(
+            bus.read_io_direct(0x301),
+            0x00,
+            "HALT SWI should write 0x00 to HALTCNT"
+        );
     }
 
     #[test]
@@ -370,7 +378,10 @@ mod tests {
         // One step should wake the CPU (PPU/timer ticks, halt check runs)
         gba.step();
 
-        assert!(!gba.cpu.halted, "CPU should wake from HALT when IE & IF != 0");
+        assert!(
+            !gba.cpu.halted,
+            "CPU should wake from HALT when IE & IF != 0"
+        );
     }
 
     #[test]
