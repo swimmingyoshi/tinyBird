@@ -1,6 +1,8 @@
 //! Headless GBA emulator runner for debugging
 
-use tinybird_core::{ppu::ObjectAttribute, Bus, Gba, GbaButton};
+mod support;
+
+use tinybird_core::{ppu::ObjectAttribute, Bus, GbaButton};
 
 fn parse_buttons(spec: &str) -> Option<GbaButton> {
     let mut buttons = GbaButton::empty();
@@ -51,25 +53,7 @@ fn parse_input_script(script: &str) -> Vec<(u64, GbaButton)> {
 }
 
 fn main() {
-    let mut rom_path = "/home/swim/Documents/Code/tinyBird/roms/PokemonFireRed.gba".to_string();
-    let mut bios_path: Option<String> = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--bios" {
-            bios_path = args.next();
-        } else {
-            rom_path = arg;
-        }
-    }
-
-    let rom = std::fs::read(&rom_path).expect("failed to read ROM");
-    let mut gba = Gba::new();
-    if let Some(path) = bios_path {
-        let bios = std::fs::read(&path).expect("failed to read BIOS");
-        gba.load_bios(bios);
-    }
-    gba.load_rom(rom);
-    gba.start();
+    let mut gba = support::load_gba_from_args("headless");
 
     let max_cycles: u64 = std::env::var("MAX_CYCLES")
         .ok()
@@ -153,7 +137,7 @@ fn main() {
             next_input_event += 1;
         }
 
-        if progress_every != 0 && gba.total_cycles % progress_every == 0 {
+        if progress_every != 0 && gba.total_cycles.is_multiple_of(progress_every) {
             eprintln!(
                 "progress cy={} pc={:08x} dispcnt={:04x} non_black={} halted={} ie={:04x} if={:04x} ime={:04x} bios_if={:04x}",
                 gba.total_cycles,
@@ -262,19 +246,19 @@ fn main() {
 
         // Scan range for changes
         if range_len > 0 {
-            for i in 0..range_len {
+            for (i, previous) in range_snapshot.iter_mut().enumerate().take(range_len) {
                 let cur = gba.bus.read_u8(range_lo + i as u32);
-                if cur != range_snapshot[i] {
+                if cur != *previous {
                     eprintln!(
                         "RANGE WRITE [{:08x}] = {:02x} (was {:02x}) at cy={} pc={:08x} {}",
                         range_lo + i as u32,
                         cur,
-                        range_snapshot[i],
+                        *previous,
                         gba.total_cycles,
                         pc_before,
                         if thumb { "T" } else { "A" }
                     );
-                    range_snapshot[i] = cur;
+                    *previous = cur;
                 }
             }
         }

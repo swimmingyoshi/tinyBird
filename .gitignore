@@ -9,7 +9,10 @@
 *.bin
 *.sav
 *.srm
+*.state
+*.ppm
 roms/
+stream-data/
 
 # Editor/tool configs
 .claude/

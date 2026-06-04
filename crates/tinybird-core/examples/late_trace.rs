@@ -1,6 +1,8 @@
 //! Fast-forward to a late frame, then single-step with tracing.
 
-use tinybird_core::{Bus, Gba};
+mod support;
+
+use tinybird_core::Bus;
 
 fn is_valid_exec(pc: u32) -> bool {
     matches!(
@@ -13,25 +15,7 @@ fn is_valid_exec(pc: u32) -> bool {
 }
 
 fn main() {
-    let mut rom_path = "/home/swim/Documents/Code/tinyBird/roms/PokemonFireRed.gba".to_string();
-    let mut bios_path: Option<String> = None;
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--bios" {
-            bios_path = args.next();
-        } else {
-            rom_path = arg;
-        }
-    }
-
-    let rom = std::fs::read(&rom_path).expect("failed to read ROM");
-    let mut gba = Gba::new();
-    if let Some(path) = bios_path {
-        let bios = std::fs::read(&path).expect("failed to read BIOS");
-        gba.load_bios(bios);
-    }
-    gba.load_rom(rom);
-    gba.start();
+    let mut gba = support::load_gba_from_args("late_trace");
 
     let target_frames: u32 = std::env::var("TARGET_FRAMES")
         .ok()

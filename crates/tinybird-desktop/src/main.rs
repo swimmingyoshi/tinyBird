@@ -1,8 +1,10 @@
 //! tinyBird Desktop - GBA Emulator Desktop Frontend
 
 mod audio;
+mod game_addons;
 mod input_map;
 mod overlay;
+mod pokemon_assets;
 
 use std::env;
 use std::fs;
@@ -32,6 +34,7 @@ const FRAME_DURATION: Duration = Duration::from_nanos(
 const FRAME_PACING_TOLERANCE: Duration = Duration::from_micros(750);
 const FRAME_CATCHUP_LIMIT: u32 = 3;
 const AUDIO_BACKPRESSURE_MILLIS: u32 = 94;
+const ADDON_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const RGB555_COLOR_COUNT: usize = 1 << 15;
 
 fn build_rgb555_lookup(color_correction: bool) -> [u32; RGB555_COLOR_COUNT] {
@@ -67,16 +70,50 @@ fn rgb555_lookup(color_correction: bool) -> &'static [u32; RGB555_COLOR_COUNT] {
     }
 }
 
+fn is_rom_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gba") || ext.eq_ignore_ascii_case("bin"))
+}
+
+fn discover_rom_candidates(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut candidates: Vec<_> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file() && is_rom_file(path))
+        .collect();
+    candidates.sort();
+    candidates
+}
+
+fn default_bios_path() -> Option<PathBuf> {
+    let path = PathBuf::from("gba_bios.bin");
+    path.is_file().then_some(path)
+}
+
 enum QuicksaveLoadResult {
     Loaded,
     Missing,
     Failed,
 }
 
+struct StatusMessage {
+    text: String,
+    tone: overlay::ToastTone,
+    expires_at: Instant,
+}
+
 struct App {
     window: Option<Arc<Window>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     surface_size: (u32, u32),
+    addon_window: Option<Arc<Window>>,
+    addon_surface: Option<Surface<Arc<Window>, Arc<Window>>>,
+    addon_surface_size: (u32, u32),
     gba: Gba,
     speed_multiplier: u32,
     next_frame_deadline: Instant,
@@ -99,12 +136,19 @@ struct App {
     fps_timer: Instant,
     current_fps: f64,
     show_overlay: bool,
+    show_addon_panel: bool,
     muted: bool,
     volume: f32,
     color_correction: bool,
     cart_save_dirty: bool,
     last_save_flush: Instant,
     quicksave_slot: Option<Gba>,
+    hovered_file: Option<PathBuf>,
+    status_message: Option<StatusMessage>,
+    addon_snapshot: game_addons::StreamSnapshot,
+    pokemon_sprites: pokemon_assets::PokemonSpriteStore,
+    last_addon_refresh: Instant,
+    last_addon_export_json: Option<String>,
 }
 
 impl App {
@@ -143,11 +187,21 @@ impl App {
             } else {
                 (false, None, None, None, None, None)
             };
+        let addon_snapshot = if rom_loaded {
+            game_addons::capture_stream_snapshot(Some(&gba))
+        } else {
+            game_addons::capture_stream_snapshot(None)
+        };
+        let mut pokemon_sprites = pokemon_assets::PokemonSpriteStore::new();
+        pokemon_sprites.queue_snapshot(&addon_snapshot);
 
         Self {
             window: None,
             surface: None,
             surface_size: (0, 0),
+            addon_window: None,
+            addon_surface: None,
+            addon_surface_size: (0, 0),
             gba,
             speed_multiplier: 1,
             next_frame_deadline: Instant::now() + FRAME_DURATION,
@@ -170,13 +224,114 @@ impl App {
             fps_timer: Instant::now(),
             current_fps: 0.0,
             show_overlay: false,
+            show_addon_panel: false,
             muted: false,
             volume: 1.0,
             color_correction: false,
             cart_save_dirty: false,
             last_save_flush: Instant::now(),
             quicksave_slot,
+            hovered_file: None,
+            status_message: None,
+            addon_snapshot,
+            pokemon_sprites,
+            last_addon_refresh: Instant::now(),
+            last_addon_export_json: None,
         }
+    }
+
+    fn request_redraw(&self) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        if let Some(window) = &self.addon_window {
+            window.request_redraw();
+        }
+    }
+
+    fn refresh_window_title(&self) {
+        let base = match &self.rom_title {
+            Some(name) => format!("tinyBird - {}", name),
+            None => "tinyBird - GBA Emulator".to_string(),
+        };
+
+        let title = if self.rom_loaded && self.gba.state == GbaState::Paused {
+            format!("{base} | Paused")
+        } else if self.rom_loaded && self.current_fps > 0.0 && self.gba.state == GbaState::Running {
+            format!("{base} | {:.1} FPS", self.current_fps)
+        } else {
+            base
+        };
+
+        if let Some(window) = &self.window {
+            window.set_title(&title);
+        }
+        self.refresh_addon_window_title();
+    }
+
+    fn refresh_addon_window_title(&self) {
+        let Some(window) = &self.addon_window else {
+            return;
+        };
+
+        let title = self
+            .addon_snapshot
+            .addon
+            .as_ref()
+            .map(|addon| format!("tinyBird - {}", addon.display_name))
+            .or_else(|| {
+                self.rom_title
+                    .as_ref()
+                    .map(|name| format!("tinyBird - Addons | {name}"))
+            })
+            .unwrap_or_else(|| "tinyBird - Addons".to_string());
+        window.set_title(&title);
+    }
+
+    fn set_status(&mut self, text: impl Into<String>, tone: overlay::ToastTone) {
+        let duration = match tone {
+            overlay::ToastTone::Warning => Duration::from_secs(4),
+            overlay::ToastTone::Info | overlay::ToastTone::Success => Duration::from_secs(3),
+        };
+
+        self.status_message = Some(StatusMessage {
+            text: text.into(),
+            tone,
+            expires_at: Instant::now() + duration,
+        });
+        self.request_redraw();
+    }
+
+    fn active_toast(&mut self) -> Option<(String, overlay::ToastTone)> {
+        if self
+            .status_message
+            .as_ref()
+            .is_some_and(|status| Instant::now() >= status.expires_at)
+        {
+            self.status_message = None;
+        }
+
+        self.status_message
+            .as_ref()
+            .map(|status| (status.text.clone(), status.tone))
+    }
+
+    fn short_label(text: &str, max_chars: usize) -> String {
+        let mut chars = text.chars();
+        let mut shortened = String::new();
+        for _ in 0..max_chars {
+            let Some(ch) = chars.next() else {
+                return text.to_string();
+            };
+            shortened.push(ch);
+        }
+
+        if chars.next().is_some() && max_chars >= 3 {
+            shortened.truncate(max_chars - 3);
+            shortened.push_str("...");
+        }
+
+        shortened
     }
 
     fn reset_timing_state(&mut self) {
@@ -196,8 +351,32 @@ impl App {
         }
 
         self.speed_multiplier = speed_multiplier;
+        // Playback rate changes invalidate any queued samples from the prior mode.
+        self.clear_audio_output();
         self.reset_timing_state();
         self.update_audio_emulation_state();
+    }
+
+    fn refresh_game_addon_state(&mut self, force: bool) {
+        if !force && self.last_addon_refresh.elapsed() < ADDON_REFRESH_INTERVAL {
+            return;
+        }
+
+        let snapshot = if self.rom_loaded {
+            game_addons::capture_stream_snapshot(Some(&self.gba))
+        } else {
+            game_addons::capture_stream_snapshot(None)
+        };
+        self.pokemon_sprites.queue_snapshot(&snapshot);
+
+        if self.addon_snapshot != snapshot {
+            self.addon_snapshot = snapshot;
+            self.refresh_addon_window_title();
+            self.request_redraw();
+        }
+
+        game_addons::write_stream_snapshot(&self.addon_snapshot, &mut self.last_addon_export_json);
+        self.last_addon_refresh = Instant::now();
     }
 
     fn rom_title_from_path(path: &Path) -> String {
@@ -217,6 +396,7 @@ impl App {
     fn write_quicksave_file(&mut self) {
         let Some(state_path) = &self.state_path else {
             eprintln!("No ROM loaded for savestate");
+            self.set_status("No ROM loaded for save state", overlay::ToastTone::Warning);
             return;
         };
 
@@ -225,6 +405,7 @@ impl App {
                 Ok(()) => {
                     self.quicksave_slot = Some(self.gba.clone());
                     println!("Quicksave written to {}", state_path.display());
+                    self.set_status("Quicksave written", overlay::ToastTone::Success);
                 }
                 Err(err) => {
                     eprintln!(
@@ -232,10 +413,12 @@ impl App {
                         state_path.display(),
                         err
                     );
+                    self.set_status("Failed to write quicksave", overlay::ToastTone::Warning);
                 }
             },
             Err(err) => {
                 eprintln!("Failed to serialize savestate: {}", err);
+                self.set_status("Failed to serialize quicksave", overlay::ToastTone::Warning);
             }
         }
     }
@@ -256,6 +439,7 @@ impl App {
                 state_path.display(),
                 err
             );
+            self.set_status("Savestate could not be loaded", overlay::ToastTone::Warning);
             return QuicksaveLoadResult::Failed;
         }
 
@@ -306,6 +490,7 @@ impl App {
 
         let Ok(rom_data) = fs::read(&path) else {
             eprintln!("Failed to read ROM '{}'", path.display());
+            self.set_status("Could not read ROM file", overlay::ToastTone::Warning);
             return;
         };
 
@@ -313,10 +498,12 @@ impl App {
         let name = Self::rom_title_from_path(&path);
         let save_path = Self::save_path_for_rom(&path);
         let state_path = Self::state_path_for_rom(&path);
+        let save_data = fs::read(&save_path).ok();
+        let loaded_save = save_data.is_some();
 
         self.gba.load_rom(rom_data);
-        if let Ok(save_data) = fs::read(&save_path) {
-            self.gba.load_save_data(&save_data);
+        if let Some(save_data) = &save_data {
+            self.gba.load_save_data(save_data);
         }
 
         self.rom_loaded = true;
@@ -337,13 +524,21 @@ impl App {
         });
         self.cart_save_dirty = false;
         self.last_save_flush = Instant::now();
+        self.hovered_file = None;
         self.sync_input_state();
         self.update_audio_emulation_state();
         self.clear_audio_output();
         self.reset_timing_state();
-        if let Some(window) = &self.window {
-            window.set_title(&format!("tinyBird - {}", name));
-        }
+        self.refresh_window_title();
+        let short_name = Self::short_label(&name, 24);
+        let status = if loaded_save {
+            format!("Loaded {short_name} with save data")
+        } else {
+            format!("Loaded {short_name}")
+        };
+        self.set_status(status, overlay::ToastTone::Success);
+        self.refresh_game_addon_state(true);
+        self.request_redraw();
     }
 
     fn run_emulation_batch(&mut self, base_frames: u32) -> u32 {
@@ -372,11 +567,12 @@ impl App {
 
             self.maybe_mark_cart_save_dirty();
 
+            self.refresh_game_addon_state(false);
+
             if let Some(audio_handler) = &self.audio_handler {
-                let source_rate = self.gba.apu.output_sample_rate();
                 let samples = self.gba.apu.drain_samples();
                 if self.speed_multiplier == 1 && !samples.is_empty() && !self.muted {
-                    audio_handler.push_samples(&samples, source_rate);
+                    audio_handler.push_samples(&samples, self.gba.apu.output_sample_rate());
                 }
             } else {
                 self.gba.apu.drain_samples();
@@ -389,17 +585,13 @@ impl App {
                 self.current_fps = self.fps_frame_count as f64 / fps_elapsed.as_secs_f64();
                 self.fps_frame_count = 0;
                 self.fps_timer = Instant::now();
-                if let Some(window) = &self.window {
-                    let title = match &self.rom_title {
-                        Some(name) => format!("tinyBird - {} | {:.1} FPS", name, self.current_fps),
-                        None => format!("tinyBird | {:.1} FPS", self.current_fps),
-                    };
-                    window.set_title(&title);
-                }
+                self.refresh_window_title();
             }
 
             // Debug: check PPU state
-            if frame_debug && (self.gba.frame_count <= 3 || self.gba.frame_count % 300 == 0) {
+            if frame_debug
+                && (self.gba.frame_count <= 3 || self.gba.frame_count.is_multiple_of(300))
+            {
                 let bus_dispcnt = self.gba.bus.read_io_direct_u16(0x000);
                 let pc = self.gba.pc();
                 let thumb = self.gba.cpu.is_thumb_mode();
@@ -425,51 +617,106 @@ impl App {
     }
 
     fn update_audio_emulation_state(&mut self) {
-        let audio_active =
-            self.audio_handler.is_some() && !self.muted && self.speed_multiplier == 1;
-        self.gba.set_audio_enabled(audio_active);
+        let audio_emulation_active = self.audio_handler.is_some();
+        self.gba.set_audio_enabled(audio_emulation_active);
 
         if let Some(audio_handler) = &self.audio_handler {
-            audio_handler.set_volume(if audio_active { self.volume } else { 0.0 });
+            audio_handler.set_volume(if self.muted || self.speed_multiplier > 1 {
+                0.0
+            } else {
+                self.volume
+            });
         }
 
-        if !audio_active {
+        if !audio_emulation_active {
             self.gba.apu.drain_samples();
+            self.clear_audio_output();
+        } else if self.muted || self.speed_multiplier > 1 {
             self.clear_audio_output();
         }
     }
 
     fn present_current_frame(&mut self) {
+        if self.pokemon_sprites.drain_updates() {
+            self.request_redraw();
+        }
+
+        let toast = self.active_toast();
+        let hovered_file = self.hovered_file.as_ref().and_then(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| Self::short_label(name, 24))
+        });
+
         if !self.rom_loaded {
             let Some(surface) = &mut self.surface else {
                 return;
             };
-            Self::present_buffer(surface, self.surface_size, None, false, None);
+            let home = overlay::HomeScreen {
+                bios_loaded: self.gba.use_bios,
+                hovered_file: hovered_file.as_deref(),
+            };
+            let toast = toast.as_ref().map(|(text, tone)| overlay::Toast {
+                text: text.as_str(),
+                tone: *tone,
+            });
+            Self::present_buffer(
+                surface,
+                self.surface_size,
+                None,
+                false,
+                None,
+                None,
+                Some(home),
+                None,
+                toast,
+            );
+            self.present_addon_window();
             return;
         }
 
         let framebuffer = self.gba.ppu.get_framebuffer();
+        let addon_panel = self
+            .show_addon_panel
+            .then_some((&self.addon_snapshot, &self.pokemon_sprites));
         let Some(surface) = &mut self.surface else {
             return;
         };
-        let overlay_params = if self.show_overlay {
+        let overlay_params = if self.show_overlay && self.gba.state == GbaState::Running {
             Some((
                 self.current_fps,
                 self.speed_multiplier,
                 self.muted,
                 (self.volume * 100.0).round() as u32,
                 self.color_correction,
+                self.speed_multiplier > 1,
             ))
         } else {
             None
         };
+        let pause_screen = if self.gba.state == GbaState::Paused {
+            Some(overlay::PauseScreen {
+                rom_title: self.rom_title.as_deref(),
+            })
+        } else {
+            None
+        };
+        let toast = toast.as_ref().map(|(text, tone)| overlay::Toast {
+            text: text.as_str(),
+            tone: *tone,
+        });
         Self::present_buffer(
             surface,
             self.surface_size,
             Some(framebuffer),
             self.color_correction,
             overlay_params,
+            addon_panel,
+            None,
+            pause_screen,
+            toast,
         );
+        self.present_addon_window();
     }
 
     fn render_frame(&mut self, base_frames: u32) {
@@ -482,7 +729,14 @@ impl App {
         surface_size: (u32, u32),
         framebuffer: Option<&Framebuffer>,
         color_correction: bool,
-        overlay: Option<(f64, u32, bool, u32, bool)>,
+        overlay: Option<(f64, u32, bool, u32, bool, bool)>,
+        addon_panel: Option<(
+            &game_addons::StreamSnapshot,
+            &pokemon_assets::PokemonSpriteStore,
+        )>,
+        home_screen: Option<overlay::HomeScreen<'_>>,
+        pause_screen: Option<overlay::PauseScreen<'_>>,
+        toast: Option<overlay::Toast<'_>>,
     ) {
         if surface_size.0 == 0 || surface_size.1 == 0 {
             return;
@@ -496,7 +750,14 @@ impl App {
         let win_h = surface_size.1 as usize;
 
         let Some(framebuffer) = framebuffer else {
-            buffer.fill(0x000000);
+            if let Some(home) = home_screen {
+                overlay::draw_home_screen(&mut buffer, win_w, win_h, home);
+            } else {
+                buffer.fill(0x000000);
+            }
+            if let Some(toast) = toast {
+                overlay::draw_toast(&mut buffer, win_w, win_h, toast);
+            }
             let _ = buffer.present();
             return;
         };
@@ -549,7 +810,7 @@ impl App {
                     }
                 }
 
-                if let Some((fps, speed, muted, volume_pct, cc)) = overlay {
+                if let Some((fps, speed, muted, volume_pct, cc, fast_forward)) = overlay {
                     overlay::draw_overlay(
                         &mut buffer,
                         win_w,
@@ -559,7 +820,18 @@ impl App {
                         muted,
                         volume_pct,
                         cc,
+                        fast_forward,
                     );
+                }
+                if let Some((snapshot, sprites)) = addon_panel {
+                    overlay::draw_addon_panel(&mut buffer, win_w, win_h, snapshot, sprites, false);
+                }
+                if let Some(paused) = pause_screen {
+                    overlay::dim_screen(&mut buffer);
+                    overlay::draw_pause_screen(&mut buffer, win_w, win_h, paused);
+                }
+                if let Some(toast) = toast {
+                    overlay::draw_toast(&mut buffer, win_w, win_h, toast);
                 }
                 let _ = buffer.present();
                 return;
@@ -577,9 +849,51 @@ impl App {
             }
         }
 
-        if let Some((fps, speed, muted, volume_pct, cc)) = overlay {
-            overlay::draw_overlay(&mut buffer, win_w, win_h, fps, speed, muted, volume_pct, cc);
+        if let Some((fps, speed, muted, volume_pct, cc, fast_forward)) = overlay {
+            overlay::draw_overlay(
+                &mut buffer,
+                win_w,
+                win_h,
+                fps,
+                speed,
+                muted,
+                volume_pct,
+                cc,
+                fast_forward,
+            );
         }
+        if let Some((snapshot, sprites)) = addon_panel {
+            overlay::draw_addon_panel(&mut buffer, win_w, win_h, snapshot, sprites, false);
+        }
+        if let Some(paused) = pause_screen {
+            overlay::dim_screen(&mut buffer);
+            overlay::draw_pause_screen(&mut buffer, win_w, win_h, paused);
+        }
+        if let Some(toast) = toast {
+            overlay::draw_toast(&mut buffer, win_w, win_h, toast);
+        }
+        let _ = buffer.present();
+    }
+
+    fn present_addon_window(&mut self) {
+        let Some(surface) = &mut self.addon_surface else {
+            return;
+        };
+        if self.addon_surface_size.0 == 0 || self.addon_surface_size.1 == 0 {
+            return;
+        }
+
+        let Ok(mut buffer) = surface.buffer_mut() else {
+            return;
+        };
+        overlay::draw_addon_panel(
+            &mut buffer,
+            self.addon_surface_size.0 as usize,
+            self.addon_surface_size.1 as usize,
+            &self.addon_snapshot,
+            &self.pokemon_sprites,
+            true,
+        );
         let _ = buffer.present();
     }
 
@@ -670,7 +984,13 @@ impl App {
         self.gilrs = Some(gilrs);
     }
 
-    fn handle_key(&mut self, physical_key: &PhysicalKey, logical_key: &Key, pressed: bool) {
+    fn handle_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        physical_key: &PhysicalKey,
+        logical_key: &Key,
+        pressed: bool,
+    ) {
         if let Some(btn) = input_map::map_physical_key(physical_key) {
             if pressed {
                 self.keyboard_buttons.insert(btn);
@@ -682,6 +1002,11 @@ impl App {
 
         // Handle emulator controls
         if pressed {
+            if !self.rom_loaded && matches!(logical_key, Key::Named(NamedKey::Enter)) {
+                self.open_rom();
+                return;
+            }
+
             match logical_key {
                 Key::Named(NamedKey::Tab) => {
                     self.set_speed_multiplier(4);
@@ -691,20 +1016,24 @@ impl App {
                         self.gba.pause();
                         self.clear_audio_output();
                         self.reset_timing_state();
+                        self.refresh_window_title();
+                        self.set_status("Paused", overlay::ToastTone::Info);
                     } else if self.gba.state == GbaState::Paused {
                         self.gba.start();
                         self.clear_audio_output();
                         self.reset_timing_state();
+                        self.refresh_window_title();
+                        self.set_status("Resumed", overlay::ToastTone::Info);
                     }
                 }
                 Key::Named(NamedKey::F5) => {
                     self.write_quicksave_file();
                 }
                 Key::Named(NamedKey::F8) => {
-                    if self.quicksave_slot.is_none() {
-                        if matches!(self.try_load_quicksave_file(), QuicksaveLoadResult::Failed) {
-                            return;
-                        }
+                    if self.quicksave_slot.is_none()
+                        && matches!(self.try_load_quicksave_file(), QuicksaveLoadResult::Failed)
+                    {
+                        return;
                     }
                     if let Some(state) = &self.quicksave_slot {
                         self.gba = state.clone();
@@ -713,26 +1042,60 @@ impl App {
                         self.clear_audio_output();
                         self.reset_timing_state();
                         self.update_audio_emulation_state();
+                        self.refresh_window_title();
+                        self.refresh_game_addon_state(true);
                         println!("Quicksave loaded");
+                        self.set_status("Quicksave loaded", overlay::ToastTone::Success);
                     } else {
                         eprintln!("No quicksave available yet");
+                        self.set_status("No quicksave available", overlay::ToastTone::Warning);
                     }
                 }
                 Key::Named(NamedKey::F1) => {
                     self.show_overlay = !self.show_overlay;
+                    self.request_redraw();
+                }
+                Key::Named(NamedKey::F2) => {
+                    self.show_addon_panel = !self.show_addon_panel;
+                    self.request_redraw();
+                    self.set_status(
+                        if self.show_addon_panel {
+                            "Team panel shown"
+                        } else {
+                            "Team panel hidden"
+                        },
+                        overlay::ToastTone::Info,
+                    );
+                }
+                Key::Named(NamedKey::F3) => {
+                    if self.addon_window.is_some() {
+                        self.close_addon_window();
+                        self.set_status("Addon popout closed", overlay::ToastTone::Info);
+                    } else {
+                        self.ensure_addon_window(event_loop);
+                        self.set_status("Addon popout opened", overlay::ToastTone::Info);
+                    }
                 }
                 Key::Character(c) if c.as_str() == "1" => {
                     self.set_speed_multiplier(1);
+                    self.set_status("Speed set to 1x", overlay::ToastTone::Info);
                 }
                 Key::Character(c) if c.as_str() == "2" => {
                     self.set_speed_multiplier(2);
+                    self.set_status("Speed set to 2x, audio muted", overlay::ToastTone::Info);
                 }
-                Key::Character(c) if c.as_str() == "3" => {
+                Key::Character(c) if c.as_str() == "3" || c.as_str() == "4" => {
                     self.set_speed_multiplier(4);
+                    self.set_status("Speed set to 4x, audio muted", overlay::ToastTone::Info);
                 }
                 Key::Character(c) if c.as_str() == "m" || c.as_str() == "M" => {
                     self.muted = !self.muted;
                     self.update_audio_emulation_state();
+                    if self.muted {
+                        self.set_status("Audio muted", overlay::ToastTone::Info);
+                    } else {
+                        self.set_status("Audio unmuted", overlay::ToastTone::Info);
+                    }
                 }
                 Key::Character(c) if c.as_str() == "-" || c.as_str() == "[" => {
                     self.volume = (self.volume - 0.1).clamp(0.0, 1.0);
@@ -741,6 +1104,10 @@ impl App {
                             audio_handler.set_volume(self.volume);
                         }
                     }
+                    self.set_status(
+                        format!("Volume {}%", (self.volume * 100.0).round() as u32),
+                        overlay::ToastTone::Info,
+                    );
                 }
                 Key::Character(c) if c.as_str() == "=" || c.as_str() == "]" => {
                     self.volume = (self.volume + 0.1).clamp(0.0, 1.0);
@@ -749,14 +1116,26 @@ impl App {
                             audio_handler.set_volume(self.volume);
                         }
                     }
+                    self.set_status(
+                        format!("Volume {}%", (self.volume * 100.0).round() as u32),
+                        overlay::ToastTone::Info,
+                    );
                 }
                 Key::Character(c) if c.as_str() == "c" || c.as_str() == "C" => {
                     self.color_correction = !self.color_correction;
+                    if self.color_correction {
+                        self.set_status("LCD color correction on", overlay::ToastTone::Info);
+                    } else {
+                        self.set_status("LCD color correction off", overlay::ToastTone::Info);
+                    }
                 }
                 Key::Character(c) if c.as_str() == "r" || c.as_str() == "R" => {
                     self.gba.reset();
                     self.clear_audio_output();
                     self.reset_timing_state();
+                    self.refresh_window_title();
+                    self.refresh_game_addon_state(true);
+                    self.set_status("ROM reset", overlay::ToastTone::Info);
                 }
                 Key::Character(c) if c.as_str() == "o" || c.as_str() == "O" => {
                     self.open_rom();
@@ -765,6 +1144,52 @@ impl App {
             }
         } else if matches!(logical_key, Key::Named(NamedKey::Tab)) {
             self.set_speed_multiplier(1);
+        }
+    }
+
+    fn handle_addon_window_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        logical_key: &Key,
+        pressed: bool,
+    ) {
+        if !pressed {
+            return;
+        }
+
+        match logical_key {
+            Key::Named(NamedKey::Escape) | Key::Named(NamedKey::F3) => {
+                self.close_addon_window();
+                self.set_status("Addon popout closed", overlay::ToastTone::Info);
+            }
+            Key::Named(NamedKey::F2) => {
+                self.show_addon_panel = !self.show_addon_panel;
+                self.request_redraw();
+                self.set_status(
+                    if self.show_addon_panel {
+                        "Team panel shown"
+                    } else {
+                        "Team panel hidden"
+                    },
+                    overlay::ToastTone::Info,
+                );
+            }
+            Key::Named(NamedKey::F1) => {
+                self.show_overlay = !self.show_overlay;
+                self.request_redraw();
+            }
+            Key::Character(c) if c.as_str() == "o" || c.as_str() == "O" => {
+                self.open_rom();
+                self.request_redraw();
+            }
+            Key::Named(NamedKey::Enter) if !self.rom_loaded => {
+                self.open_rom();
+                self.request_redraw();
+            }
+            Key::Named(NamedKey::Tab) => {
+                self.ensure_addon_window(event_loop);
+            }
+            _ => {}
         }
     }
 
@@ -777,12 +1202,60 @@ impl App {
         }
     }
 
-    fn resize_surface(&mut self, width: u32, height: u32) {
+    fn ensure_addon_window(&mut self, event_loop: &ActiveEventLoop) {
+        if self.addon_window.is_some() {
+            self.request_redraw();
+            return;
+        }
+
+        let attrs = Window::default_attributes()
+            .with_title("tinyBird - Addons")
+            .with_inner_size(LogicalSize::new(420.0, 360.0))
+            .with_min_inner_size(LogicalSize::new(260.0, 220.0))
+            .with_resizable(true);
+
+        let window = Arc::new(
+            event_loop
+                .create_window(attrs)
+                .expect("Failed to create addon window"),
+        );
+        let context =
+            softbuffer::Context::new(window.clone()).expect("Failed to create addon context");
+        let surface =
+            Surface::new(&context, window.clone()).expect("Failed to create addon surface");
+
+        self.addon_window = Some(window);
+        self.addon_surface = Some(surface);
+        self.resize_addon_surface(420, 360);
+        self.refresh_addon_window_title();
+        self.request_redraw();
+    }
+
+    fn close_addon_window(&mut self) {
+        self.addon_surface = None;
+        self.addon_window = None;
+        self.addon_surface_size = (0, 0);
+    }
+
+    fn resize_main_surface(&mut self, width: u32, height: u32) {
         self.surface_size = (width, height);
         if width == 0 || height == 0 {
             return;
         }
         if let Some(surface) = &mut self.surface {
+            let _ = surface.resize(
+                NonZeroU32::new(width).unwrap(),
+                NonZeroU32::new(height).unwrap(),
+            );
+        }
+    }
+
+    fn resize_addon_surface(&mut self, width: u32, height: u32) {
+        self.addon_surface_size = (width, height);
+        if width == 0 || height == 0 {
+            return;
+        }
+        if let Some(surface) = &mut self.addon_surface {
             let _ = surface.resize(
                 NonZeroU32::new(width).unwrap(),
                 NonZeroU32::new(height).unwrap(),
@@ -815,12 +1288,15 @@ impl ApplicationHandler for App {
 
         self.window = Some(window);
         self.surface = Some(surface);
-        self.resize_surface(SCREEN_WIDTH * SCALE, SCREEN_HEIGHT * SCALE);
+        self.resize_main_surface(SCREEN_WIDTH * SCALE, SCREEN_HEIGHT * SCALE);
+        self.refresh_window_title();
 
         // Try to init audio
         self.audio_handler = audio::AudioHandler::new().ok();
         self.update_audio_emulation_state();
         self.reset_timing_state();
+        self.refresh_game_addon_state(true);
+        self.request_redraw();
 
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_deadline));
     }
@@ -828,19 +1304,58 @@ impl ApplicationHandler for App {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
+        let is_addon_window = self
+            .addon_window
+            .as_ref()
+            .is_some_and(|window| window.id() == window_id);
+
         match event {
             WindowEvent::CloseRequested => {
-                self.flush_battery_save(true);
-                event_loop.exit();
+                if is_addon_window {
+                    self.close_addon_window();
+                    self.set_status("Addon popout closed", overlay::ToastTone::Info);
+                } else {
+                    self.flush_battery_save(true);
+                    event_loop.exit();
+                }
             }
             WindowEvent::Resized(size) => {
-                self.resize_surface(size.width, size.height);
-                if let Some(window) = &self.window {
+                if is_addon_window {
+                    self.resize_addon_surface(size.width, size.height);
+                } else {
+                    self.resize_main_surface(size.width, size.height);
+                }
+                if is_addon_window {
+                    if let Some(window) = &self.addon_window {
+                        window.request_redraw();
+                    }
+                } else if let Some(window) = &self.window {
                     window.request_redraw();
                 }
+            }
+            WindowEvent::HoveredFile(path) => {
+                if is_addon_window {
+                    return;
+                }
+                self.hovered_file = Some(path);
+                self.request_redraw();
+            }
+            WindowEvent::HoveredFileCancelled => {
+                if is_addon_window {
+                    return;
+                }
+                self.hovered_file = None;
+                self.request_redraw();
+            }
+            WindowEvent::DroppedFile(path) => {
+                if is_addon_window {
+                    return;
+                }
+                self.hovered_file = None;
+                self.load_rom_from_path(path);
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -854,16 +1369,20 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
-                self.handle_key(&physical_key, &logical_key, pressed);
+                if is_addon_window {
+                    self.handle_addon_window_key(event_loop, &logical_key, pressed);
+                } else {
+                    self.handle_key(event_loop, &physical_key, &logical_key, pressed);
+                }
             }
             WindowEvent::RedrawRequested => {
-                if !self.rom_loaded || self.gba.state != GbaState::Running {
-                    self.render_frame(0);
+                if is_addon_window {
+                    self.present_addon_window();
                     return;
                 }
 
-                if self.speed_multiplier > 1 {
-                    self.render_frame(1);
+                if !self.rom_loaded || self.gba.state != GbaState::Running {
+                    self.render_frame(0);
                     return;
                 }
 
@@ -908,40 +1427,65 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.flush_battery_save(false);
-        let next_tick = if self.speed_multiplier > 1 {
-            // Turbo: run uncapped, as fast as the CPU allows
-            ControlFlow::Poll
+        if self.pokemon_sprites.drain_updates() {
+            self.request_redraw();
+        }
+        let next_tick = if let Some(status) = &self.status_message {
+            if Instant::now() >= status.expires_at {
+                self.request_redraw();
+            }
+            ControlFlow::WaitUntil(status.expires_at)
+        } else if !self.rom_loaded || self.gba.state != GbaState::Running {
+            ControlFlow::Wait
         } else {
-            // Normal: throttle to ~59.7fps
             ControlFlow::WaitUntil(self.next_frame_deadline)
         };
         event_loop.set_control_flow(next_tick);
-        if let Some(window) = &self.window {
-            window.request_redraw();
+        if self.rom_loaded && self.gba.state == GbaState::Running {
+            self.request_redraw();
         }
     }
 }
 
 fn main() {
     let mut rom_path: Option<PathBuf> = None;
-    let mut bios_path: Option<String> = None;
+    let mut bios_path: Option<PathBuf> = None;
     let mut iter = env::args().skip(1);
     while let Some(arg) = iter.next() {
         if arg == "--bios" {
-            bios_path = iter.next();
+            bios_path = iter.next().map(PathBuf::from);
         } else if rom_path.is_none() {
             rom_path = Some(PathBuf::from(arg));
         }
     }
 
+    let rom_path = rom_path.or_else(|| {
+        let candidates = discover_rom_candidates(Path::new("roms"));
+        match candidates.as_slice() {
+            [path] => {
+                println!("Auto-loading ROM: {}", path.display());
+                Some(path.clone())
+            }
+            [] => None,
+            _ => {
+                println!(
+                    "Found {} ROMs in roms/; pass a ROM path or press 'O' after launch.",
+                    candidates.len()
+                );
+                None
+            }
+        }
+    });
+    let bios_path = bios_path.or_else(default_bios_path);
+
     let bios = if let Some(path) = bios_path.as_ref() {
         match fs::read(path) {
             Ok(data) => {
-                println!("Loaded BIOS: {} ({} bytes)", path, data.len());
+                println!("Loaded BIOS: {} ({} bytes)", path.display(), data.len());
                 Some(data)
             }
             Err(e) => {
-                eprintln!("Failed to load BIOS '{}': {}", path, e);
+                eprintln!("Failed to load BIOS '{}': {}", path.display(), e);
                 None
             }
         }
@@ -964,6 +1508,7 @@ fn main() {
         println!("tinyBird - GBA Emulator");
         println!("Usage: tinybird [--bios gba_bios.bin] [rom.gba]");
         println!("Press 'O' to open a ROM file");
+        println!("If exactly one ROM is in ./roms/, it will be loaded automatically");
         None
     };
 
