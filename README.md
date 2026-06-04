@@ -31,6 +31,12 @@ You can also pass paths explicitly:
 cargo run --release -- --bios gba_bios.bin roms/game.gba
 ```
 
+The local web overlay server runs separately:
+
+```bash
+cargo run -p tinybird-web
+```
+
 Startup behavior:
 
 - If `gba_bios.bin` exists in the repo root, it is loaded automatically.
@@ -45,7 +51,8 @@ Startup behavior:
   Fast-forward keeps frame pacing stable and mutes output audio intentionally.
 - `F1`: toggle emulator HUD
 - `F2`: toggle addon team panel
-- `F3`: open/close addon popout window
+- `F4`: toggle addon encounter panel
+- `F6`: open/close addon popout window
 - `F5` / `F8`: quicksave / quickload
 - `M`: mute
 - `[` or `-`: volume down
@@ -69,8 +76,31 @@ The desktop frontend now writes a structured snapshot to `stream-data/current-ga
 
 - Unsupported games export ROM metadata only.
 - Fire Red exports a live party snapshot that can be consumed by overlays, bots, or a future web battle client.
-- Supported games can render addon data in a dedicated in-game panel with `F2`, or in a detached popout window with `F3`.
+- Fire Red can also export current-area encounter data for early routes/caves, including slot rates and catch rates.
+- Supported games can render addon data in dedicated in-game panels with `F2` and `F4`, or in a detached popout window with `F6`.
 - The first time a species appears, the desktop frontend downloads and caches its PNG artwork in `stream-data/pokemon-sprites/` for later offline reuse.
+
+## Web Overlay
+
+Run the desktop app first, then start the local overlay server:
+
+```bash
+cargo run -p tinybird-web
+```
+
+Useful URLs:
+
+- Preview page: `http://127.0.0.1:8877/`
+- Overlay page: `http://127.0.0.1:8877/overlay`
+- OBS browser source: `http://127.0.0.1:8877/overlay?transparent=1&layout=column`
+
+Overlay query params:
+
+- `transparent=1`: transparent page background for OBS scenes
+- `layout=column|row|stack`: choose how party cards flow
+- `align=left|center|right`: dock the overlay on screen
+- `compact=1`: use tighter cards for smaller scenes
+- `hideHeader=1`: render only the team cards
 
 ## Validation
 
@@ -85,6 +115,7 @@ As of June 3, 2026:
 crates/
   tinybird-core/     # Emulator core (CPU, PPU, memory, scheduler)
   tinybird-desktop/  # Desktop frontend (windowing, audio, input)
+  tinybird-web/      # Local web overlay/API server for OBS and browser tools
 ```
 
 ## License

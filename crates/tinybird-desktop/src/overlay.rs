@@ -2,7 +2,10 @@
 //!
 //! Draws directly into the ARGB u32 pixel buffer produced by softbuffer.
 
-use crate::game_addons::{AddonData, FireRedPartyMember, FireRedSnapshot, StreamSnapshot};
+use crate::game_addons::{
+    AddonData, FireRedAreaSnapshot, FireRedBattleSnapshot, FireRedEncounterEntry,
+    FireRedEncounterGroup, FireRedPartyMember, FireRedSnapshot, StreamSnapshot,
+};
 use crate::pokemon_assets::{PokemonSpriteStore, SpriteBitmap};
 
 /// Character width and height (pixels per glyph cell).
@@ -28,6 +31,21 @@ pub struct PauseScreen<'a> {
 pub struct Toast<'a> {
     pub text: &'a str,
     pub tone: ToastTone,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddonViewMode {
+    Team,
+    Encounters,
+}
+
+impl AddonViewMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Team => "Team",
+            Self::Encounters => "Encounters",
+        }
+    }
 }
 
 /// 8×8 bitmap font, ASCII 0x20–0x7E (95 printable characters).
@@ -587,11 +605,13 @@ pub fn draw_overlay(
         buf_h,
         tx,
         ty,
-        "[F2] Team panel [F3] Popout",
+        "[F2] Team  [F4] Encounters",
         SCALE,
         grey,
         bg,
     );
+    ty += LINE;
+    draw_text(buf, buf_w, buf_h, tx, ty, "[F6] Popout", SCALE, grey, bg);
 }
 
 pub fn draw_addon_panel(
@@ -601,6 +621,7 @@ pub fn draw_addon_panel(
     snapshot: &StreamSnapshot,
     sprites: &PokemonSpriteStore,
     detached: bool,
+    view_mode: AddonViewMode,
 ) {
     let panel_bg = 0xFF_12_17_26;
     let ink = 0xFF_F7_F3_EC;
@@ -620,12 +641,16 @@ pub fn draw_addon_panel(
     }
 
     let panel_w = if detached {
-        buf_w.saturating_sub(24).clamp(280, 440)
+        buf_w.saturating_sub(24).clamp(280, 480)
+    } else if view_mode == AddonViewMode::Encounters {
+        buf_w.saturating_sub(16).clamp(260, 360)
     } else {
         buf_w.saturating_sub(20).clamp(220, 296)
     };
     let panel_h = if detached {
-        buf_h.saturating_sub(24).clamp(180, 420)
+        buf_h.saturating_sub(24).clamp(180, 520)
+    } else if view_mode == AddonViewMode::Encounters {
+        buf_h.saturating_sub(12).clamp(220, 520)
     } else {
         buf_h.saturating_sub(16).clamp(160, 360)
     };
@@ -650,15 +675,18 @@ pub fn draw_addon_panel(
     let title = snapshot
         .addon
         .as_ref()
-        .map(|addon| addon.display_name)
-        .unwrap_or("Game Addons");
+        .map(|addon| match view_mode {
+            AddonViewMode::Team => addon.display_name.to_string(),
+            AddonViewMode::Encounters => "FireRed Encounters".to_string(),
+        })
+        .unwrap_or_else(|| "Game Addons".to_string());
     draw_text_centered(
         buf,
         buf_w,
         buf_h,
         center_x,
         y,
-        title,
+        &title,
         title_scale,
         accent,
         panel_bg,
@@ -688,19 +716,33 @@ pub fn draw_addon_panel(
 
     let footer_y = panel_y + panel_h.saturating_sub(18);
     match snapshot.addon.as_ref().map(|addon| &addon.data) {
-        Some(AddonData::FireRed(data)) => {
-            draw_firered_party_panel(
-                buf,
-                buf_w,
-                buf_h,
-                panel_x + 12,
-                y,
-                panel_w.saturating_sub(24),
-                footer_y.saturating_sub(8),
-                data,
-                sprites,
-            );
-        }
+        Some(AddonData::FireRed(data)) => match view_mode {
+            AddonViewMode::Team => {
+                draw_firered_party_panel(
+                    buf,
+                    buf_w,
+                    buf_h,
+                    panel_x + 12,
+                    y,
+                    panel_w.saturating_sub(24),
+                    footer_y.saturating_sub(8),
+                    data,
+                    sprites,
+                );
+            }
+            AddonViewMode::Encounters => {
+                draw_firered_encounter_panel(
+                    buf,
+                    buf_w,
+                    buf_h,
+                    panel_x + 12,
+                    y,
+                    panel_w.saturating_sub(24),
+                    footer_y.saturating_sub(8),
+                    data,
+                );
+            }
+        },
         None => {
             draw_text_centered(
                 buf,
@@ -728,9 +770,11 @@ pub fn draw_addon_panel(
     }
 
     let footer = if detached {
-        "[F3] Close popout"
+        "[F2] Team  [F4] Encounters  [F6] Close"
+    } else if view_mode == AddonViewMode::Team {
+        "[F2] Hide  [F4] Encounters  [F6] Popout"
     } else {
-        "[F2] Hide panel  [F3] Popout"
+        "[F4] Hide  [F2] Team  [F6] Popout"
     };
     draw_text_centered(
         buf, buf_w, buf_h, center_x, footer_y, footer, 1, muted, panel_bg,
@@ -751,7 +795,6 @@ fn draw_firered_party_panel(
     let panel_bg = 0xFF_12_17_26;
     let ink = 0xFF_F7_F3_EC;
     let muted = 0xFF_96_A0_B4;
-    let accent = 0xFF_FF_9F_1C;
 
     let summary = format!(
         "{} live slots  base ${:08X}",
@@ -787,19 +830,374 @@ fn draw_firered_party_panel(
             ink,
             panel_bg,
         );
-    } else if y + card_h <= panel_bottom {
+    }
+}
+
+fn draw_firered_encounter_panel(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    panel_x: usize,
+    panel_y: usize,
+    panel_w: usize,
+    panel_bottom: usize,
+    snapshot: &FireRedSnapshot,
+) {
+    let panel_bg = 0xFF_12_17_26;
+    let muted = 0xFF_96_A0_B4;
+    let accent = 0xFF_FF_9F_1C;
+    let mut y = panel_y;
+
+    if let Some(battle) = &snapshot.battle {
+        y = draw_firered_battle_panel(buf, buf_w, buf_h, panel_x, y, panel_w, panel_bottom, battle);
+        y += 8;
+    }
+
+    let Some(area) = &snapshot.area else {
         draw_text(
             buf,
             buf_w,
             buf_h,
             panel_x,
             y,
-            "Cards are ready for per-species sprite art next.",
+            "Area data pending",
             1,
             accent,
             panel_bg,
         );
+        return;
+    };
+
+    let y = draw_firered_area_panel(buf, buf_w, buf_h, panel_x, y, panel_w, panel_bottom, area);
+    if area.encounter_groups.is_empty() && y + 12 <= panel_bottom {
+        draw_text(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x,
+            y,
+            "Try a route, cave, water, or grass area.",
+            1,
+            muted,
+            panel_bg,
+        );
     }
+}
+
+fn draw_firered_battle_panel(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    panel_x: usize,
+    panel_y: usize,
+    panel_w: usize,
+    panel_bottom: usize,
+    battle: &FireRedBattleSnapshot,
+) -> usize {
+    let card_h = 58usize;
+    if panel_y + card_h > panel_bottom {
+        return panel_y;
+    }
+
+    let card_bg = 0xFF_1A_23_36;
+    let border = 0xFF_FF_9F_1C;
+    let accent = 0xFF_FF_9F_1C;
+    let accent_2 = 0xFF_2E_C4_B6;
+    let ink = 0xFF_F7_F3_EC;
+    let muted = 0xFF_96_A0_B4;
+    let danger = 0xFF_FC_76_6A;
+
+    draw_panel(
+        buf, buf_w, buf_h, panel_x, panel_y, panel_w, card_h, card_bg, border, accent_2,
+    );
+
+    let title = format!("Now Fighting  {}", battle.battle_kind);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8,
+        panel_y + 7,
+        &short_label(&title, if panel_w >= 280 { 31 } else { 23 }),
+        1,
+        accent,
+        card_bg,
+    );
+
+    let opponent = &battle.opponent;
+    let level = format!("Lv{}", opponent.level);
+    let level_x = panel_x + panel_w.saturating_sub(8 + text_width(&level, 1));
+    let name_max = if panel_w >= 280 { 18 } else { 12 };
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8,
+        panel_y + 22,
+        &short_label(&opponent.species_name, name_max),
+        1,
+        ink,
+        card_bg,
+    );
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        level_x,
+        panel_y + 22,
+        &level,
+        1,
+        ink,
+        card_bg,
+    );
+
+    let hp = format!("{}/{} HP", opponent.current_hp, opponent.max_hp);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8,
+        panel_y + 35,
+        &short_label(&hp, if panel_w >= 280 { 15 } else { 11 }),
+        1,
+        muted,
+        card_bg,
+    );
+
+    let catch = match (battle.catchable, opponent.catch_rate) {
+        (true, Some(rate)) => format!("Catch {}", rate),
+        (true, None) => "Catch ?".to_string(),
+        (false, _) => "Not catchable".to_string(),
+    };
+    let catch_color = if battle.catchable { accent_2 } else { danger };
+    let catch_x = panel_x + panel_w.saturating_sub(8 + text_width(&catch, 1));
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        catch_x,
+        panel_y + 35,
+        &catch,
+        1,
+        catch_color,
+        card_bg,
+    );
+
+    let bar_y = panel_y + card_h.saturating_sub(10);
+    draw_hp_bar(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8,
+        bar_y,
+        panel_w.saturating_sub(16),
+        5,
+        opponent.current_hp,
+        opponent.max_hp.max(1),
+    );
+
+    panel_y + card_h
+}
+
+fn draw_firered_area_panel(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    panel_x: usize,
+    panel_y: usize,
+    panel_w: usize,
+    panel_bottom: usize,
+    area: &FireRedAreaSnapshot,
+) -> usize {
+    if panel_y + 36 > panel_bottom {
+        return panel_y;
+    }
+
+    let panel_bg = 0xFF_12_17_26;
+    let section_bg = 0xFF_18_20_33;
+    let accent = 0xFF_FF_9F_1C;
+    let accent_2 = 0xFF_2E_C4_B6;
+    let ink = 0xFF_F7_F3_EC;
+    let muted = 0xFF_96_A0_B4;
+
+    fill_rect(buf, buf_w, buf_h, panel_x, panel_y, panel_w, 1, accent_2);
+    let mut y = panel_y + 8;
+    let area_title = short_label(&area.name, if panel_w >= 280 { 26 } else { 20 });
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x,
+        y,
+        &area_title,
+        1,
+        accent,
+        panel_bg,
+    );
+
+    let map_id = format!("{}:{}", area.map_group, area.map_num);
+    let map_x = panel_x + panel_w.saturating_sub(text_width(&map_id, 1));
+    draw_text(buf, buf_w, buf_h, map_x, y, &map_id, 1, muted, panel_bg);
+    y += 14;
+
+    if area.encounter_groups.is_empty() {
+        if y + 10 <= panel_bottom {
+            draw_text(
+                buf,
+                buf_w,
+                buf_h,
+                panel_x,
+                y,
+                "No wild encounters listed here yet.",
+                1,
+                muted,
+                panel_bg,
+            );
+        }
+        return y + 14;
+    }
+
+    let mut groups_drawn = 0usize;
+    for group in &area.encounter_groups {
+        if y + 28 > panel_bottom {
+            break;
+        }
+        let remaining_groups = area.encounter_groups.len().saturating_sub(groups_drawn + 1);
+        let reserve_for_later_groups = remaining_groups * 34;
+        let group_bottom = panel_bottom.saturating_sub(reserve_for_later_groups).max(y);
+        y = draw_encounter_group(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x,
+            y,
+            panel_w,
+            group_bottom,
+            group,
+            section_bg,
+            ink,
+            muted,
+            accent,
+            accent_2,
+        );
+        groups_drawn += 1;
+        y += 6;
+    }
+
+    if groups_drawn == 0 && y + 10 <= panel_bottom {
+        draw_text(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x,
+            y,
+            "Resize popout to show encounters.",
+            1,
+            muted,
+            panel_bg,
+        );
+    }
+
+    y
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_encounter_group(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    bottom: usize,
+    group: &FireRedEncounterGroup,
+    bg: u32,
+    ink: u32,
+    muted: u32,
+    accent: u32,
+    border: u32,
+) -> usize {
+    let row_h = 12usize;
+    let available_rows = (bottom.saturating_sub(y + 20)) / row_h;
+    let row_count = group.entries.len().min(available_rows);
+    if row_count == 0 {
+        return y;
+    }
+    let needs_more = group.entries.len() > row_count;
+    let card_h = 20 + row_h * row_count + usize::from(needs_more) * 10;
+    if y + card_h > bottom {
+        return y;
+    }
+
+    draw_panel(buf, buf_w, buf_h, x, y, w, card_h, bg, border, accent);
+    let title = format!("{}  area {}", group.method, group.encounter_rate);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        x + 8,
+        y + 6,
+        &short_label(&title, if w >= 280 { 30 } else { 22 }),
+        1,
+        accent,
+        bg,
+    );
+
+    let mut row_y = y + 20;
+    for entry in group.entries.iter().take(row_count) {
+        draw_encounter_row(
+            buf,
+            buf_w,
+            buf_h,
+            x + 8,
+            row_y,
+            w.saturating_sub(16),
+            entry,
+            bg,
+            ink,
+            muted,
+        );
+        row_y += row_h;
+    }
+    if needs_more && row_y + 10 <= y + card_h {
+        let remaining = format!("+{} more", group.entries.len() - row_count);
+        draw_text(buf, buf_w, buf_h, x + 8, row_y, &remaining, 1, muted, bg);
+    }
+
+    y + card_h
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_encounter_row(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    entry: &FireRedEncounterEntry,
+    bg: u32,
+    ink: u32,
+    muted: u32,
+) {
+    let name_w = if w >= 280 { 112 } else { 82 };
+    let name = short_label(entry.species_name, if w >= 280 { 14 } else { 10 });
+    draw_text(buf, buf_w, buf_h, x, y, &name, 1, ink, bg);
+
+    let level = if entry.min_level == entry.max_level {
+        format!("L{}", entry.min_level)
+    } else {
+        format!("L{}-{}", entry.min_level, entry.max_level)
+    };
+    draw_text(buf, buf_w, buf_h, x + name_w, y, &level, 1, muted, bg);
+
+    let slot = format!("{}%", entry.slot_rate);
+    let slot_x = x + w.saturating_sub(84);
+    draw_text(buf, buf_w, buf_h, slot_x, y, &slot, 1, 0xFF_2E_C4_B6, bg);
+
+    let catch = format!("C{}", entry.catch_rate);
+    let catch_x = x + w.saturating_sub(text_width(&catch, 1));
+    draw_text(buf, buf_w, buf_h, catch_x, y, &catch, 1, muted, bg);
 }
 
 fn draw_firered_party_card(
@@ -1346,7 +1744,7 @@ pub fn draw_pause_screen(buf: &mut [u32], buf_w: usize, buf_h: usize, screen: Pa
         buf_h,
         center_x,
         y,
-        "Reset: [R]  Popout: [F3]",
+        "Reset: [R]  Popout: [F6]",
         1,
         muted,
         panel_bg,
