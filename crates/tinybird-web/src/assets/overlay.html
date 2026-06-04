@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tinyBird Overlay</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="overlay-body">
+    <main id="overlay-root" class="overlay-root" data-layout="column">
+      <section class="overlay-stage">
+        <header class="overlay-header">
+          <p class="eyebrow">tinyBird Party Link</p>
+          <div>
+            <h1 id="overlay-title">Waiting for game data</h1>
+            <p id="overlay-subtitle" class="overlay-subtitle">Launch the desktop app and load a supported game.</p>
+          </div>
+          <p id="overlay-status" class="overlay-status">connecting</p>
+        </header>
+
+        <section id="battle-panel" class="battle-panel">
+          <div>
+            <p id="battle-kicker" class="battle-kicker">Now Fighting</p>
+            <h2 id="battle-name"></h2>
+          </div>
+          <div class="battle-meta">
+            <span id="battle-level"></span>
+            <span id="battle-hp"></span>
+            <span id="battle-catch"></span>
+          </div>
+          <div class="hp-bar battle-hp-bar">
+            <div id="battle-hp-fill" class="hp-fill"></div>
+          </div>
+        </section>
+
+        <section id="area-panel" class="area-panel">
+          <div class="area-heading">
+            <div>
+              <p class="area-kicker">Current Area</p>
+              <h2 id="area-name"></h2>
+            </div>
+            <p id="area-map-id" class="area-map-id"></p>
+          </div>
+          <div id="encounter-list" class="encounter-list"></div>
+        </section>
+
+        <section id="party-grid" class="party-grid"></section>
+
+        <section id="empty-state" class="empty-state">
+          <p class="empty-label">No addon payload yet</p>
+          <p class="empty-copy">
+            The overlay is live, but the desktop app has not exported supported addon data yet.
+          </p>
+        </section>
+      </section>
+    </main>
+
+    <template id="party-card-template">
+      <article class="party-card">
+        <div class="sprite-shell">
+          <div class="slot-pill"></div>
+          <img class="pokemon-art" alt="" loading="eager" />
+          <div class="sprite-fallback"></div>
+        </div>
+        <div class="card-copy">
+          <div class="card-topline">
+            <h2 class="nickname"></h2>
+            <p class="level"></p>
+          </div>
+          <div class="card-meta">
+            <span class="species-pill"></span>
+            <span class="status-pill"></span>
+          </div>
+          <div class="hp-line">
+            <span class="hp-label"></span>
+            <span class="hp-value"></span>
+          </div>
+          <div class="hp-bar">
+            <div class="hp-fill"></div>
+          </div>
+          <div class="move-list"></div>
+        </div>
+      </article>
+    </template>
+
+    <template id="encounter-method-template">
+      <article class="encounter-method">
+        <div class="encounter-method-heading">
+          <h3 class="encounter-method-name"></h3>
+          <p class="encounter-rate"></p>
+        </div>
+        <div class="encounter-table"></div>
+      </article>
+    </template>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

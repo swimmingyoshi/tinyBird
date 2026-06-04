@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tinyBird Web</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="shell-body">
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">tinyBird Web</p>
+        <h1>Local overlay server for stream scenes, party tracking, and future battle tools.</h1>
+        <p class="lede">
+          This is the first web slice of tinyBird. It reads the desktop export,
+          serves cached Pokemon artwork, and renders an OBS-friendly overlay page.
+        </p>
+        <div class="hero-actions">
+          <a class="primary-link" href="/overlay">Open Overlay Preview</a>
+          <a class="secondary-link" href="/overlay?transparent=1&layout=column">OBS Browser Source Mode</a>
+        </div>
+      </section>
+
+      <section class="shell-grid">
+        <article class="info-card">
+          <p class="card-kicker">Run Order</p>
+          <h2>1. Start the desktop app</h2>
+          <p>Keep tinyBird running so it can refresh <code>stream-data/current-game.json</code>.</p>
+          <h2>2. Start the web server</h2>
+          <pre><code>cargo run -p tinybird-web</code></pre>
+          <h2>3. Add it to OBS</h2>
+          <pre><code>http://127.0.0.1:8877/overlay?transparent=1&amp;layout=column</code></pre>
+        </article>
+
+        <article class="info-card">
+          <p class="card-kicker">Current APIs</p>
+          <ul class="endpoint-list">
+            <li><code>/api/health</code> for local status</li>
+            <li><code>/api/snapshot</code> for the live export JSON</li>
+            <li><code>/sprites/:species_id</code> for cached art</li>
+            <li><code>/overlay</code> for the stream layout</li>
+          </ul>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

@@ -137,6 +137,7 @@ struct App {
     current_fps: f64,
     show_overlay: bool,
     show_addon_panel: bool,
+    addon_view_mode: overlay::AddonViewMode,
     muted: bool,
     volume: f32,
     color_correction: bool,
@@ -225,6 +226,7 @@ impl App {
             current_fps: 0.0,
             show_overlay: false,
             show_addon_panel: false,
+            addon_view_mode: overlay::AddonViewMode::Team,
             muted: false,
             volume: 1.0,
             color_correction: false,
@@ -278,13 +280,13 @@ impl App {
             .addon_snapshot
             .addon
             .as_ref()
-            .map(|addon| format!("tinyBird - {}", addon.display_name))
+            .map(|_| format!("tinyBird - {}", self.addon_view_mode.label()))
             .or_else(|| {
                 self.rom_title
                     .as_ref()
-                    .map(|name| format!("tinyBird - Addons | {name}"))
+                    .map(|name| format!("tinyBird - {} | {name}", self.addon_view_mode.label()))
             })
-            .unwrap_or_else(|| "tinyBird - Addons".to_string());
+            .unwrap_or_else(|| format!("tinyBird - {}", self.addon_view_mode.label()));
         window.set_title(&title);
     }
 
@@ -300,6 +302,17 @@ impl App {
             expires_at: Instant::now() + duration,
         });
         self.request_redraw();
+    }
+
+    fn show_addon_view(&mut self, view_mode: overlay::AddonViewMode) {
+        self.addon_view_mode = view_mode;
+        self.show_addon_panel = true;
+        self.refresh_addon_window_title();
+        self.request_redraw();
+        self.set_status(
+            format!("{} panel shown", view_mode.label()),
+            overlay::ToastTone::Info,
+        );
     }
 
     fn active_toast(&mut self) -> Option<(String, overlay::ToastTone)> {
@@ -676,9 +689,11 @@ impl App {
         }
 
         let framebuffer = self.gba.ppu.get_framebuffer();
-        let addon_panel = self
-            .show_addon_panel
-            .then_some((&self.addon_snapshot, &self.pokemon_sprites));
+        let addon_panel = self.show_addon_panel.then_some((
+            &self.addon_snapshot,
+            &self.pokemon_sprites,
+            self.addon_view_mode,
+        ));
         let Some(surface) = &mut self.surface else {
             return;
         };
@@ -733,6 +748,7 @@ impl App {
         addon_panel: Option<(
             &game_addons::StreamSnapshot,
             &pokemon_assets::PokemonSpriteStore,
+            overlay::AddonViewMode,
         )>,
         home_screen: Option<overlay::HomeScreen<'_>>,
         pause_screen: Option<overlay::PauseScreen<'_>>,
@@ -823,8 +839,16 @@ impl App {
                         fast_forward,
                     );
                 }
-                if let Some((snapshot, sprites)) = addon_panel {
-                    overlay::draw_addon_panel(&mut buffer, win_w, win_h, snapshot, sprites, false);
+                if let Some((snapshot, sprites, view_mode)) = addon_panel {
+                    overlay::draw_addon_panel(
+                        &mut buffer,
+                        win_w,
+                        win_h,
+                        snapshot,
+                        sprites,
+                        false,
+                        view_mode,
+                    );
                 }
                 if let Some(paused) = pause_screen {
                     overlay::dim_screen(&mut buffer);
@@ -862,8 +886,16 @@ impl App {
                 fast_forward,
             );
         }
-        if let Some((snapshot, sprites)) = addon_panel {
-            overlay::draw_addon_panel(&mut buffer, win_w, win_h, snapshot, sprites, false);
+        if let Some((snapshot, sprites, view_mode)) = addon_panel {
+            overlay::draw_addon_panel(
+                &mut buffer,
+                win_w,
+                win_h,
+                snapshot,
+                sprites,
+                false,
+                view_mode,
+            );
         }
         if let Some(paused) = pause_screen {
             overlay::dim_screen(&mut buffer);
@@ -893,6 +925,7 @@ impl App {
             &self.addon_snapshot,
             &self.pokemon_sprites,
             true,
+            self.addon_view_mode,
         );
         let _ = buffer.present();
     }
@@ -1056,24 +1089,33 @@ impl App {
                     self.request_redraw();
                 }
                 Key::Named(NamedKey::F2) => {
-                    self.show_addon_panel = !self.show_addon_panel;
-                    self.request_redraw();
-                    self.set_status(
-                        if self.show_addon_panel {
-                            "Team panel shown"
-                        } else {
-                            "Team panel hidden"
-                        },
-                        overlay::ToastTone::Info,
-                    );
+                    if self.show_addon_panel && self.addon_view_mode == overlay::AddonViewMode::Team
+                    {
+                        self.show_addon_panel = false;
+                        self.request_redraw();
+                        self.set_status("Team panel hidden", overlay::ToastTone::Info);
+                    } else {
+                        self.show_addon_view(overlay::AddonViewMode::Team);
+                    }
                 }
-                Key::Named(NamedKey::F3) => {
+                Key::Named(NamedKey::F6) => {
                     if self.addon_window.is_some() {
                         self.close_addon_window();
                         self.set_status("Addon popout closed", overlay::ToastTone::Info);
                     } else {
                         self.ensure_addon_window(event_loop);
                         self.set_status("Addon popout opened", overlay::ToastTone::Info);
+                    }
+                }
+                Key::Named(NamedKey::F4) => {
+                    if self.show_addon_panel
+                        && self.addon_view_mode == overlay::AddonViewMode::Encounters
+                    {
+                        self.show_addon_panel = false;
+                        self.request_redraw();
+                        self.set_status("Encounters panel hidden", overlay::ToastTone::Info);
+                    } else {
+                        self.show_addon_view(overlay::AddonViewMode::Encounters);
                     }
                 }
                 Key::Character(c) if c.as_str() == "1" => {
@@ -1158,21 +1200,15 @@ impl App {
         }
 
         match logical_key {
-            Key::Named(NamedKey::Escape) | Key::Named(NamedKey::F3) => {
+            Key::Named(NamedKey::Escape) | Key::Named(NamedKey::F6) => {
                 self.close_addon_window();
                 self.set_status("Addon popout closed", overlay::ToastTone::Info);
             }
             Key::Named(NamedKey::F2) => {
-                self.show_addon_panel = !self.show_addon_panel;
-                self.request_redraw();
-                self.set_status(
-                    if self.show_addon_panel {
-                        "Team panel shown"
-                    } else {
-                        "Team panel hidden"
-                    },
-                    overlay::ToastTone::Info,
-                );
+                self.show_addon_view(overlay::AddonViewMode::Team);
+            }
+            Key::Named(NamedKey::F4) => {
+                self.show_addon_view(overlay::AddonViewMode::Encounters);
             }
             Key::Named(NamedKey::F1) => {
                 self.show_overlay = !self.show_overlay;

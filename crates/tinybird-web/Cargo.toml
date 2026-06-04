@@ -1,0 +1,15 @@
+[package]
+name = "tinybird-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Local web overlay and API server for tinyBird exports"
+
+[[bin]]
+name = "tinybird-web"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread"] }
