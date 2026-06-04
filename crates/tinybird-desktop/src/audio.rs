@@ -3,7 +3,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use tinybird_core::apu::SAMPLE_RATE as DEFAULT_GBA_SAMPLE_RATE;
 
 // Keep the host queue intentionally small so video doesn't feel detached from
@@ -14,6 +14,24 @@ const MIN_PRIME_MILLIS: u32 = 16;
 fn frames_for_millis(sample_rate: u32, millis: u32) -> usize {
     let frames = (sample_rate.max(1) as u64 * millis as u64).div_ceil(1000);
     frames.max(1) as usize
+}
+
+fn lock_shared_state(state: &Mutex<SharedAudioState>) -> MutexGuard<'_, SharedAudioState> {
+    match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn try_lock_shared_state(
+    state: &Arc<Mutex<SharedAudioState>>,
+) -> Option<MutexGuard<'_, SharedAudioState>> {
+    match state.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        // Brief silence is safer here than blocking the realtime callback.
+        Err(TryLockError::WouldBlock) => None,
+    }
 }
 
 struct SharedAudioState {
@@ -190,53 +208,46 @@ impl AudioHandler {
 
     /// Set playback volume in range [0.0, 1.0].
     pub fn set_volume(&self, volume: f32) {
-        if let Ok(mut state) = self.shared_state.lock() {
-            state.volume = volume.clamp(0.0, 1.0);
-        }
+        let mut state = lock_shared_state(self.shared_state.as_ref());
+        state.volume = volume.clamp(0.0, 1.0);
     }
 
     /// Return the approximate playback backlog in source milliseconds.
     pub fn buffered_millis(&self) -> u32 {
-        self.shared_state
-            .lock()
-            .map(|state| {
-                let frames = state.samples.len() / 2;
-                ((frames as u64) * 1000 / state.source_rate.max(1) as u64) as u32
-            })
-            .unwrap_or(0)
+        let state = lock_shared_state(self.shared_state.as_ref());
+        let frames = state.samples.len() / 2;
+        ((frames as u64) * 1000 / state.source_rate.max(1) as u64) as u32
     }
 
     /// Drop any queued samples and reset the resampler state.
     pub fn clear(&self) {
-        if let Ok(mut state) = self.shared_state.lock() {
-            state.samples.clear();
-            state.current_left = 0;
-            state.current_right = 0;
-            state.next_left = 0;
-            state.next_right = 0;
-            state.resample_phase = 0;
-            state.primed = false;
-            state.starved = false;
-        }
+        let mut state = lock_shared_state(self.shared_state.as_ref());
+        state.samples.clear();
+        state.current_left = 0;
+        state.current_right = 0;
+        state.next_left = 0;
+        state.next_right = 0;
+        state.resample_phase = 0;
+        state.primed = false;
+        state.starved = false;
     }
 
     /// Push interleaved stereo i16 samples into the playback buffer.
     pub fn push_samples(&self, samples: &[i16], source_rate: u32) {
-        if let Ok(mut state) = self.shared_state.lock() {
-            state.source_rate = source_rate.max(1);
-            let max_samples = frames_for_millis(state.source_rate, MAX_BUFFERED_MILLIS) * 2;
-            let incoming = samples.len();
-            let overflow = state
-                .samples
-                .len()
-                .saturating_add(incoming)
-                .saturating_sub(max_samples);
-            let overflow = (overflow + 1) & !1;
-            if overflow > 0 {
-                state.samples.drain(..overflow);
-            }
-            state.samples.extend(samples.iter().copied());
+        let mut state = lock_shared_state(self.shared_state.as_ref());
+        state.source_rate = source_rate.max(1);
+        let max_samples = frames_for_millis(state.source_rate, MAX_BUFFERED_MILLIS) * 2;
+        let incoming = samples.len();
+        let overflow = state
+            .samples
+            .len()
+            .saturating_add(incoming)
+            .saturating_sub(max_samples);
+        let overflow = (overflow + 1) & !1;
+        if overflow > 0 {
+            state.samples.drain(..overflow);
         }
+        state.samples.extend(samples.iter().copied());
     }
 }
 
@@ -246,7 +257,10 @@ fn write_output_f32(
     output_rate: u32,
     state: &Arc<Mutex<SharedAudioState>>,
 ) {
-    let mut state = state.lock().unwrap();
+    let Some(mut state) = try_lock_shared_state(state) else {
+        data.fill(0.0);
+        return;
+    };
     for frame in data.chunks_mut(channels) {
         let (left, right) = state.next_stereo_frame(output_rate);
         write_frame(frame, left, right, |sample| sample as f32 / 32768.0);
@@ -259,7 +273,10 @@ fn write_output_i16(
     output_rate: u32,
     state: &Arc<Mutex<SharedAudioState>>,
 ) {
-    let mut state = state.lock().unwrap();
+    let Some(mut state) = try_lock_shared_state(state) else {
+        data.fill(0);
+        return;
+    };
     for frame in data.chunks_mut(channels) {
         let (left, right) = state.next_stereo_frame(output_rate);
         write_frame(frame, left, right, |sample| sample);
@@ -272,7 +289,10 @@ fn write_output_u16(
     output_rate: u32,
     state: &Arc<Mutex<SharedAudioState>>,
 ) {
-    let mut state = state.lock().unwrap();
+    let Some(mut state) = try_lock_shared_state(state) else {
+        data.fill(32768);
+        return;
+    };
     for frame in data.chunks_mut(channels) {
         let (left, right) = state.next_stereo_frame(output_rate);
         write_frame(frame, left, right, |sample| (sample as i32 + 32768) as u16);

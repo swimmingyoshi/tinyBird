@@ -694,32 +694,6 @@ impl Gba {
         total
     }
 
-    /// Handle a scheduled event
-    fn handle_event(&mut self, event_type: crate::scheduler::EventType) {
-        match event_type {
-            crate::scheduler::EventType::VBlank => {
-                // Trigger VBlank interrupt
-                self.cpu.irq();
-            }
-            crate::scheduler::EventType::HBlank => {
-                // HBlank handling (optional interrupt)
-            }
-            crate::scheduler::EventType::TimerOverflow(_) => {
-                // Timer interrupt
-                self.cpu.irq();
-            }
-            crate::scheduler::EventType::Dma(_) => {
-                // DMA complete
-            }
-            crate::scheduler::EventType::Serial => {
-                // Serial communication complete
-            }
-            crate::scheduler::EventType::Custom(_) => {
-                // Custom event
-            }
-        }
-    }
-
     /// Get the current PC
     pub fn pc(&self) -> u32 {
         self.cpu.pc()

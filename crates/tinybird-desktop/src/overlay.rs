@@ -2,9 +2,33 @@
 //!
 //! Draws directly into the ARGB u32 pixel buffer produced by softbuffer.
 
+use crate::game_addons::{AddonData, FireRedPartyMember, FireRedSnapshot, StreamSnapshot};
+use crate::pokemon_assets::{PokemonSpriteStore, SpriteBitmap};
+
 /// Character width and height (pixels per glyph cell).
 pub const CHAR_W: usize = 8;
 pub const CHAR_H: usize = 8;
+
+#[derive(Clone, Copy)]
+pub enum ToastTone {
+    Info,
+    Success,
+    Warning,
+}
+
+pub struct HomeScreen<'a> {
+    pub bios_loaded: bool,
+    pub hovered_file: Option<&'a str>,
+}
+
+pub struct PauseScreen<'a> {
+    pub rom_title: Option<&'a str>,
+}
+
+pub struct Toast<'a> {
+    pub text: &'a str,
+    pub tone: ToastTone,
+}
 
 /// 8×8 bitmap font, ASCII 0x20–0x7E (95 printable characters).
 /// Each entry is 8 bytes: row 0 (top) … row 7 (bottom).
@@ -290,6 +314,127 @@ pub fn draw_text(
     cx
 }
 
+fn text_width(text: &str, scale: usize) -> usize {
+    let chars = text.chars().count();
+    if chars == 0 {
+        0
+    } else {
+        chars * (CHAR_W * scale + scale) - scale
+    }
+}
+
+fn draw_text_centered(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    center_x: usize,
+    y: usize,
+    text: &str,
+    scale: usize,
+    fg: u32,
+    bg: u32,
+) {
+    let width = text_width(text, scale);
+    let x = center_x.saturating_sub(width / 2);
+    draw_text(buf, buf_w, buf_h, x, y, text, scale, fg, bg);
+}
+
+fn lerp_color(top: u32, bottom: u32, num: usize, den: usize) -> u32 {
+    let den = den.max(1) as u32;
+    let num = num.min(den as usize) as u32;
+    let lerp = |shift: u32| {
+        let a = (top >> shift) & 0xFF;
+        let b = (bottom >> shift) & 0xFF;
+        ((a * (den - num) + b * num) / den) << shift
+    };
+    lerp(16) | lerp(8) | lerp(0)
+}
+
+fn draw_gradient_background(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    top: u32,
+    bottom: u32,
+    accent: u32,
+) {
+    for y in 0..buf_h {
+        let row_color = lerp_color(top, bottom, y, buf_h.saturating_sub(1));
+        let row_start = y * buf_w;
+        buf[row_start..row_start + buf_w].fill(row_color);
+
+        if y % 28 == 0 {
+            let stripe = lerp_color(accent, row_color, 1, 3);
+            buf[row_start..row_start + buf_w].fill(stripe);
+        }
+    }
+
+    let glow_x = buf_w / 6;
+    let glow_w = (buf_w / 10).max(6);
+    for y in 0..buf_h {
+        let glow_color = lerp_color(accent, top, y, buf_h.saturating_mul(2));
+        for x in glow_x..(glow_x + glow_w).min(buf_w) {
+            if (x + y / 6) % 7 == 0 {
+                buf[y * buf_w + x] = glow_color;
+            }
+        }
+    }
+}
+
+fn draw_detached_addon_background(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    top: u32,
+    bottom: u32,
+    accent: u32,
+) {
+    for y in 0..buf_h {
+        let row_color = lerp_color(top, bottom, y, buf_h.saturating_sub(1));
+        let row_start = y * buf_w;
+        buf[row_start..row_start + buf_w].fill(row_color);
+    }
+
+    let top_band_h = (buf_h / 10).max(12).min(40);
+    for y in 0..top_band_h {
+        let band = lerp_color(accent, top, y, top_band_h.saturating_mul(3));
+        let row_start = y * buf_w;
+        for x in 0..buf_w {
+            if x % 3 == 0 {
+                buf[row_start + x] = band;
+            }
+        }
+    }
+}
+
+fn draw_panel(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    bg: u32,
+    border: u32,
+    accent: u32,
+) {
+    fill_rect(buf, buf_w, buf_h, x, y, w, h, bg);
+    fill_rect(buf, buf_w, buf_h, x, y, w, 2, accent);
+    fill_rect(buf, buf_w, buf_h, x, y + h.saturating_sub(2), w, 2, border);
+    fill_rect(buf, buf_w, buf_h, x, y, 2, h, border);
+    fill_rect(buf, buf_w, buf_h, x + w.saturating_sub(2), y, 2, h, border);
+}
+
+pub fn dim_screen(buf: &mut [u32]) {
+    for pixel in buf.iter_mut() {
+        let r = ((*pixel >> 16) & 0xFF) * 3 / 8;
+        let g = ((*pixel >> 8) & 0xFF) * 3 / 8;
+        let b = (*pixel & 0xFF) * 3 / 8;
+        *pixel = (r << 16) | (g << 8) | b;
+    }
+}
+
 /// Draw the full settings overlay in the top-left corner.
 pub fn draw_overlay(
     buf: &mut [u32],
@@ -300,6 +445,7 @@ pub fn draw_overlay(
     muted: bool,
     volume_pct: u32,
     color_correction: bool,
+    fast_forward: bool,
 ) {
     const SCALE: usize = 2;
     const CELL: usize = CHAR_W * SCALE + SCALE; // 18 px per char
@@ -307,7 +453,7 @@ pub fn draw_overlay(
 
     // Panel dimensions
     let cols = 30usize; // characters wide
-    let rows = 11usize; // lines tall
+    let rows = 12usize; // lines tall
     let pad = 6usize;
     let panel_w = cols * CELL + pad * 2;
     let panel_h = rows * LINE + pad * 2;
@@ -365,13 +511,15 @@ pub fn draw_overlay(
     ty += LINE;
 
     // Speed line
-    let speed_str = format!("Speed: {}x  [1] [2] [3]", speed);
+    let speed_str = format!("Speed: {}x  [1] [2] [4]", speed);
     draw_text(buf, buf_w, buf_h, tx, ty, &speed_str, SCALE, white, bg);
     ty += LINE;
 
     // Audio line
     let (audio_label, audio_color) = if muted {
         ("Audio: MUTE  [M]", red)
+    } else if fast_forward {
+        ("Audio: FAST MUTE", grey)
     } else {
         ("Audio: ON    [M]", green)
     };
@@ -431,15 +579,806 @@ pub fn draw_overlay(
         bg,
     );
     ty += LINE;
+    draw_text(buf, buf_w, buf_h, tx, ty, "[F1] Close HUD", SCALE, grey, bg);
+    ty += LINE;
     draw_text(
         buf,
         buf_w,
         buf_h,
         tx,
         ty,
-        "[F1] Close this menu",
+        "[F2] Team panel [F3] Popout",
         SCALE,
         grey,
+        bg,
+    );
+}
+
+pub fn draw_addon_panel(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    snapshot: &StreamSnapshot,
+    sprites: &PokemonSpriteStore,
+    detached: bool,
+) {
+    let panel_bg = 0xFF_12_17_26;
+    let ink = 0xFF_F7_F3_EC;
+    let muted = 0xFF_96_A0_B4;
+    let accent = 0xFF_FF_9F_1C;
+    let accent_2 = 0xFF_2E_C4_B6;
+
+    if detached {
+        draw_detached_addon_background(
+            buf,
+            buf_w,
+            buf_h,
+            0xFF_0A_0F_19,
+            0xFF_141B_2A,
+            0xFF_1E_2A_3F,
+        );
+    }
+
+    let panel_w = if detached {
+        buf_w.saturating_sub(24).clamp(280, 440)
+    } else {
+        buf_w.saturating_sub(20).clamp(220, 296)
+    };
+    let panel_h = if detached {
+        buf_h.saturating_sub(24).clamp(180, 420)
+    } else {
+        buf_h.saturating_sub(16).clamp(160, 360)
+    };
+    let panel_x = if detached {
+        (buf_w.saturating_sub(panel_w)) / 2
+    } else {
+        buf_w.saturating_sub(panel_w + 8)
+    };
+    let panel_y = if detached {
+        (buf_h.saturating_sub(panel_h)) / 2
+    } else {
+        8
+    };
+
+    draw_panel(
+        buf, buf_w, buf_h, panel_x, panel_y, panel_w, panel_h, panel_bg, accent_2, accent,
+    );
+
+    let center_x = panel_x + panel_w / 2;
+    let mut y = panel_y + 14;
+    let title_scale = if detached || panel_w > 260 { 2 } else { 1 };
+    let title = snapshot
+        .addon
+        .as_ref()
+        .map(|addon| addon.display_name)
+        .unwrap_or("Game Addons");
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        center_x,
+        y,
+        title,
+        title_scale,
+        accent,
+        panel_bg,
+    );
+    y += title_scale * 10 + 4;
+
+    let subtitle = match &snapshot.rom {
+        Some(rom) => format!("{}  {}", rom.title, rom.game_code),
+        None => "Load a supported game to enable addons".to_string(),
+    };
+    draw_text_centered(
+        buf, buf_w, buf_h, center_x, y, &subtitle, 1, muted, panel_bg,
+    );
+    y += 16;
+
+    fill_rect(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 12,
+        y,
+        panel_w.saturating_sub(24),
+        1,
+        muted,
+    );
+    y += 12;
+
+    let footer_y = panel_y + panel_h.saturating_sub(18);
+    match snapshot.addon.as_ref().map(|addon| &addon.data) {
+        Some(AddonData::FireRed(data)) => {
+            draw_firered_party_panel(
+                buf,
+                buf_w,
+                buf_h,
+                panel_x + 12,
+                y,
+                panel_w.saturating_sub(24),
+                footer_y.saturating_sub(8),
+                data,
+                sprites,
+            );
+        }
+        None => {
+            draw_text_centered(
+                buf,
+                buf_w,
+                buf_h,
+                center_x,
+                y + 8,
+                "No addon data yet",
+                1,
+                ink,
+                panel_bg,
+            );
+            draw_text_centered(
+                buf,
+                buf_w,
+                buf_h,
+                center_x,
+                y + 24,
+                "Load FireRed and move in-game to populate the live team view.",
+                1,
+                muted,
+                panel_bg,
+            );
+        }
+    }
+
+    let footer = if detached {
+        "[F3] Close popout"
+    } else {
+        "[F2] Hide panel  [F3] Popout"
+    };
+    draw_text_centered(
+        buf, buf_w, buf_h, center_x, footer_y, footer, 1, muted, panel_bg,
+    );
+}
+
+fn draw_firered_party_panel(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    panel_x: usize,
+    panel_y: usize,
+    panel_w: usize,
+    panel_bottom: usize,
+    snapshot: &FireRedSnapshot,
+    sprites: &PokemonSpriteStore,
+) {
+    let panel_bg = 0xFF_12_17_26;
+    let ink = 0xFF_F7_F3_EC;
+    let muted = 0xFF_96_A0_B4;
+    let accent = 0xFF_FF_9F_1C;
+
+    let summary = format!(
+        "{} live slots  base ${:08X}",
+        snapshot.party.len(),
+        snapshot.party_base_address
+    );
+    draw_text(
+        buf, buf_w, buf_h, panel_x, panel_y, &summary, 1, muted, panel_bg,
+    );
+
+    let card_gap = 8usize;
+    let card_h = if panel_w >= 280 { 48 } else { 42 };
+    let mut y = panel_y + 18;
+    for member in &snapshot.party {
+        if y + card_h > panel_bottom {
+            break;
+        }
+        draw_firered_party_card(
+            buf, buf_w, buf_h, panel_x, y, panel_w, card_h, member, sprites,
+        );
+        y += card_h + card_gap;
+    }
+
+    if snapshot.party.is_empty() {
+        draw_text(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x,
+            panel_y + 22,
+            "Your party is currently empty.",
+            1,
+            ink,
+            panel_bg,
+        );
+    } else if y + card_h <= panel_bottom {
+        draw_text(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x,
+            y,
+            "Cards are ready for per-species sprite art next.",
+            1,
+            accent,
+            panel_bg,
+        );
+    }
+}
+
+fn draw_firered_party_card(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    member: &FireRedPartyMember,
+    sprites: &PokemonSpriteStore,
+) {
+    let card_bg = 0xFF_1A_23_36;
+    let card_border = 0xFF_2E_C4_B6;
+    let accent = 0xFF_FF_9F_1C;
+    let ink = 0xFF_F7_F3_EC;
+    let muted = 0xFF_96_A0_B4;
+    let sprite_bg = 0xFF_0D_12_1F;
+
+    draw_panel(buf, buf_w, buf_h, x, y, w, h, card_bg, card_border, accent);
+
+    let sprite_box = h.saturating_sub(10).clamp(26, 38);
+    let sprite_x = x + 8;
+    let sprite_y = y + (h.saturating_sub(sprite_box)) / 2;
+    draw_panel(
+        buf,
+        buf_w,
+        buf_h,
+        sprite_x,
+        sprite_y,
+        sprite_box,
+        sprite_box,
+        sprite_bg,
+        card_border,
+        accent,
+    );
+
+    if let Some(sprite) = sprites.sprite(member.species_id) {
+        draw_sprite_bitmap(
+            buf,
+            buf_w,
+            buf_h,
+            sprite_x + 2,
+            sprite_y + 2,
+            sprite_box.saturating_sub(4),
+            sprite_box.saturating_sub(4),
+            sprite,
+        );
+    } else {
+        let slot_label = format!("S{}", member.slot);
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            sprite_x + sprite_box / 2,
+            sprite_y + 4,
+            &slot_label,
+            1,
+            accent,
+            sprite_bg,
+        );
+
+        let badge = format!("#{:03}", member.species_id);
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            sprite_x + sprite_box / 2,
+            sprite_y + sprite_box.saturating_sub(14),
+            &badge,
+            1,
+            muted,
+            sprite_bg,
+        );
+    }
+
+    let info_x = sprite_x + sprite_box + 10;
+    let right_pad = 10usize;
+    let level = if member.is_egg {
+        "EGG".to_string()
+    } else {
+        format!("Lv{}", member.level)
+    };
+    let level_x = x + w.saturating_sub(right_pad + text_width(&level, 1));
+    let nickname = short_label(&member.nickname, if w >= 280 { 14 } else { 10 });
+    draw_text(buf, buf_w, buf_h, info_x, y + 6, &nickname, 1, ink, card_bg);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        level_x,
+        y + 6,
+        &level,
+        1,
+        accent,
+        card_bg,
+    );
+
+    let hp_text = format!("{}/{}", member.current_hp, member.max_hp);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        info_x,
+        y + h.saturating_sub(16),
+        &hp_text,
+        1,
+        muted,
+        card_bg,
+    );
+
+    let meta = format!("S{}  #{:03}", member.slot, member.species_id);
+    draw_text(buf, buf_w, buf_h, info_x, y + 18, &meta, 1, muted, card_bg);
+
+    let bar_x = info_x;
+    let bar_y = y + h.saturating_sub(8);
+    let bar_w = level_x.saturating_sub(info_x + 8);
+    draw_hp_bar(
+        buf,
+        buf_w,
+        buf_h,
+        bar_x,
+        bar_y,
+        bar_w.max(32),
+        6,
+        member.current_hp,
+        member.max_hp.max(1),
+    );
+}
+
+fn draw_hp_bar(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    current_hp: u16,
+    max_hp: u16,
+) {
+    let border = 0xFF_35_3F_58;
+    let empty = 0xFF_0B_0F_18;
+    let hp_color = hp_bar_color(current_hp, max_hp);
+
+    fill_rect(buf, buf_w, buf_h, x, y, w, h, border);
+    fill_rect(
+        buf,
+        buf_w,
+        buf_h,
+        x + 1,
+        y + 1,
+        w.saturating_sub(2),
+        h.saturating_sub(2),
+        empty,
+    );
+
+    let inner_w = w.saturating_sub(2);
+    let fill_w = if max_hp == 0 {
+        0
+    } else {
+        inner_w * current_hp as usize / max_hp as usize
+    };
+    if fill_w > 0 {
+        fill_rect(
+            buf,
+            buf_w,
+            buf_h,
+            x + 1,
+            y + 1,
+            fill_w,
+            h.saturating_sub(2),
+            hp_color,
+        );
+    }
+}
+
+fn hp_bar_color(current_hp: u16, max_hp: u16) -> u32 {
+    if max_hp == 0 {
+        return 0xFF_80_87_99;
+    }
+    let ratio = current_hp as f32 / max_hp as f32;
+    if ratio <= 0.2 {
+        0xFF_E7_43_4B
+    } else if ratio <= 0.5 {
+        0xFF_FF_9F_1C
+    } else {
+        0xFF_3D_DC_97
+    }
+}
+
+fn draw_sprite_bitmap(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    sprite: &SpriteBitmap,
+) {
+    if w == 0 || h == 0 || sprite.width == 0 || sprite.height == 0 {
+        return;
+    }
+
+    let sprite_w = sprite.width;
+    let sprite_h = sprite.height;
+    let (draw_w, draw_h) = if sprite_w * h > sprite_h * w {
+        let draw_h = (w * sprite_h / sprite_w).max(1);
+        (w, draw_h)
+    } else {
+        let draw_w = (h * sprite_w / sprite_h).max(1);
+        (draw_w, h)
+    };
+    let offset_x = x + (w.saturating_sub(draw_w)) / 2;
+    let offset_y = y + (h.saturating_sub(draw_h)) / 2;
+
+    for dy in 0..draw_h {
+        let src_y = dy * sprite_h / draw_h;
+        let dst_y = offset_y + dy;
+        if dst_y >= buf_h {
+            continue;
+        }
+
+        for dx in 0..draw_w {
+            let src_x = dx * sprite_w / draw_w;
+            let dst_x = offset_x + dx;
+            if dst_x >= buf_w {
+                continue;
+            }
+
+            let src = sprite.pixels[src_y * sprite_w + src_x];
+            let alpha = (src >> 24) & 0xFF;
+            if alpha == 0 {
+                continue;
+            }
+
+            let idx = dst_y * buf_w + dst_x;
+            buf[idx] = if alpha == 0xFF {
+                src & 0x00FF_FFFF
+            } else {
+                alpha_blend(buf[idx], src)
+            };
+        }
+    }
+}
+
+fn alpha_blend(dst: u32, src: u32) -> u32 {
+    let src_a = (src >> 24) & 0xFF;
+    let inv_a = 255 - src_a;
+    let blend = |shift: u32| {
+        let src_c = (src >> shift) & 0xFF;
+        let dst_c = (dst >> shift) & 0xFF;
+        ((src_c * src_a + dst_c * inv_a) / 255) << shift
+    };
+    blend(16) | blend(8) | blend(0)
+}
+
+fn short_label(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut shortened = String::new();
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return text.to_string();
+        };
+        shortened.push(ch);
+    }
+
+    if chars.next().is_some() && max_chars >= 3 {
+        shortened.truncate(max_chars - 3);
+        shortened.push_str("...");
+    }
+
+    shortened
+}
+
+pub fn draw_home_screen(buf: &mut [u32], buf_w: usize, buf_h: usize, screen: HomeScreen<'_>) {
+    let compact = buf_h < 190 || buf_w < 300;
+    let ink = 0xFF_F6_EE_DF;
+    let muted = 0xFF_8C_92_A0;
+    let accent = 0xFF_FF_9F_1C;
+    let accent_2 = 0xFF_2E_C4_B6;
+    let panel_bg = 0xFF_11_16_27;
+
+    draw_gradient_background(buf, buf_w, buf_h, 0xFF_0A_10_1E, 0xFF_1C_22_37, accent_2);
+
+    let panel_w = buf_w.saturating_sub(24).clamp(180, 420);
+    let panel_h = buf_h.saturating_sub(24).clamp(128, 220);
+    let panel_x = (buf_w.saturating_sub(panel_w)) / 2;
+    let panel_y = (buf_h.saturating_sub(panel_h)) / 2;
+    draw_panel(
+        buf, buf_w, buf_h, panel_x, panel_y, panel_w, panel_h, panel_bg, accent_2, accent,
+    );
+
+    let center_x = panel_x + panel_w / 2;
+    let mut y = panel_y + 14;
+    let title_scale = if compact {
+        2
+    } else if buf_w >= 420 {
+        3
+    } else {
+        2
+    };
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        center_x,
+        y,
+        "tinyBird",
+        title_scale,
+        accent,
+        panel_bg,
+    );
+    y += title_scale * 10 + 8;
+    if !compact {
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            center_x,
+            y,
+            "Game Boy Advance emulator",
+            1,
+            ink,
+            panel_bg,
+        );
+        y += 18;
+    }
+
+    fill_rect(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 14,
+        y,
+        panel_w.saturating_sub(28),
+        1,
+        muted,
+    );
+    y += 12;
+
+    let hero = if screen.hovered_file.is_some() {
+        "Drop now to load"
+    } else {
+        "Open ROM: [O] [Enter]"
+    };
+    draw_text_centered(buf, buf_w, buf_h, center_x, y, hero, 1, ink, panel_bg);
+    y += 14;
+    if !compact {
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            center_x,
+            y,
+            "Drag and drop also works",
+            1,
+            accent_2,
+            panel_bg,
+        );
+        y += 18;
+    } else {
+        y += 8;
+    }
+
+    if let Some(file) = screen.hovered_file {
+        draw_text_centered(buf, buf_w, buf_h, center_x, y, file, 1, accent, panel_bg);
+        y += 16;
+    }
+
+    let bios_text = if screen.bios_loaded {
+        "BIOS: detected"
+    } else {
+        "BIOS: HLE mode active"
+    };
+    let bios_color = if screen.bios_loaded { accent_2 } else { accent };
+    draw_text_centered(
+        buf, buf_w, buf_h, center_x, y, bios_text, 1, bios_color, panel_bg,
+    );
+    y += 18;
+
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        center_x,
+        y,
+        "Move: arrows  A/B: Z/X",
+        1,
+        ink,
+        panel_bg,
+    );
+    y += 14;
+    if compact {
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            center_x,
+            y,
+            "Start: Enter",
+            1,
+            ink,
+            panel_bg,
+        );
+    } else {
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            center_x,
+            y,
+            "L/R: A/S  Start: Enter",
+            1,
+            ink,
+            panel_bg,
+        );
+        y += 14;
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            center_x,
+            y,
+            "Place one ROM in ./roms/",
+            1,
+            muted,
+            panel_bg,
+        );
+    }
+}
+
+pub fn draw_pause_screen(buf: &mut [u32], buf_w: usize, buf_h: usize, screen: PauseScreen<'_>) {
+    let panel_w = buf_w.saturating_sub(36).clamp(160, 300);
+    let panel_h = buf_h.saturating_sub(40).clamp(124, 168);
+    let panel_x = (buf_w.saturating_sub(panel_w)) / 2;
+    let panel_y = (buf_h.saturating_sub(panel_h)) / 2;
+    let panel_bg = 0xFF_16_12_1C;
+    let ink = 0xFF_F7_F1_E8;
+    let muted = 0xFF_A4_9B_AE;
+    let accent = 0xFF_FF_9F_1C;
+    let accent_2 = 0xFF_72_E0_D1;
+
+    draw_panel(
+        buf, buf_w, buf_h, panel_x, panel_y, panel_w, panel_h, panel_bg, accent_2, accent,
+    );
+
+    let center_x = panel_x + panel_w / 2;
+    let mut y = panel_y + 16;
+    draw_text_centered(
+        buf, buf_w, buf_h, center_x, y, "PAUSED", 2, accent, panel_bg,
+    );
+    y += 28;
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        center_x,
+        y,
+        screen.rom_title.unwrap_or("No ROM"),
+        1,
+        ink,
+        panel_bg,
+    );
+    y += 18;
+
+    fill_rect(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 12,
+        y,
+        panel_w.saturating_sub(24),
+        1,
+        muted,
+    );
+    y += 12;
+
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        center_x,
+        y,
+        "Resume: [Esc]",
+        1,
+        ink,
+        panel_bg,
+    );
+    y += 14;
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        center_x,
+        y,
+        "Open ROM: [O]",
+        1,
+        ink,
+        panel_bg,
+    );
+    y += 14;
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        center_x,
+        y,
+        "Save: [F5]  Load: [F8]",
+        1,
+        ink,
+        panel_bg,
+    );
+    y += 14;
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        center_x,
+        y,
+        "Speed: [1] [2] [4]",
+        1,
+        muted,
+        panel_bg,
+    );
+    y += 14;
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        center_x,
+        y,
+        "HUD: [F1]  Team: [F2]",
+        1,
+        muted,
+        panel_bg,
+    );
+    y += 14;
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        center_x,
+        y,
+        "Reset: [R]  Popout: [F3]",
+        1,
+        muted,
+        panel_bg,
+    );
+}
+
+pub fn draw_toast(buf: &mut [u32], buf_w: usize, buf_h: usize, toast: Toast<'_>) {
+    let scale = 1usize;
+    let pad_x = 10usize;
+    let pad_y = 8usize;
+    let text_w = text_width(toast.text, scale);
+    let width = (text_w + pad_x * 2).min(buf_w.saturating_sub(12)).max(72);
+    let height = CHAR_H * scale + scale + pad_y * 2;
+    let x = (buf_w.saturating_sub(width)) / 2;
+    let y = buf_h.saturating_sub(height + 10);
+
+    let (bg, border, text) = match toast.tone {
+        ToastTone::Info => (0xFF_13_1B_2F, 0xFF_2E_C4_B6, 0xFF_F4_F8_FB),
+        ToastTone::Success => (0xFF_11_22_1B, 0xFF_3D_DC_97, 0xFF_F4_F8_FB),
+        ToastTone::Warning => (0xFF_2A_17_14, 0xFF_FF_9F_1C, 0xFF_F9_F3_E6),
+    };
+
+    draw_panel(buf, buf_w, buf_h, x, y, width, height, bg, border, border);
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        x + width / 2,
+        y + pad_y,
+        toast.text,
+        scale,
+        text,
         bg,
     );
 }
