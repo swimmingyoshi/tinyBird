@@ -37,6 +37,12 @@ const AUDIO_BACKPRESSURE_MILLIS: u32 = 94;
 const ADDON_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const RGB555_COLOR_COUNT: usize = 1 << 15;
 
+fn frame_duration_for_speed(speed_multiplier: u32) -> Duration {
+    let speed = speed_multiplier.max(1) as u128;
+    let nanos = (FRAME_DURATION.as_nanos() / speed).max(1);
+    Duration::from_nanos(nanos as u64)
+}
+
 fn build_rgb555_lookup(color_correction: bool) -> [u32; RGB555_COLOR_COUNT] {
     let mut table = [0u32; RGB555_COLOR_COUNT];
     for (rgb555, slot) in table.iter_mut().enumerate() {
@@ -107,13 +113,18 @@ struct StatusMessage {
     expires_at: Instant,
 }
 
+struct AddonPopout {
+    view_mode: overlay::AddonViewMode,
+    window: Arc<Window>,
+    surface: Surface<Arc<Window>, Arc<Window>>,
+    surface_size: (u32, u32),
+}
+
 struct App {
     window: Option<Arc<Window>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     surface_size: (u32, u32),
-    addon_window: Option<Arc<Window>>,
-    addon_surface: Option<Surface<Arc<Window>, Arc<Window>>>,
-    addon_surface_size: (u32, u32),
+    addon_popouts: Vec<AddonPopout>,
     gba: Gba,
     speed_multiplier: u32,
     next_frame_deadline: Instant,
@@ -200,12 +211,10 @@ impl App {
             window: None,
             surface: None,
             surface_size: (0, 0),
-            addon_window: None,
-            addon_surface: None,
-            addon_surface_size: (0, 0),
+            addon_popouts: Vec::new(),
             gba,
             speed_multiplier: 1,
-            next_frame_deadline: Instant::now() + FRAME_DURATION,
+            next_frame_deadline: Instant::now() + frame_duration_for_speed(1),
             audio_handler: None,
             rom_loaded,
             rom_title,
@@ -242,12 +251,24 @@ impl App {
         }
     }
 
+    fn addon_popout_index(&self, view_mode: overlay::AddonViewMode) -> Option<usize> {
+        self.addon_popouts
+            .iter()
+            .position(|popout| popout.view_mode == view_mode)
+    }
+
+    fn addon_popout_window_index(&self, window_id: WindowId) -> Option<usize> {
+        self.addon_popouts
+            .iter()
+            .position(|popout| popout.window.id() == window_id)
+    }
+
     fn request_redraw(&self) {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
-        if let Some(window) = &self.addon_window {
-            window.request_redraw();
+        for popout in &self.addon_popouts {
+            popout.window.request_redraw();
         }
     }
 
@@ -268,26 +289,23 @@ impl App {
         if let Some(window) = &self.window {
             window.set_title(&title);
         }
-        self.refresh_addon_window_title();
+        self.refresh_addon_window_titles();
     }
 
-    fn refresh_addon_window_title(&self) {
-        let Some(window) = &self.addon_window else {
-            return;
-        };
+    fn addon_window_title(&self, view_mode: overlay::AddonViewMode) -> String {
+        let label = view_mode.label();
+        match self.rom_title.as_ref() {
+            Some(name) => format!("tinyBird - {label} | {name}"),
+            None => format!("tinyBird - {label}"),
+        }
+    }
 
-        let title = self
-            .addon_snapshot
-            .addon
-            .as_ref()
-            .map(|_| format!("tinyBird - {}", self.addon_view_mode.label()))
-            .or_else(|| {
-                self.rom_title
-                    .as_ref()
-                    .map(|name| format!("tinyBird - {} | {name}", self.addon_view_mode.label()))
-            })
-            .unwrap_or_else(|| format!("tinyBird - {}", self.addon_view_mode.label()));
-        window.set_title(&title);
+    fn refresh_addon_window_titles(&self) {
+        for popout in &self.addon_popouts {
+            popout
+                .window
+                .set_title(&self.addon_window_title(popout.view_mode));
+        }
     }
 
     fn set_status(&mut self, text: impl Into<String>, tone: overlay::ToastTone) {
@@ -307,7 +325,7 @@ impl App {
     fn show_addon_view(&mut self, view_mode: overlay::AddonViewMode) {
         self.addon_view_mode = view_mode;
         self.show_addon_panel = true;
-        self.refresh_addon_window_title();
+        self.refresh_addon_window_titles();
         self.request_redraw();
         self.set_status(
             format!("{} panel shown", view_mode.label()),
@@ -348,13 +366,17 @@ impl App {
     }
 
     fn reset_timing_state(&mut self) {
-        self.next_frame_deadline = Instant::now() + FRAME_DURATION;
+        self.next_frame_deadline = Instant::now() + self.frame_pacing_duration();
     }
 
     fn clear_audio_output(&self) {
         if let Some(audio_handler) = &self.audio_handler {
             audio_handler.clear();
         }
+    }
+
+    fn frame_pacing_duration(&self) -> Duration {
+        frame_duration_for_speed(self.speed_multiplier)
     }
 
     fn set_speed_multiplier(&mut self, speed_multiplier: u32) {
@@ -384,7 +406,7 @@ impl App {
 
         if self.addon_snapshot != snapshot {
             self.addon_snapshot = snapshot;
-            self.refresh_addon_window_title();
+            self.refresh_addon_window_titles();
             self.request_redraw();
         }
 
@@ -564,7 +586,7 @@ impl App {
         let mut frames_ran = 0;
         if self.gba.state == GbaState::Running {
             let frame_debug = std::env::var("TINYBIRD_FRAME_DEBUG").is_ok();
-            let frames_to_run = base_frames.saturating_mul(self.speed_multiplier.max(1));
+            let frames_to_run = base_frames;
 
             for _ in 0..frames_to_run {
                 if frame_debug {
@@ -684,7 +706,7 @@ impl App {
                 None,
                 toast,
             );
-            self.present_addon_window();
+            self.present_addon_popouts();
             return;
         }
 
@@ -731,7 +753,7 @@ impl App {
             pause_screen,
             toast,
         );
-        self.present_addon_window();
+        self.present_addon_popouts();
     }
 
     fn render_frame(&mut self, base_frames: u32) {
@@ -907,25 +929,40 @@ impl App {
         let _ = buffer.present();
     }
 
-    fn present_addon_window(&mut self) {
-        let Some(surface) = &mut self.addon_surface else {
+    fn present_addon_popouts(&mut self) {
+        let view_modes = self
+            .addon_popouts
+            .iter()
+            .map(|popout| popout.view_mode)
+            .collect::<Vec<_>>();
+        for view_mode in view_modes {
+            self.present_addon_popout(view_mode);
+        }
+    }
+
+    fn present_addon_popout(&mut self, view_mode: overlay::AddonViewMode) {
+        let Some(index) = self.addon_popout_index(view_mode) else {
             return;
         };
-        if self.addon_surface_size.0 == 0 || self.addon_surface_size.1 == 0 {
+
+        let snapshot = &self.addon_snapshot;
+        let sprites = &self.pokemon_sprites;
+        let popout = &mut self.addon_popouts[index];
+        if popout.surface_size.0 == 0 || popout.surface_size.1 == 0 {
             return;
         }
 
-        let Ok(mut buffer) = surface.buffer_mut() else {
+        let Ok(mut buffer) = popout.surface.buffer_mut() else {
             return;
         };
         overlay::draw_addon_panel(
             &mut buffer,
-            self.addon_surface_size.0 as usize,
-            self.addon_surface_size.1 as usize,
-            &self.addon_snapshot,
-            &self.pokemon_sprites,
+            popout.surface_size.0 as usize,
+            popout.surface_size.1 as usize,
+            snapshot,
+            sprites,
             true,
-            self.addon_view_mode,
+            popout.view_mode,
         );
         let _ = buffer.present();
     }
@@ -1089,7 +1126,19 @@ impl App {
                     self.request_redraw();
                 }
                 Key::Named(NamedKey::F2) => {
-                    if self.show_addon_panel && self.addon_view_mode == overlay::AddonViewMode::Team
+                    let other_popout_open = self
+                        .addon_popouts
+                        .iter()
+                        .any(|popout| popout.view_mode != overlay::AddonViewMode::Team);
+                    if other_popout_open
+                        && self
+                            .addon_popout_index(overlay::AddonViewMode::Team)
+                            .is_none()
+                    {
+                        self.ensure_addon_popout(event_loop, overlay::AddonViewMode::Team);
+                        self.set_status("Team popout opened", overlay::ToastTone::Info);
+                    } else if self.show_addon_panel
+                        && self.addon_view_mode == overlay::AddonViewMode::Team
                     {
                         self.show_addon_panel = false;
                         self.request_redraw();
@@ -1099,16 +1148,33 @@ impl App {
                     }
                 }
                 Key::Named(NamedKey::F6) => {
-                    if self.addon_window.is_some() {
-                        self.close_addon_window();
-                        self.set_status("Addon popout closed", overlay::ToastTone::Info);
+                    let view_mode = self.addon_view_mode;
+                    if self.close_addon_popout(view_mode) {
+                        self.set_status(
+                            format!("{} popout closed", view_mode.label()),
+                            overlay::ToastTone::Info,
+                        );
                     } else {
-                        self.ensure_addon_window(event_loop);
-                        self.set_status("Addon popout opened", overlay::ToastTone::Info);
+                        self.ensure_addon_popout(event_loop, view_mode);
+                        self.set_status(
+                            format!("{} popout opened", view_mode.label()),
+                            overlay::ToastTone::Info,
+                        );
                     }
                 }
                 Key::Named(NamedKey::F4) => {
-                    if self.show_addon_panel
+                    let other_popout_open = self
+                        .addon_popouts
+                        .iter()
+                        .any(|popout| popout.view_mode != overlay::AddonViewMode::Encounters);
+                    if other_popout_open
+                        && self
+                            .addon_popout_index(overlay::AddonViewMode::Encounters)
+                            .is_none()
+                    {
+                        self.ensure_addon_popout(event_loop, overlay::AddonViewMode::Encounters);
+                        self.set_status("Encounters popout opened", overlay::ToastTone::Info);
+                    } else if self.show_addon_panel
                         && self.addon_view_mode == overlay::AddonViewMode::Encounters
                     {
                         self.show_addon_panel = false;
@@ -1192,6 +1258,7 @@ impl App {
     fn handle_addon_window_key(
         &mut self,
         event_loop: &ActiveEventLoop,
+        source_view_mode: overlay::AddonViewMode,
         logical_key: &Key,
         pressed: bool,
     ) {
@@ -1201,14 +1268,34 @@ impl App {
 
         match logical_key {
             Key::Named(NamedKey::Escape) | Key::Named(NamedKey::F6) => {
-                self.close_addon_window();
-                self.set_status("Addon popout closed", overlay::ToastTone::Info);
+                self.close_addon_popout(source_view_mode);
+                self.set_status(
+                    format!("{} popout closed", source_view_mode.label()),
+                    overlay::ToastTone::Info,
+                );
             }
             Key::Named(NamedKey::F2) => {
-                self.show_addon_view(overlay::AddonViewMode::Team);
+                let created = self.ensure_addon_popout(event_loop, overlay::AddonViewMode::Team);
+                self.set_status(
+                    if created {
+                        "Team popout opened"
+                    } else {
+                        "Team popout already open"
+                    },
+                    overlay::ToastTone::Info,
+                );
             }
             Key::Named(NamedKey::F4) => {
-                self.show_addon_view(overlay::AddonViewMode::Encounters);
+                let created =
+                    self.ensure_addon_popout(event_loop, overlay::AddonViewMode::Encounters);
+                self.set_status(
+                    if created {
+                        "Encounters popout opened"
+                    } else {
+                        "Encounters popout already open"
+                    },
+                    overlay::ToastTone::Info,
+                );
             }
             Key::Named(NamedKey::F1) => {
                 self.show_overlay = !self.show_overlay;
@@ -1223,7 +1310,7 @@ impl App {
                 self.request_redraw();
             }
             Key::Named(NamedKey::Tab) => {
-                self.ensure_addon_window(event_loop);
+                self.ensure_addon_popout(event_loop, source_view_mode);
             }
             _ => {}
         }
@@ -1238,15 +1325,20 @@ impl App {
         }
     }
 
-    fn ensure_addon_window(&mut self, event_loop: &ActiveEventLoop) {
-        if self.addon_window.is_some() {
+    fn ensure_addon_popout(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        view_mode: overlay::AddonViewMode,
+    ) -> bool {
+        if self.addon_popout_index(view_mode).is_some() {
             self.request_redraw();
-            return;
+            return false;
         }
 
+        let window_size = LogicalSize::new(460.0, 540.0);
         let attrs = Window::default_attributes()
-            .with_title("tinyBird - Addons")
-            .with_inner_size(LogicalSize::new(420.0, 360.0))
+            .with_title(self.addon_window_title(view_mode))
+            .with_inner_size(window_size)
             .with_min_inner_size(LogicalSize::new(260.0, 220.0))
             .with_resizable(true);
 
@@ -1257,20 +1349,30 @@ impl App {
         );
         let context =
             softbuffer::Context::new(window.clone()).expect("Failed to create addon context");
-        let surface =
+        let mut surface =
             Surface::new(&context, window.clone()).expect("Failed to create addon surface");
+        let surface_size = (window_size.width as u32, window_size.height as u32);
+        let _ = surface.resize(
+            NonZeroU32::new(surface_size.0).unwrap(),
+            NonZeroU32::new(surface_size.1).unwrap(),
+        );
 
-        self.addon_window = Some(window);
-        self.addon_surface = Some(surface);
-        self.resize_addon_surface(420, 360);
-        self.refresh_addon_window_title();
+        self.addon_popouts.push(AddonPopout {
+            view_mode,
+            window,
+            surface,
+            surface_size,
+        });
         self.request_redraw();
+        true
     }
 
-    fn close_addon_window(&mut self) {
-        self.addon_surface = None;
-        self.addon_window = None;
-        self.addon_surface_size = (0, 0);
+    fn close_addon_popout(&mut self, view_mode: overlay::AddonViewMode) -> bool {
+        let Some(index) = self.addon_popout_index(view_mode) else {
+            return false;
+        };
+        self.addon_popouts.remove(index);
+        true
     }
 
     fn resize_main_surface(&mut self, width: u32, height: u32) {
@@ -1286,17 +1388,19 @@ impl App {
         }
     }
 
-    fn resize_addon_surface(&mut self, width: u32, height: u32) {
-        self.addon_surface_size = (width, height);
+    fn resize_addon_popout_at_index(&mut self, index: usize, width: u32, height: u32) {
+        let Some(popout) = self.addon_popouts.get_mut(index) else {
+            return;
+        };
+
+        popout.surface_size = (width, height);
         if width == 0 || height == 0 {
             return;
         }
-        if let Some(surface) = &mut self.addon_surface {
-            let _ = surface.resize(
-                NonZeroU32::new(width).unwrap(),
-                NonZeroU32::new(height).unwrap(),
-            );
-        }
+        let _ = popout.surface.resize(
+            NonZeroU32::new(width).unwrap(),
+            NonZeroU32::new(height).unwrap(),
+        );
     }
 }
 
@@ -1343,30 +1447,33 @@ impl ApplicationHandler for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let is_addon_window = self
-            .addon_window
-            .as_ref()
-            .is_some_and(|window| window.id() == window_id);
+        let addon_window_index = self.addon_popout_window_index(window_id);
+        let addon_window_view =
+            addon_window_index.and_then(|index| self.addon_popouts.get(index).map(|p| p.view_mode));
+        let is_addon_window = addon_window_view.is_some();
 
         match event {
             WindowEvent::CloseRequested => {
-                if is_addon_window {
-                    self.close_addon_window();
-                    self.set_status("Addon popout closed", overlay::ToastTone::Info);
+                if let Some(view_mode) = addon_window_view {
+                    self.close_addon_popout(view_mode);
+                    self.set_status(
+                        format!("{} popout closed", view_mode.label()),
+                        overlay::ToastTone::Info,
+                    );
                 } else {
                     self.flush_battery_save(true);
                     event_loop.exit();
                 }
             }
             WindowEvent::Resized(size) => {
-                if is_addon_window {
-                    self.resize_addon_surface(size.width, size.height);
+                if let Some(index) = addon_window_index {
+                    self.resize_addon_popout_at_index(index, size.width, size.height);
                 } else {
                     self.resize_main_surface(size.width, size.height);
                 }
-                if is_addon_window {
-                    if let Some(window) = &self.addon_window {
-                        window.request_redraw();
+                if let Some(index) = addon_window_index {
+                    if let Some(popout) = self.addon_popouts.get(index) {
+                        popout.window.request_redraw();
                     }
                 } else if let Some(window) = &self.window {
                     window.request_redraw();
@@ -1405,15 +1512,15 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
-                if is_addon_window {
-                    self.handle_addon_window_key(event_loop, &logical_key, pressed);
+                if let Some(view_mode) = addon_window_view {
+                    self.handle_addon_window_key(event_loop, view_mode, &logical_key, pressed);
                 } else {
                     self.handle_key(event_loop, &physical_key, &logical_key, pressed);
                 }
             }
             WindowEvent::RedrawRequested => {
-                if is_addon_window {
-                    self.present_addon_window();
+                if let Some(view_mode) = addon_window_view {
+                    self.present_addon_popout(view_mode);
                     return;
                 }
 
@@ -1423,11 +1530,14 @@ impl ApplicationHandler for App {
                 }
 
                 let now = Instant::now();
+                let frame_pacing_duration = self.frame_pacing_duration();
                 if now + FRAME_PACING_TOLERANCE < self.next_frame_deadline {
                     return;
                 }
 
-                let max_catchup_frames = if self
+                let max_catchup_frames = if self.speed_multiplier > 1 {
+                    1
+                } else if self
                     .audio_handler
                     .as_ref()
                     .map(|audio_handler| audio_handler.buffered_millis())
@@ -1444,7 +1554,7 @@ impl ApplicationHandler for App {
                     && now + FRAME_PACING_TOLERANCE >= self.next_frame_deadline
                 {
                     frames_due += 1;
-                    self.next_frame_deadline += FRAME_DURATION;
+                    self.next_frame_deadline += frame_pacing_duration;
                 }
 
                 if frames_due == 0 {
@@ -1452,7 +1562,7 @@ impl ApplicationHandler for App {
                 }
 
                 if now + FRAME_PACING_TOLERANCE >= self.next_frame_deadline {
-                    self.next_frame_deadline = now + FRAME_DURATION;
+                    self.next_frame_deadline = now + frame_pacing_duration;
                 }
 
                 self.render_frame(frames_due);

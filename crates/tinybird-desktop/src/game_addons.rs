@@ -119,6 +119,7 @@ pub struct FireRedPartyMember {
     pub slot: u8,
     pub nickname: String,
     pub species_id: u16,
+    pub species_name: String,
     pub personality: u32,
     pub ot_id: u32,
     pub level: u8,
@@ -126,7 +127,42 @@ pub struct FireRedPartyMember {
     pub max_hp: u16,
     pub status: u32,
     pub is_egg: bool,
+    pub nature: &'static str,
+    pub ability_slot: u8,
+    pub ability_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_item: Option<FireRedHeldItem>,
+    pub stats: FireRedStatSpread,
+    pub evs: FireRedStatSpread,
+    pub ivs: FireRedStatSpread,
+    pub ev_total: u16,
+    pub iv_total: u16,
     pub moves: [u16; 4],
+    pub move_slots: Vec<FireRedMoveSlot>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FireRedHeldItem {
+    pub item_id: u16,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FireRedMoveSlot {
+    pub slot: u8,
+    pub move_id: u16,
+    pub name: String,
+    pub pp: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct FireRedStatSpread {
+    pub hp: u16,
+    pub attack: u16,
+    pub defense: u16,
+    pub speed: u16,
+    pub sp_attack: u16,
+    pub sp_def: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -155,7 +191,18 @@ pub struct FireRedBattleOpponent {
     pub current_hp: u16,
     pub max_hp: u16,
     pub status: u32,
+    pub nature: &'static str,
+    pub ability_slot: u8,
+    pub ability_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_item: Option<FireRedHeldItem>,
+    pub stats: FireRedStatSpread,
+    pub evs: FireRedStatSpread,
+    pub ivs: FireRedStatSpread,
+    pub ev_total: u16,
+    pub iv_total: u16,
     pub moves: [u16; 4],
+    pub move_slots: Vec<FireRedMoveSlot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catch_rate: Option<u8>,
 }
@@ -179,7 +226,6 @@ pub struct FireRedEncounterEntry {
 
 trait GameAddon {
     fn addon_id(&self) -> &'static str;
-    fn display_name(&self) -> &'static str;
     fn supports(&self, rom: &RomIdentity) -> bool;
     fn snapshot(&self, gba: &Gba, rom: &RomIdentity) -> Option<AddonSnapshot>;
 }
@@ -285,18 +331,17 @@ struct FireRedAddon;
 
 impl GameAddon for FireRedAddon {
     fn addon_id(&self) -> &'static str {
-        "pokemon_firered_party"
-    }
-
-    fn display_name(&self) -> &'static str {
-        "FireRed Party"
+        "pokemon_frlg_party"
     }
 
     fn supports(&self, rom: &RomIdentity) -> bool {
-        rom.game_code.starts_with("BPR") || rom.title.eq_ignore_ascii_case("POKEMON FIRE")
+        rom.game_code.starts_with("BPR")
+            || rom.game_code.starts_with("BPG")
+            || rom.title.eq_ignore_ascii_case("POKEMON FIRE")
+            || rom.title.eq_ignore_ascii_case("POKEMON LEAF")
     }
 
-    fn snapshot(&self, gba: &Gba, _rom: &RomIdentity) -> Option<AddonSnapshot> {
+    fn snapshot(&self, gba: &Gba, rom: &RomIdentity) -> Option<AddonSnapshot> {
         let (party_base_address, party) = locate_fire_red_party(gba)?;
         let area = locate_fire_red_area(gba);
         let battle = locate_fire_red_battle(gba, area.as_ref());
@@ -323,7 +368,7 @@ impl GameAddon for FireRedAddon {
 
         Some(AddonSnapshot {
             addon_id: self.addon_id(),
-            display_name: self.display_name(),
+            display_name: frlg_display_name(rom),
             overlay_lines,
             data: AddonData::FireRed(FireRedSnapshot {
                 source: "live_memory",
@@ -333,6 +378,16 @@ impl GameAddon for FireRedAddon {
                 battle,
             }),
         })
+    }
+}
+
+fn frlg_display_name(rom: &RomIdentity) -> &'static str {
+    if rom.game_code.starts_with("BPG") || rom.title.eq_ignore_ascii_case("POKEMON LEAF") {
+        "LeafGreen Party"
+    } else if rom.game_code.starts_with("BPR") || rom.title.eq_ignore_ascii_case("POKEMON FIRE") {
+        "FireRed Party"
+    } else {
+        "FR/LG Party"
     }
 }
 
@@ -571,7 +626,17 @@ fn locate_fire_red_battle(
             current_hp: member.current_hp,
             max_hp: member.max_hp,
             status: member.status,
+            nature: member.nature,
+            ability_slot: member.ability_slot,
+            ability_name: member.ability_name,
+            held_item: member.held_item,
+            stats: member.stats,
+            evs: member.evs,
+            ivs: member.ivs,
+            ev_total: member.ev_total,
+            iv_total: member.iv_total,
             moves: member.moves,
+            move_slots: member.move_slots,
             catch_rate: catchable.then_some(catch_rate).flatten(),
         },
     })
@@ -801,10 +866,38 @@ fn parse_party_member(raw: &[u8; PARTY_SLOT_SIZE], slot: u8) -> Option<FireRedPa
 
     let growth = sections[0];
     let attacks = sections[1];
+    let evs_section = sections[2];
+    let misc = sections[3];
     let species_id = u16::from_le_bytes(growth[0..2].try_into().ok()?);
     if species_id == 0 || species_id > 440 {
         return None;
     }
+    let held_item_id = u16::from_le_bytes(growth[2..4].try_into().ok()?);
+    let moves = [
+        u16::from_le_bytes(attacks[0..2].try_into().ok()?),
+        u16::from_le_bytes(attacks[2..4].try_into().ok()?),
+        u16::from_le_bytes(attacks[4..6].try_into().ok()?),
+        u16::from_le_bytes(attacks[6..8].try_into().ok()?),
+    ];
+    let pp = [attacks[8], attacks[9], attacks[10], attacks[11]];
+    let iv_word = u32::from_le_bytes(misc[4..8].try_into().ok()?);
+    let ability_slot = ((iv_word >> 31) & 1) as u8;
+    let evs = FireRedStatSpread {
+        hp: evs_section[0] as u16,
+        attack: evs_section[1] as u16,
+        defense: evs_section[2] as u16,
+        speed: evs_section[3] as u16,
+        sp_attack: evs_section[4] as u16,
+        sp_def: evs_section[5] as u16,
+    };
+    let ivs = FireRedStatSpread {
+        hp: (iv_word & 0x1F) as u16,
+        attack: ((iv_word >> 5) & 0x1F) as u16,
+        defense: ((iv_word >> 10) & 0x1F) as u16,
+        speed: ((iv_word >> 15) & 0x1F) as u16,
+        sp_attack: ((iv_word >> 20) & 0x1F) as u16,
+        sp_def: ((iv_word >> 25) & 0x1F) as u16,
+    };
 
     let flags = raw[19];
     if flags & 0x2 == 0 {
@@ -822,6 +915,7 @@ fn parse_party_member(raw: &[u8; PARTY_SLOT_SIZE], slot: u8) -> Option<FireRedPa
         slot,
         nickname: decode_gen3_text(&raw[8..18]),
         species_id,
+        species_name: species_display_name(species_id),
         personality,
         ot_id,
         level,
@@ -829,13 +923,162 @@ fn parse_party_member(raw: &[u8; PARTY_SLOT_SIZE], slot: u8) -> Option<FireRedPa
         max_hp,
         status: u32::from_le_bytes(raw[80..84].try_into().ok()?),
         is_egg,
-        moves: [
-            u16::from_le_bytes(attacks[0..2].try_into().ok()?),
-            u16::from_le_bytes(attacks[2..4].try_into().ok()?),
-            u16::from_le_bytes(attacks[4..6].try_into().ok()?),
-            u16::from_le_bytes(attacks[6..8].try_into().ok()?),
-        ],
+        nature: nature_name(personality),
+        ability_slot,
+        ability_name: ability_name_for_species(species_id, ability_slot),
+        held_item: held_item(held_item_id),
+        stats: FireRedStatSpread {
+            hp: max_hp,
+            attack: u16::from_le_bytes(raw[90..92].try_into().ok()?),
+            defense: u16::from_le_bytes(raw[92..94].try_into().ok()?),
+            speed: u16::from_le_bytes(raw[94..96].try_into().ok()?),
+            sp_attack: u16::from_le_bytes(raw[96..98].try_into().ok()?),
+            sp_def: u16::from_le_bytes(raw[98..100].try_into().ok()?),
+        },
+        evs,
+        ivs,
+        ev_total: stat_total(&evs),
+        iv_total: stat_total(&ivs),
+        moves,
+        move_slots: move_slots(moves, pp),
     })
+}
+
+fn stat_total(spread: &FireRedStatSpread) -> u16 {
+    spread.hp + spread.attack + spread.defense + spread.speed + spread.sp_attack + spread.sp_def
+}
+
+fn move_slots(moves: [u16; 4], pp: [u8; 4]) -> Vec<FireRedMoveSlot> {
+    moves
+        .iter()
+        .zip(pp.iter())
+        .enumerate()
+        .filter_map(|(idx, (&move_id, &pp))| {
+            (move_id != 0).then(|| FireRedMoveSlot {
+                slot: idx as u8 + 1,
+                move_id,
+                name: move_name(move_id).to_string(),
+                pp,
+            })
+        })
+        .collect()
+}
+
+fn species_display_name(species_id: u16) -> String {
+    fallback_species_info(species_id)
+        .map(|(name, _)| name.to_string())
+        .unwrap_or_else(|| format!("Species #{species_id:03}"))
+}
+
+fn held_item(item_id: u16) -> Option<FireRedHeldItem> {
+    (item_id != 0).then(|| FireRedHeldItem {
+        item_id,
+        name: item_name(item_id).to_string(),
+    })
+}
+
+fn item_name(item_id: u16) -> &'static str {
+    match item_id {
+        1 => "Master Ball",
+        2 => "Ultra Ball",
+        3 => "Great Ball",
+        4 => "Poke Ball",
+        13 => "Potion",
+        14 => "Antidote",
+        15 => "Burn Heal",
+        16 => "Ice Heal",
+        17 => "Awakening",
+        18 => "Parlyz Heal",
+        19 => "Full Restore",
+        20 => "Max Potion",
+        21 => "Hyper Potion",
+        22 => "Super Potion",
+        23 => "Full Heal",
+        24 => "Revive",
+        25 => "Max Revive",
+        75 => "TinyMushroom",
+        76 => "Big Mushroom",
+        79 => "Pearl",
+        80 => "Big Pearl",
+        83 => "Stardust",
+        84 => "Star Piece",
+        143 => "Oran Berry",
+        149 => "Leppa Berry",
+        161 => "Cheri Berry",
+        162 => "Chesto Berry",
+        163 => "Pecha Berry",
+        164 => "Rawst Berry",
+        165 => "Aspear Berry",
+        _ => "Unknown Item",
+    }
+}
+
+fn nature_name(personality: u32) -> &'static str {
+    const NATURES: [&str; 25] = [
+        "Hardy", "Lonely", "Brave", "Adamant", "Naughty", "Bold", "Docile", "Relaxed", "Impish",
+        "Lax", "Timid", "Hasty", "Serious", "Jolly", "Naive", "Modest", "Mild", "Quiet", "Bashful",
+        "Rash", "Calm", "Gentle", "Sassy", "Careful", "Quirky",
+    ];
+    NATURES[(personality % 25) as usize]
+}
+
+fn ability_name_for_species(species_id: u16, ability_slot: u8) -> String {
+    let (primary, secondary) = species_abilities(species_id);
+    if ability_slot != 0 {
+        secondary.unwrap_or(primary).to_string()
+    } else {
+        primary.to_string()
+    }
+}
+
+fn species_abilities(species_id: u16) -> (&'static str, Option<&'static str>) {
+    match species_id {
+        1..=3 => ("Overgrow", None),
+        4..=6 => ("Blaze", None),
+        7..=9 => ("Torrent", None),
+        10 | 11 | 13 | 14 => ("Shield Dust", None),
+        16..=18 | 21 | 22 => ("Keen Eye", None),
+        19 | 20 => ("Run Away", Some("Guts")),
+        23 | 24 => ("Intimidate", Some("Shed Skin")),
+        25 | 26 => ("Static", None),
+        29..=34 => ("Poison Point", None),
+        35 | 36 | 39 | 40 => ("Cute Charm", None),
+        41 | 42 => ("Inner Focus", None),
+        46 | 47 => ("Effect Spore", None),
+        54 | 55 => ("Damp", Some("Cloud Nine")),
+        56 | 57 => ("Vital Spirit", None),
+        60..=62 => ("Water Absorb", Some("Damp")),
+        72 | 73 => ("Clear Body", Some("Liquid Ooze")),
+        74..=76 => ("Rock Head", Some("Sturdy")),
+        116 | 117 | 129 => ("Swift Swim", None),
+        130 => ("Intimidate", None),
+        _ => ("Unknown", None),
+    }
+}
+
+fn move_name(move_id: u16) -> &'static str {
+    match move_id {
+        10 => "Scratch",
+        22 => "Vine Whip",
+        29 => "Headbutt",
+        31 => "Fury Attack",
+        33 => "Tackle",
+        39 => "Tail Whip",
+        40 => "Poison Sting",
+        43 => "Leer",
+        45 => "Growl",
+        52 => "Ember",
+        55 => "Water Gun",
+        64 => "Peck",
+        67 => "Low Kick",
+        81 => "String Shot",
+        84 => "Thunder Shock",
+        98 => "Quick Attack",
+        110 => "Withdraw",
+        145 => "Bubble",
+        158 => "Hyper Fang",
+        _ => "Unknown Move",
+    }
 }
 
 fn decrypt_secure_data(raw: &[u8; PARTY_SLOT_SIZE], key: u32) -> [u8; 48] {
@@ -938,6 +1181,20 @@ mod tests {
     }
 
     #[test]
+    fn test_fire_red_addon_supports_leaf_green_revision_one() {
+        let addon = FireRedAddon;
+        let rom = RomIdentity {
+            title: "POKEMON LEAF".to_string(),
+            game_code: "BPGE".to_string(),
+            maker_code: "01".to_string(),
+            revision: 1,
+        };
+
+        assert!(addon.supports(&rom));
+        assert_eq!(frlg_display_name(&rom), "LeafGreen Party");
+    }
+
+    #[test]
     fn test_parse_party_member() {
         let raw = build_party_member_raw(0x0000_0001, 0x0000_0001, "PIKACHU", 25, 25, 58, 58);
 
@@ -964,6 +1221,56 @@ mod tests {
         assert_eq!(member.max_hp, 29);
         assert_eq!(member.moves[0], 33);
         assert_eq!(member.moves[1], 45);
+    }
+
+    #[test]
+    fn test_parse_party_member_exports_streamer_scout_details() {
+        let evs = FireRedStatSpread {
+            hp: 1,
+            attack: 2,
+            defense: 3,
+            speed: 4,
+            sp_attack: 5,
+            sp_def: 6,
+        };
+        let ivs = FireRedStatSpread {
+            hp: 31,
+            attack: 30,
+            defense: 29,
+            speed: 28,
+            sp_attack: 27,
+            sp_def: 26,
+        };
+        let raw = build_party_member_raw_with_details(
+            0x0000_001A,
+            0x1234_5678,
+            "RATTATA",
+            19,
+            8,
+            18,
+            22,
+            13,
+            evs,
+            ivs,
+            1,
+        );
+
+        let member = parse_party_member(&raw, 1).expect("valid detailed party member");
+        assert_eq!(member.species_name, "Rattata");
+        assert_eq!(member.nature, "Lonely");
+        assert_eq!(member.ability_slot, 1);
+        assert_eq!(member.ability_name, "Guts");
+        assert_eq!(
+            member.held_item.as_ref().map(|item| item.name.as_str()),
+            Some("Potion")
+        );
+        assert_eq!(member.evs, evs);
+        assert_eq!(member.ivs, ivs);
+        assert_eq!(member.ev_total, 21);
+        assert_eq!(member.iv_total, 171);
+        assert_eq!(member.stats.attack, 12);
+        assert_eq!(member.move_slots[0].name, "Tackle");
+        assert_eq!(member.move_slots[0].pp, 35);
     }
 
     #[test]
@@ -1147,6 +1454,49 @@ mod tests {
         current_hp: u16,
         max_hp: u16,
     ) -> [u8; PARTY_SLOT_SIZE] {
+        build_party_member_raw_with_details(
+            personality,
+            ot_id,
+            nickname,
+            species_id,
+            level,
+            current_hp,
+            max_hp,
+            0,
+            FireRedStatSpread {
+                hp: 0,
+                attack: 0,
+                defense: 0,
+                speed: 0,
+                sp_attack: 0,
+                sp_def: 0,
+            },
+            FireRedStatSpread {
+                hp: 0,
+                attack: 0,
+                defense: 0,
+                speed: 0,
+                sp_attack: 0,
+                sp_def: 0,
+            },
+            0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_party_member_raw_with_details(
+        personality: u32,
+        ot_id: u32,
+        nickname: &str,
+        species_id: u16,
+        level: u8,
+        current_hp: u16,
+        max_hp: u16,
+        held_item_id: u16,
+        evs: FireRedStatSpread,
+        ivs: FireRedStatSpread,
+        ability_slot: u8,
+    ) -> [u8; PARTY_SLOT_SIZE] {
         let mut raw = [0u8; PARTY_SLOT_SIZE];
         raw[0..4].copy_from_slice(&personality.to_le_bytes());
         raw[4..8].copy_from_slice(&ot_id.to_le_bytes());
@@ -1156,6 +1506,7 @@ mod tests {
 
         let mut growth = [0u8; 12];
         growth[0..2].copy_from_slice(&species_id.to_le_bytes());
+        growth[2..4].copy_from_slice(&held_item_id.to_le_bytes());
         growth[4..8].copy_from_slice(&12_345u32.to_le_bytes());
         growth[8] = 0;
         growth[9] = 70;
@@ -1166,7 +1517,25 @@ mod tests {
         attacks[8] = 35;
         attacks[9] = 30;
 
-        let sections = [growth, attacks, [0u8; 12], [0u8; 12]];
+        let mut ev_section = [0u8; 12];
+        ev_section[0] = evs.hp as u8;
+        ev_section[1] = evs.attack as u8;
+        ev_section[2] = evs.defense as u8;
+        ev_section[3] = evs.speed as u8;
+        ev_section[4] = evs.sp_attack as u8;
+        ev_section[5] = evs.sp_def as u8;
+
+        let iv_word = (ivs.hp as u32)
+            | ((ivs.attack as u32) << 5)
+            | ((ivs.defense as u32) << 10)
+            | ((ivs.speed as u32) << 15)
+            | ((ivs.sp_attack as u32) << 20)
+            | ((ivs.sp_def as u32) << 25)
+            | (((ability_slot & 1) as u32) << 31);
+        let mut misc = [0u8; 12];
+        misc[4..8].copy_from_slice(&iv_word.to_le_bytes());
+
+        let sections = [growth, attacks, ev_section, misc];
         let secure = pack_secure_sections(&sections, personality);
 
         let checksum = compute_checksum(&secure);
@@ -1183,6 +1552,11 @@ mod tests {
         raw[84] = level;
         raw[86..88].copy_from_slice(&current_hp.to_le_bytes());
         raw[88..90].copy_from_slice(&max_hp.to_le_bytes());
+        raw[90..92].copy_from_slice(&12u16.to_le_bytes());
+        raw[92..94].copy_from_slice(&13u16.to_le_bytes());
+        raw[94..96].copy_from_slice(&14u16.to_le_bytes());
+        raw[96..98].copy_from_slice(&15u16.to_le_bytes());
+        raw[98..100].copy_from_slice(&16u16.to_le_bytes());
         raw
     }
 

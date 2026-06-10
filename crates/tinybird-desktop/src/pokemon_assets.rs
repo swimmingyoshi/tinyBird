@@ -130,6 +130,12 @@ fn species_ids_from_snapshot(snapshot: &StreamSnapshot) -> Vec<u16> {
                     ordered.push(member.species_id);
                 }
             }
+            if let Some(battle) = data.battle.as_ref() {
+                let species_id = battle.opponent.species_id;
+                if seen.insert(species_id) {
+                    ordered.push(species_id);
+                }
+            }
             ordered
         }
     }
