@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/", get(index))
         .route("/overlay", get(overlay))
+        .route("/overlay/{section}", get(overlay))
         .route("/app.js", get(app_js))
         .route("/styles.css", get(styles_css))
         .route("/api/health", get(health))
@@ -49,8 +50,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(addr).await?;
 
     println!("tinyBird web overlay listening on http://{addr}");
-    println!("  overlay: http://{addr}/overlay");
-    println!("  obs:     http://{addr}/overlay?transparent=1&layout=column");
+    println!("  setup:      http://{addr}/");
+    println!("  full:       http://{addr}/overlay/full");
+    println!("  party:      http://{addr}/overlay/party");
+    println!("  area:       http://{addr}/overlay/area");
+    println!("  battle:     http://{addr}/overlay/battle");
 
     axum::serve(listener, app).await?;
     Ok(())

@@ -10,14 +10,16 @@
     <main class="shell">
       <section class="hero">
         <p class="eyebrow">tinyBird Web</p>
-        <h1>Local overlay server for stream scenes, party tracking, and future battle tools.</h1>
+        <h1>Overlay control room for tinyBird streams.</h1>
         <p class="lede">
-          This is the first web slice of tinyBird. It reads the desktop export,
-          serves cached Pokemon artwork, and renders an OBS-friendly overlay page.
+          Use the combined web UI to monitor everything together, then add the
+          dedicated section URLs as separate OBS browser sources.
         </p>
         <div class="hero-actions">
-          <a class="primary-link" href="/overlay">Open Overlay Preview</a>
-          <a class="secondary-link" href="/overlay?transparent=1&layout=column">OBS Browser Source Mode</a>
+          <a class="primary-link" href="/overlay/full">Open Combined Web UI</a>
+          <a class="secondary-link" href="/overlay/party">Party OBS Source</a>
+          <a class="secondary-link" href="/overlay/area">Area OBS Source</a>
+          <a class="secondary-link" href="/overlay/battle">Battle OBS Source</a>
         </div>
       </section>
 
@@ -27,9 +29,20 @@
           <h2>1. Start the desktop app</h2>
           <p>Keep tinyBird running so it can refresh <code>stream-data/current-game.json</code>.</p>
           <h2>2. Start the web server</h2>
-          <pre><code>cargo run -p tinybird-web</code></pre>
-          <h2>3. Add it to OBS</h2>
-          <pre><code>http://127.0.0.1:8877/overlay?transparent=1&amp;layout=column</code></pre>
+          <pre><code>cargo run --release --bin tinybird-web</code></pre>
+          <h2>3. Monitor together</h2>
+          <pre><code>http://127.0.0.1:8877/overlay/full</code></pre>
+        </article>
+
+        <article class="info-card">
+          <p class="card-kicker">OBS Sources</p>
+          <p>Add these as separate browser sources so each section can be positioned independently.</p>
+          <ul class="endpoint-list">
+            <li><code>/overlay/party</code> for the team cards</li>
+            <li><code>/overlay/area</code> for route encounter info</li>
+            <li><code>/overlay/battle</code> for active battle scout info</li>
+            <li><code>/overlay/full</code> for the organized all-in-one view</li>
+          </ul>
         </article>
 
         <article class="info-card">
@@ -38,7 +51,7 @@
             <li><code>/api/health</code> for local status</li>
             <li><code>/api/snapshot</code> for the live export JSON</li>
             <li><code>/sprites/:species_id</code> for cached art</li>
-            <li><code>/overlay</code> for the stream layout</li>
+            <li><code>/overlay/:section</code> for stream overlays</li>
           </ul>
         </article>
       </section>

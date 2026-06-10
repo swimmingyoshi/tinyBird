@@ -4,7 +4,8 @@
 
 use crate::game_addons::{
     AddonData, FireRedAreaSnapshot, FireRedBattleSnapshot, FireRedEncounterEntry,
-    FireRedEncounterGroup, FireRedPartyMember, FireRedSnapshot, StreamSnapshot,
+    FireRedEncounterGroup, FireRedMoveSlot, FireRedPartyMember, FireRedSnapshot, FireRedStatSpread,
+    StreamSnapshot,
 };
 use crate::pokemon_assets::{PokemonSpriteStore, SpriteBitmap};
 
@@ -652,7 +653,7 @@ pub fn draw_addon_panel(
     } else if view_mode == AddonViewMode::Encounters {
         buf_h.saturating_sub(12).clamp(220, 520)
     } else {
-        buf_h.saturating_sub(16).clamp(160, 360)
+        buf_h.saturating_sub(16).clamp(220, 520)
     };
     let panel_x = if detached {
         (buf_w.saturating_sub(panel_w)) / 2
@@ -677,7 +678,7 @@ pub fn draw_addon_panel(
         .as_ref()
         .map(|addon| match view_mode {
             AddonViewMode::Team => addon.display_name.to_string(),
-            AddonViewMode::Encounters => "FireRed Encounters".to_string(),
+            AddonViewMode::Encounters => addon.display_name.replace("Party", "Encounters"),
         })
         .unwrap_or_else(|| "Game Addons".to_string());
     draw_text_centered(
@@ -740,6 +741,7 @@ pub fn draw_addon_panel(
                     panel_w.saturating_sub(24),
                     footer_y.saturating_sub(8),
                     data,
+                    sprites,
                 );
             }
         },
@@ -761,7 +763,7 @@ pub fn draw_addon_panel(
                 buf_h,
                 center_x,
                 y + 24,
-                "Load FireRed and move in-game to populate the live team view.",
+                "Load FireRed or LeafGreen and move in-game to populate the live team view.",
                 1,
                 muted,
                 panel_bg,
@@ -770,7 +772,10 @@ pub fn draw_addon_panel(
     }
 
     let footer = if detached {
-        "[F2] Team  [F4] Encounters  [F6] Close"
+        match view_mode {
+            AddonViewMode::Team => "[F4] Open Encounters  [F6] Close",
+            AddonViewMode::Encounters => "[F2] Open Team  [F6] Close",
+        }
     } else if view_mode == AddonViewMode::Team {
         "[F2] Hide  [F4] Encounters  [F6] Popout"
     } else {
@@ -805,8 +810,8 @@ fn draw_firered_party_panel(
         buf, buf_w, buf_h, panel_x, panel_y, &summary, 1, muted, panel_bg,
     );
 
-    let card_gap = 8usize;
-    let card_h = if panel_w >= 280 { 48 } else { 42 };
+    let card_gap = 6usize;
+    let card_h = 70usize;
     let mut y = panel_y + 18;
     for member in &snapshot.party {
         if y + card_h > panel_bottom {
@@ -842,15 +847,25 @@ fn draw_firered_encounter_panel(
     panel_w: usize,
     panel_bottom: usize,
     snapshot: &FireRedSnapshot,
+    sprites: &PokemonSpriteStore,
 ) {
     let panel_bg = 0xFF_12_17_26;
     let muted = 0xFF_96_A0_B4;
     let accent = 0xFF_FF_9F_1C;
-    let mut y = panel_y;
 
     if let Some(battle) = &snapshot.battle {
-        y = draw_firered_battle_panel(buf, buf_w, buf_h, panel_x, y, panel_w, panel_bottom, battle);
-        y += 8;
+        draw_firered_battle_panel(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x,
+            panel_y,
+            panel_w,
+            panel_bottom,
+            battle,
+            sprites,
+        );
+        return;
     }
 
     let Some(area) = &snapshot.area else {
@@ -859,7 +874,7 @@ fn draw_firered_encounter_panel(
             buf_w,
             buf_h,
             panel_x,
-            y,
+            panel_y,
             "Area data pending",
             1,
             accent,
@@ -868,7 +883,16 @@ fn draw_firered_encounter_panel(
         return;
     };
 
-    let y = draw_firered_area_panel(buf, buf_w, buf_h, panel_x, y, panel_w, panel_bottom, area);
+    let y = draw_firered_area_panel(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x,
+        panel_y,
+        panel_w,
+        panel_bottom,
+        area,
+    );
     if area.encounter_groups.is_empty() && y + 12 <= panel_bottom {
         draw_text(
             buf,
@@ -893,9 +917,10 @@ fn draw_firered_battle_panel(
     panel_w: usize,
     panel_bottom: usize,
     battle: &FireRedBattleSnapshot,
+    sprites: &PokemonSpriteStore,
 ) -> usize {
-    let card_h = 58usize;
-    if panel_y + card_h > panel_bottom {
+    let card_h = panel_bottom.saturating_sub(panel_y).min(180);
+    if card_h < 158 || panel_y + card_h > panel_bottom {
         return panel_y;
     }
 
@@ -906,6 +931,7 @@ fn draw_firered_battle_panel(
     let ink = 0xFF_F7_F3_EC;
     let muted = 0xFF_96_A0_B4;
     let danger = 0xFF_FC_76_6A;
+    let sprite_bg = 0xFF_0D_12_1F;
 
     draw_panel(
         buf, buf_w, buf_h, panel_x, panel_y, panel_w, card_h, card_bg, border, accent_2,
@@ -925,6 +951,10 @@ fn draw_firered_battle_panel(
     );
 
     let opponent = &battle.opponent;
+    let sprite_box = if panel_w >= 300 { 64 } else { 54 };
+    let sprite_x = panel_x + panel_w.saturating_sub(sprite_box + 8);
+    let sprite_y = panel_y + 62;
+    let text_w = sprite_x.saturating_sub(panel_x + 18);
     let level = format!("Lv{}", opponent.level);
     let level_x = panel_x + panel_w.saturating_sub(8 + text_width(&level, 1));
     let name_max = if panel_w >= 280 { 18 } else { 12 };
@@ -938,6 +968,23 @@ fn draw_firered_battle_panel(
         1,
         ink,
         card_bg,
+    );
+
+    draw_species_sprite_box(
+        buf,
+        buf_w,
+        buf_h,
+        sprite_x,
+        sprite_y,
+        sprite_box,
+        opponent.species_id,
+        "Foe",
+        &format!("#{:03}", opponent.species_id),
+        sprites,
+        sprite_bg,
+        accent_2,
+        accent,
+        muted,
     );
     draw_text(
         buf,
@@ -983,6 +1030,98 @@ fn draw_firered_battle_panel(
         card_bg,
     );
 
+    let profile = format!(
+        "{}  {}",
+        opponent.nature,
+        short_label(&opponent.ability_name, 14)
+    );
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8,
+        panel_y + 50,
+        &short_label(&profile, if panel_w >= 280 { 28 } else { 21 }),
+        1,
+        muted,
+        card_bg,
+    );
+
+    let item = opponent
+        .held_item
+        .as_ref()
+        .map(|item| item.name.as_str())
+        .unwrap_or("No item");
+    let item_x = panel_x + panel_w.saturating_sub(8 + text_width(item, 1));
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        item_x,
+        panel_y + 50,
+        &short_label(item, if panel_w >= 280 { 14 } else { 10 }),
+        1,
+        muted,
+        card_bg,
+    );
+
+    draw_stat_column(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8,
+        panel_y + 66,
+        card_bg,
+        ink,
+        muted,
+        &[
+            ("HP", opponent.stats.hp),
+            ("Atk", opponent.stats.attack),
+            ("Def", opponent.stats.defense),
+        ],
+    );
+    draw_stat_column(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8 + (text_w / 2).max(78),
+        panel_y + 66,
+        card_bg,
+        ink,
+        muted,
+        &[
+            ("Spd", opponent.stats.speed),
+            ("SpA", opponent.stats.sp_attack),
+            ("SpD", opponent.stats.sp_def),
+        ],
+    );
+
+    let ivs = format_spread_line("IV", &opponent.ivs, opponent.iv_total);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8,
+        panel_y + 110,
+        &short_label(&ivs, if panel_w >= 280 { 28 } else { 20 }),
+        1,
+        accent_2,
+        card_bg,
+    );
+
+    let moves = format_move_summary(&opponent.move_slots, if panel_w >= 280 { 2 } else { 1 });
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8,
+        panel_y + 124,
+        &short_label(&moves, if panel_w >= 280 { 36 } else { 25 }),
+        1,
+        muted,
+        card_bg,
+    );
+
     let bar_y = panel_y + card_h.saturating_sub(10);
     draw_hp_bar(
         buf,
@@ -997,6 +1136,91 @@ fn draw_firered_battle_panel(
     );
 
     panel_y + card_h
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_species_sprite_box(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    x: usize,
+    y: usize,
+    size: usize,
+    species_id: u16,
+    fallback_top: &str,
+    fallback_bottom: &str,
+    sprites: &PokemonSpriteStore,
+    bg: u32,
+    border: u32,
+    accent: u32,
+    muted: u32,
+) {
+    draw_panel(buf, buf_w, buf_h, x, y, size, size, bg, border, accent);
+
+    if let Some(sprite) = sprites.sprite(species_id) {
+        draw_sprite_bitmap(
+            buf,
+            buf_w,
+            buf_h,
+            x + 2,
+            y + 2,
+            size.saturating_sub(4),
+            size.saturating_sub(4),
+            sprite,
+        );
+        return;
+    }
+
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        x + size / 2,
+        y + 8,
+        fallback_top,
+        1,
+        accent,
+        bg,
+    );
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        x + size / 2,
+        y + size.saturating_sub(16),
+        fallback_bottom,
+        1,
+        muted,
+        bg,
+    );
+}
+
+fn draw_stat_column(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    x: usize,
+    y: usize,
+    bg: u32,
+    value_color: u32,
+    label_color: u32,
+    stats: &[(&str, u16)],
+) {
+    for (idx, (label, value)) in stats.iter().enumerate() {
+        let row_y = y + idx * 13;
+        draw_text(buf, buf_w, buf_h, x, row_y, label, 1, label_color, bg);
+        draw_text(
+            buf,
+            buf_w,
+            buf_h,
+            x + 30,
+            row_y,
+            &value.to_string(),
+            1,
+            value_color,
+            bg,
+        );
+    }
 }
 
 fn draw_firered_area_panel(
@@ -1200,6 +1424,36 @@ fn draw_encounter_row(
     draw_text(buf, buf_w, buf_h, catch_x, y, &catch, 1, muted, bg);
 }
 
+fn format_spread_line(label: &str, spread: &FireRedStatSpread, total: u16) -> String {
+    format!(
+        "{} {}/{}/{}/{}/{}/{} T{}",
+        label,
+        spread.hp,
+        spread.attack,
+        spread.defense,
+        spread.speed,
+        spread.sp_attack,
+        spread.sp_def,
+        total
+    )
+}
+
+fn format_move_summary(move_slots: &[FireRedMoveSlot], max_moves: usize) -> String {
+    let mut parts = move_slots
+        .iter()
+        .take(max_moves)
+        .map(|slot| format!("{} {}", short_label(&slot.name, 10), slot.pp))
+        .collect::<Vec<_>>();
+    if move_slots.len() > max_moves {
+        parts.push(format!("+{}", move_slots.len() - max_moves));
+    }
+    if parts.is_empty() {
+        "Moves pending".to_string()
+    } else {
+        parts.join("  ")
+    }
+}
+
 fn draw_firered_party_card(
     buf: &mut [u32],
     buf_w: usize,
@@ -1223,57 +1477,22 @@ fn draw_firered_party_card(
     let sprite_box = h.saturating_sub(10).clamp(26, 38);
     let sprite_x = x + 8;
     let sprite_y = y + (h.saturating_sub(sprite_box)) / 2;
-    draw_panel(
+    draw_species_sprite_box(
         buf,
         buf_w,
         buf_h,
         sprite_x,
         sprite_y,
         sprite_box,
-        sprite_box,
+        member.species_id,
+        &format!("S{}", member.slot),
+        &format!("#{:03}", member.species_id),
+        sprites,
         sprite_bg,
         card_border,
         accent,
+        muted,
     );
-
-    if let Some(sprite) = sprites.sprite(member.species_id) {
-        draw_sprite_bitmap(
-            buf,
-            buf_w,
-            buf_h,
-            sprite_x + 2,
-            sprite_y + 2,
-            sprite_box.saturating_sub(4),
-            sprite_box.saturating_sub(4),
-            sprite,
-        );
-    } else {
-        let slot_label = format!("S{}", member.slot);
-        draw_text_centered(
-            buf,
-            buf_w,
-            buf_h,
-            sprite_x + sprite_box / 2,
-            sprite_y + 4,
-            &slot_label,
-            1,
-            accent,
-            sprite_bg,
-        );
-
-        let badge = format!("#{:03}", member.species_id);
-        draw_text_centered(
-            buf,
-            buf_w,
-            buf_h,
-            sprite_x + sprite_box / 2,
-            sprite_y + sprite_box.saturating_sub(14),
-            &badge,
-            1,
-            muted,
-            sprite_bg,
-        );
-    }
 
     let info_x = sprite_x + sprite_box + 10;
     let right_pad = 10usize;
@@ -1303,15 +1522,46 @@ fn draw_firered_party_card(
         buf_w,
         buf_h,
         info_x,
-        y + h.saturating_sub(16),
+        y + h.saturating_sub(18),
         &hp_text,
         1,
         muted,
         card_bg,
     );
 
-    let meta = format!("S{}  #{:03}", member.slot, member.species_id);
+    let meta = format!(
+        "S{} #{:03} {}",
+        member.slot,
+        member.species_id,
+        short_label(&member.ability_name, 9)
+    );
     draw_text(buf, buf_w, buf_h, info_x, y + 18, &meta, 1, muted, card_bg);
+
+    let ivs = format_spread_line("IV", &member.ivs, member.iv_total);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        info_x,
+        y + 31,
+        &short_label(&ivs, if w >= 280 { 30 } else { 22 }),
+        1,
+        0xFF_2E_C4_B6,
+        card_bg,
+    );
+
+    let evs = format_spread_line("EV", &member.evs, member.ev_total);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        info_x,
+        y + 44,
+        &short_label(&evs, if w >= 280 { 30 } else { 22 }),
+        1,
+        accent,
+        card_bg,
+    );
 
     let bar_x = info_x;
     let bar_y = y + h.saturating_sub(8);

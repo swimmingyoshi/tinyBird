@@ -367,13 +367,19 @@ const MOVE_NAME_OVERRIDES = {
   WILL_O_WISP: "Will-O-Wisp",
 };
 
+const OVERLAY_SECTIONS = new Set(["full", "party", "area", "battle"]);
+
 const state = {
   lastOkAt: 0,
   currentSignature: "",
+  section: "full",
+  showEmpty: true,
 };
 
 const overlayRoot = document.getElementById("overlay-root");
+const partyPanel = document.getElementById("party-panel");
 const partyGrid = document.getElementById("party-grid");
+const partyCount = document.getElementById("party-count");
 const emptyState = document.getElementById("empty-state");
 const overlayTitle = document.getElementById("overlay-title");
 const overlaySubtitle = document.getElementById("overlay-subtitle");
@@ -381,10 +387,16 @@ const overlayStatus = document.getElementById("overlay-status");
 const battlePanel = document.getElementById("battle-panel");
 const battleKicker = document.getElementById("battle-kicker");
 const battleName = document.getElementById("battle-name");
+const battleArt = document.getElementById("battle-art");
+const battleFallback = document.getElementById("battle-fallback");
 const battleLevel = document.getElementById("battle-level");
 const battleHp = document.getElementById("battle-hp");
 const battleCatch = document.getElementById("battle-catch");
 const battleHpFill = document.getElementById("battle-hp-fill");
+const battleProfile = document.getElementById("battle-profile");
+const battleStats = document.getElementById("battle-stats");
+const battleIvs = document.getElementById("battle-ivs");
+const battleMoves = document.getElementById("battle-moves");
 const areaPanel = document.getElementById("area-panel");
 const areaName = document.getElementById("area-name");
 const areaMapId = document.getElementById("area-map-id");
@@ -416,41 +428,57 @@ async function tick() {
     const stale = state.lastOkAt && Date.now() - state.lastOkAt < 10_000;
     setStatus(stale ? "stale" : "offline", stale ? "waiting for refresh" : "offline");
     if (!state.currentSignature) {
-      renderEmpty("Waiting for a local snapshot export.");
+      renderEmpty("Waiting for a local snapshot export.", state.showEmpty);
     }
   }
 }
 
 function initLayout() {
   const params = new URLSearchParams(window.location.search);
-  const transparent = truthy(params.get("transparent"));
+  const section = overlaySectionFromLocation(params);
+  const singleSection = section !== "full";
+  const transparent = params.has("transparent") ? truthy(params.get("transparent")) : singleSection;
   const compact = truthy(params.get("compact"));
   const layout = params.get("layout") || "column";
   const align = params.get("align") || "left";
-  const showHeader = !truthy(params.get("hideHeader"));
+  const showHeader = params.has("hideHeader") ? !truthy(params.get("hideHeader")) : !singleSection;
+  const showLabels = params.has("hideLabels") ? !truthy(params.get("hideLabels")) : !singleSection;
+  const showEmpty = params.has("showEmpty")
+    ? truthy(params.get("showEmpty"))
+    : section === "full" || section === "party";
 
+  state.section = section;
+  state.showEmpty = showEmpty;
   document.body.dataset.transparent = transparent ? "true" : "false";
   overlayRoot.dataset.transparent = transparent ? "true" : "false";
   overlayRoot.dataset.compact = compact ? "true" : "false";
+  overlayRoot.dataset.section = section;
   overlayRoot.dataset.layout = ["column", "row", "stack"].includes(layout)
     ? layout
     : "column";
   overlayRoot.dataset.align = ["left", "center", "right"].includes(align) ? align : "left";
   overlayRoot.dataset.header = showHeader ? "visible" : "hidden";
+  overlayRoot.dataset.labels = showLabels ? "visible" : "hidden";
+}
+
+function overlaySectionFromLocation(params) {
+  const pathParts = window.location.pathname.split("/").filter(Boolean);
+  const pathSection = pathParts[0] === "overlay" && pathParts[1] ? pathParts[1] : null;
+  const section = params.get("section") || params.get("view") || pathSection || "full";
+  return OVERLAY_SECTIONS.has(section) ? section : "full";
 }
 
 function renderSnapshot(snapshot) {
   const addon = snapshot?.addon;
   const fireRed = addon?.data?.type === "fire_red" ? addon.data.payload : null;
+  const section = state.section;
 
   if (!fireRed?.party?.length) {
     overlayTitle.textContent = addon?.display_name || snapshot?.rom?.title || "tinyBird Overlay";
     overlaySubtitle.textContent = fireRed
       ? "Supported addon found, but no live party members were exported yet."
-      : "Load FireRed in the desktop app to populate the party overlay.";
-    renderEmpty("No party payload is available yet.");
-    renderBattlePanel(null);
-    renderAreaPanel(null);
+      : "Load FireRed or LeafGreen in the desktop app to populate the party overlay.";
+    renderEmpty("No party payload is available yet.", state.showEmpty);
     return;
   }
 
@@ -458,12 +486,29 @@ function renderSnapshot(snapshot) {
   overlayTitle.textContent = addon.display_name || "Party Overlay";
   overlaySubtitle.textContent = [rom?.title, rom?.game_code].filter(Boolean).join("  ");
 
-  emptyState.classList.remove("is-visible");
-  renderBattlePanel(fireRed.battle);
-  renderAreaPanel(fireRed.area);
-  partyGrid.innerHTML = "";
+  const showParty = section === "full" || section === "party";
+  const showBattle = section === "full" || section === "battle";
+  const showArea = section === "area" || (section === "full" && !fireRed.battle);
 
-  for (const member of fireRed.party) {
+  emptyState.classList.remove("is-visible");
+  renderPartyPanel(showParty ? fireRed.party : []);
+  renderBattlePanel(showBattle ? fireRed.battle : null);
+  renderAreaPanel(showArea ? fireRed.area : null);
+
+  if (section === "battle" && !fireRed.battle) {
+    renderEmpty("No active battle right now.", state.showEmpty);
+  } else if (section === "area" && !fireRed.area) {
+    renderEmpty("Area data is pending.", state.showEmpty);
+  }
+}
+
+function renderPartyPanel(party) {
+  partyGrid.innerHTML = "";
+  partyPanel.classList.toggle("is-visible", party.length > 0);
+  partyPanel.hidden = party.length === 0;
+  partyCount.textContent = party.length === 1 ? "1 live slot" : `${party.length} live slots`;
+
+  for (const member of party) {
     partyGrid.appendChild(renderPartyCard(member));
   }
 }
@@ -471,6 +516,9 @@ function renderSnapshot(snapshot) {
 function renderBattlePanel(battle) {
   if (!battle?.opponent) {
     battlePanel.classList.remove("is-visible");
+    battleArt.removeAttribute("src");
+    battleArt.classList.add("is-hidden");
+    battleFallback.classList.remove("is-visible");
     return;
   }
 
@@ -479,6 +527,12 @@ function renderBattlePanel(battle) {
   battlePanel.classList.add("is-visible");
   battleKicker.textContent = `${battle.battle_kind || "Wild"} Battle`;
   battleName.textContent = opponent.species_name || `#${opponent.species_id}`;
+  setPokemonSprite(
+    battleArt,
+    battleFallback,
+    opponent.species_id,
+    `${opponent.species_name || "Opponent Pokemon"} artwork`,
+  );
   battleLevel.textContent = `Lv ${opponent.level}`;
   battleHp.textContent = `${opponent.current_hp}/${opponent.max_hp} HP`;
   battleCatch.textContent = battle.catchable
@@ -488,6 +542,17 @@ function renderBattlePanel(battle) {
   battleHpFill.style.width = `${Math.max(0, Math.min(100, hpRatio * 100))}%`;
   battleHpFill.classList.toggle("is-low", hpRatio <= 0.2);
   battleHpFill.classList.toggle("is-mid", hpRatio > 0.2 && hpRatio <= 0.5);
+  battleProfile.innerHTML = "";
+  for (const value of [
+    opponent.nature,
+    opponent.ability_name,
+    opponent.held_item?.name || "No item",
+  ].filter(Boolean)) {
+    battleProfile.appendChild(makeScoutPill(value));
+  }
+  renderStatList(battleStats, opponent.stats);
+  battleIvs.textContent = formatSpread("IV", opponent.ivs, opponent.iv_total);
+  battleMoves.textContent = formatMoves(opponent);
 }
 
 function renderAreaPanel(area) {
@@ -565,15 +630,22 @@ function renderPartyCard(member) {
   const level = fragment.querySelector(".level");
   const speciesPill = fragment.querySelector(".species-pill");
   const statusPill = fragment.querySelector(".status-pill");
+  const naturePill = fragment.querySelector(".nature-pill");
+  const abilityPill = fragment.querySelector(".ability-pill");
   const hpLabel = fragment.querySelector(".hp-label");
   const hpValue = fragment.querySelector(".hp-value");
   const hpFill = fragment.querySelector(".hp-fill");
+  const partyProfile = fragment.querySelector(".party-profile");
+  const ivSpread = fragment.querySelector(".iv-spread");
+  const evSpread = fragment.querySelector(".ev-spread");
   const moveList = fragment.querySelector(".move-list");
 
   slotPill.textContent = `S${member.slot}`;
   nickname.textContent = member.nickname || "UNKNOWN";
   level.textContent = member.is_egg ? "EGG" : `Lv${member.level}`;
   speciesPill.textContent = `#${String(member.species_id).padStart(3, "0")}`;
+  naturePill.textContent = member.nature || "Nature ?";
+  abilityPill.textContent = member.ability_name || "Ability ?";
 
   const hpRatio = member.max_hp > 0 ? member.current_hp / member.max_hp : 0;
   const fainted = !member.is_egg && member.max_hp > 0 && member.current_hp === 0;
@@ -604,11 +676,20 @@ function renderPartyCard(member) {
     hpFill.classList.add("is-mid");
   }
 
-  for (const moveId of member.moves || []) {
-    if (!moveId) continue;
+  partyProfile.textContent = [
+    member.species_name,
+    member.held_item?.name ? `Item ${member.held_item.name}` : "No item",
+  ]
+    .filter(Boolean)
+    .join("  ");
+  ivSpread.textContent = formatSpread("IV", member.ivs, member.iv_total);
+  evSpread.textContent = formatSpread("EV", member.evs, member.ev_total);
+
+  const moveSlots = normalizedMoveSlots(member);
+  for (const slot of moveSlots) {
     const chip = document.createElement("span");
     chip.className = "move-chip";
-    chip.textContent = moveNameFromId(moveId);
+    chip.textContent = slot.pp == null ? slot.name : `${slot.name} ${slot.pp}PP`;
     moveList.appendChild(chip);
   }
 
@@ -619,29 +700,52 @@ function renderPartyCard(member) {
     moveList.appendChild(chip);
   }
 
-  fallback.textContent = `#${String(member.species_id).padStart(3, "0")}`;
-  art.alt = `${member.nickname || "Pokemon"} artwork`;
-  art.src = `/sprites/${member.species_id}`;
-  art.addEventListener("error", () => {
+  setPokemonSprite(
+    art,
+    fallback,
+    member.species_id,
+    `${member.nickname || member.species_name || "Pokemon"} artwork`,
+  );
+
+  return fragment;
+}
+
+function setPokemonSprite(art, fallback, speciesId, altText) {
+  const speciesKey = String(speciesId || 0);
+  const paddedSpecies = speciesKey.padStart(3, "0");
+  fallback.textContent = `#${paddedSpecies}`;
+  art.alt = altText;
+  if (art.dataset.speciesId === speciesKey && art.getAttribute("src")) {
+    return;
+  }
+  art.dataset.speciesId = speciesKey;
+  art.dataset.remoteTried = "false";
+  art.classList.remove("is-hidden");
+  fallback.classList.remove("is-visible");
+  art.onerror = () => {
     if (art.dataset.remoteTried === "true") {
       art.classList.add("is-hidden");
       fallback.classList.add("is-visible");
       return;
     }
     art.dataset.remoteTried = "true";
-    art.src = `${REMOTE_SPRITE_BASE}/${member.species_id}.png`;
-  });
-  art.addEventListener("load", () => {
+    art.src = `${REMOTE_SPRITE_BASE}/${speciesId}.png`;
+  };
+  art.onload = () => {
     art.classList.remove("is-hidden");
     fallback.classList.remove("is-visible");
-  });
-
-  return fragment;
+  };
+  art.src = `/sprites/${speciesId}`;
 }
 
-function renderEmpty(message) {
-  partyGrid.innerHTML = "";
+function renderEmpty(message, visible = true) {
+  renderPartyPanel([]);
   renderBattlePanel(null);
+  renderAreaPanel(null);
+  if (!visible) {
+    emptyState.classList.remove("is-visible");
+    return;
+  }
   emptyState.classList.add("is-visible");
   emptyState.querySelector(".empty-copy").textContent = message;
 }
@@ -653,6 +757,64 @@ function setStatus(stateName, label) {
 
 function truthy(value) {
   return value === "1" || value === "true" || value === "yes";
+}
+
+function makeScoutPill(text) {
+  const pill = document.createElement("span");
+  pill.textContent = text;
+  return pill;
+}
+
+function renderStatList(container, stats) {
+  container.innerHTML = "";
+  const rows = [
+    ["HP", stats?.hp],
+    ["Attack", stats?.attack],
+    ["Defense", stats?.defense],
+    ["Speed", stats?.speed],
+    ["Sp. Atk", stats?.sp_attack],
+    ["Sp. Def", stats?.sp_def],
+  ];
+  for (const [label, value] of rows) {
+    const row = document.createElement("div");
+    row.className = "battle-stat-row";
+    const labelEl = document.createElement("span");
+    labelEl.className = "battle-stat-label";
+    labelEl.textContent = label;
+    const valueEl = document.createElement("strong");
+    valueEl.textContent = value ?? "?";
+    row.append(labelEl, valueEl);
+    container.appendChild(row);
+  }
+}
+
+function formatSpread(label, spread, total) {
+  if (!spread) {
+    return `${label} pending`;
+  }
+  return `${label} ${spread.hp ?? "?"}/${spread.attack ?? "?"}/${spread.defense ?? "?"}/${
+    spread.speed ?? "?"
+  }/${spread.sp_attack ?? "?"}/${spread.sp_def ?? "?"} T${total ?? "?"}`;
+}
+
+function formatMoves(mon) {
+  const slots = normalizedMoveSlots(mon);
+  if (!slots.length) {
+    return "Moves pending";
+  }
+  return slots.map((slot) => (slot.pp == null ? slot.name : `${slot.name} ${slot.pp}PP`)).join("  ");
+}
+
+function normalizedMoveSlots(mon) {
+  if (Array.isArray(mon?.move_slots) && mon.move_slots.length) {
+    return mon.move_slots.map((slot) => ({
+      name: slot.name || moveNameFromId(slot.move_id),
+      pp: slot.pp,
+    }));
+  }
+  return (mon?.moves || [])
+    .filter(Boolean)
+    .map((moveId) => ({ name: moveNameFromId(moveId), pp: null }));
 }
 
 function moveNameFromId(moveId) {
