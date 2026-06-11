@@ -34,6 +34,25 @@ pub struct Toast<'a> {
     pub tone: ToastTone,
 }
 
+#[derive(Clone, Copy)]
+pub enum SaveStateMenuMode {
+    Save,
+    Load,
+}
+
+pub struct SaveStateMenu {
+    pub mode: SaveStateMenuMode,
+    pub selected_slot: u8,
+    pub slot_exists: [bool; 5],
+    pub confirm_overwrite: bool,
+}
+
+pub struct ThemeMenu {
+    pub selected_theme: u8,
+    pub active_theme: u8,
+    pub has_wallpaper: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AddonViewMode {
     Team,
@@ -47,6 +66,198 @@ impl AddonViewMode {
             Self::Encounters => "Encounters",
         }
     }
+}
+
+fn rom_display_label(snapshot: &StreamSnapshot) -> String {
+    if let Some(addon) = &snapshot.addon {
+        if addon.display_name.starts_with("FireRed") {
+            return "Pokemon FireRed".to_string();
+        }
+        if addon.display_name.starts_with("LeafGreen") {
+            return "Pokemon LeafGreen".to_string();
+        }
+    }
+
+    let Some(rom) = &snapshot.rom else {
+        return "Load a supported game to enable addons".to_string();
+    };
+
+    if rom.game_code.starts_with("BPR") || rom.title.eq_ignore_ascii_case("POKEMON FIRE") {
+        "Pokemon FireRed".to_string()
+    } else if rom.game_code.starts_with("BPG") || rom.title.eq_ignore_ascii_case("POKEMON LEAF") {
+        "Pokemon LeafGreen".to_string()
+    } else if rom.title.is_empty() {
+        "Unknown Game".to_string()
+    } else {
+        rom.title.clone()
+    }
+}
+
+pub const GAME_PREVIEW_SIZE_COUNT: u8 = 3;
+pub const SIDE_PANEL_SIZE_COUNT: u8 = 3;
+pub const DASHBOARD_LAYOUT_COUNT: u8 = 3;
+pub const DASHBOARD_THEME_COUNT: u8 = 4;
+
+pub struct DashboardWallpaper {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u32>,
+}
+
+pub fn game_preview_size_label(size: u8) -> &'static str {
+    match size % GAME_PREVIEW_SIZE_COUNT {
+        0 => "Compact",
+        1 => "Balanced",
+        _ => "Game Focus",
+    }
+}
+
+pub fn side_panel_size_label(size: u8) -> &'static str {
+    match size % SIDE_PANEL_SIZE_COUNT {
+        0 => "Slim",
+        1 => "Normal",
+        _ => "Wide",
+    }
+}
+
+pub fn dashboard_layout_label(layout: u8) -> &'static str {
+    match layout % DASHBOARD_LAYOUT_COUNT {
+        0 => "Classic",
+        1 => "Left Info",
+        _ => "Split Sidebars",
+    }
+}
+
+pub fn dashboard_theme_label(theme: u8) -> &'static str {
+    match theme % DASHBOARD_THEME_COUNT {
+        0 => "Midnight",
+        1 => "Verdant",
+        2 => "Cobalt",
+        _ => "Wallpaper",
+    }
+}
+
+fn side_panel_reserved_width(buf_w: usize, size: u8) -> usize {
+    match size % SIDE_PANEL_SIZE_COUNT {
+        0 => {
+            if buf_w >= 980 {
+                300
+            } else {
+                240
+            }
+        }
+        1 => {
+            if buf_w >= 980 {
+                420
+            } else {
+                260
+            }
+        }
+        _ => {
+            if buf_w >= 1280 {
+                560
+            } else if buf_w >= 980 {
+                480
+            } else {
+                320
+            }
+        }
+    }
+}
+
+pub fn game_preview_dimensions(
+    buf_w: usize,
+    buf_h: usize,
+    size: u8,
+    side_panel_size: u8,
+    dashboard_layout: u8,
+) -> (usize, usize) {
+    if buf_w < 24 || buf_h < 42 {
+        return (0, 0);
+    }
+
+    let right_min = side_panel_reserved_width(buf_w, side_panel_size);
+    let side_columns = if dashboard_layout % DASHBOARD_LAYOUT_COUNT == 2 {
+        2
+    } else {
+        1
+    };
+    let bottom_min = if buf_w >= 1280 {
+        if side_columns == 2 {
+            132
+        } else {
+            142
+        }
+    } else if buf_h >= 760 {
+        172
+    } else {
+        132
+    };
+    let footer_min = 46usize;
+    let max_w_by_height = buf_h
+        .saturating_sub(bottom_min + footer_min + 42)
+        .saturating_mul(3)
+        / 2;
+    let max_w_by_side_panel = if dashboard_layout % DASHBOARD_LAYOUT_COUNT == 0 {
+        buf_w.saturating_sub((right_min + 32) * 2)
+    } else {
+        buf_w.saturating_sub(right_min * side_columns + 80)
+    };
+    let layout_cap = max_w_by_height
+        .min(max_w_by_side_panel)
+        .min(buf_w.saturating_sub(24));
+    if layout_cap < 96 {
+        return (0, 0);
+    }
+
+    let remaining_for_game = if dashboard_layout % DASHBOARD_LAYOUT_COUNT == 0 {
+        buf_w.saturating_sub((right_min + 32) * 2)
+    } else {
+        buf_w.saturating_sub(right_min * side_columns + 80)
+    };
+    let preferred = match size % GAME_PREVIEW_SIZE_COUNT {
+        0 => remaining_for_game * 45 / 100,
+        1 => remaining_for_game * 72 / 100,
+        _ => remaining_for_game,
+    };
+    let preview_w = preferred.clamp(96, usize::MAX).min(layout_cap);
+    let preview_h = preview_w * 2 / 3;
+    (preview_w, preview_h)
+}
+
+pub fn game_preview_frame_rect(
+    buf_w: usize,
+    buf_h: usize,
+    size: u8,
+    side_panel_size: u8,
+    dashboard_layout: u8,
+) -> Option<(usize, usize, usize, usize)> {
+    let (preview_w, preview_h) =
+        game_preview_dimensions(buf_w, buf_h, size, side_panel_size, dashboard_layout);
+    if preview_w == 0 || preview_h == 0 {
+        return None;
+    }
+
+    let outer_w = preview_w + 8;
+    let outer_x = match dashboard_layout % DASHBOARD_LAYOUT_COUNT {
+        1 => side_panel_reserved_width(buf_w, side_panel_size) + 40,
+        2 => {
+            let side_w = side_panel_reserved_width(buf_w, side_panel_size);
+            let left = side_w + 32;
+            let right = buf_w.saturating_sub(side_w + 12);
+            let available = right.saturating_sub(left);
+            left + available.saturating_sub(outer_w) / 2
+        }
+        _ => {
+            let side_w = side_panel_reserved_width(buf_w, side_panel_size);
+            let centered = buf_w.saturating_sub(outer_w) / 2;
+            let max_x = buf_w.saturating_sub(side_w + 28 + outer_w);
+            centered.min(max_x)
+        }
+    }
+    .min(buf_w.saturating_sub(outer_w + 4));
+
+    Some((outer_x + 4, 36, preview_w, preview_h))
 }
 
 /// 8×8 bitmap font, ASCII 0x20–0x7E (95 printable characters).
@@ -426,6 +637,72 @@ fn draw_detached_addon_background(
     }
 }
 
+fn draw_dashboard_background(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    theme: u8,
+    wallpaper: Option<&DashboardWallpaper>,
+) {
+    if theme % DASHBOARD_THEME_COUNT == 3 {
+        if let Some(wallpaper) = wallpaper {
+            draw_wallpaper_cover(buf, buf_w, buf_h, wallpaper);
+            tint_buffer(buf, 0xFF_06_0A_12, 72);
+            return;
+        }
+    }
+
+    let (top, bottom, accent) = match theme % DASHBOARD_THEME_COUNT {
+        1 => (0xFF_0714_10, 0xFF_1024_1B, 0xFF_3D_DC_97),
+        2 => (0xFF_0810_1F, 0xFF_1424_3A, 0xFF_6C_A8_FF),
+        _ => (0xFF_0A_0F_19, 0xFF_141B_2A, 0xFF_1E_2A_3F),
+    };
+    draw_detached_addon_background(buf, buf_w, buf_h, top, bottom, accent);
+}
+
+fn draw_wallpaper_cover(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    wallpaper: &DashboardWallpaper,
+) {
+    if buf_w == 0 || buf_h == 0 || wallpaper.width == 0 || wallpaper.height == 0 {
+        return;
+    }
+
+    let scale_by_w = buf_w * wallpaper.height >= buf_h * wallpaper.width;
+    let (draw_w, draw_h) = if scale_by_w {
+        (buf_w, (buf_w * wallpaper.height / wallpaper.width).max(1))
+    } else {
+        ((buf_h * wallpaper.width / wallpaper.height).max(1), buf_h)
+    };
+    let crop_x = draw_w.saturating_sub(buf_w) / 2;
+    let crop_y = draw_h.saturating_sub(buf_h) / 2;
+
+    for y in 0..buf_h {
+        let src_y = (y + crop_y) * wallpaper.height / draw_h;
+        for x in 0..buf_w {
+            let src_x = (x + crop_x) * wallpaper.width / draw_w;
+            buf[y * buf_w + x] = wallpaper.pixels[src_y * wallpaper.width + src_x];
+        }
+    }
+}
+
+fn tint_buffer(buf: &mut [u32], tint: u32, amount: u32) {
+    let tr = (tint >> 16) & 0xFF;
+    let tg = (tint >> 8) & 0xFF;
+    let tb = tint & 0xFF;
+    for pixel in buf.iter_mut() {
+        let r = (*pixel >> 16) & 0xFF;
+        let g = (*pixel >> 8) & 0xFF;
+        let b = *pixel & 0xFF;
+        let r = (r * (255 - amount) + tr * amount) / 255;
+        let g = (g * (255 - amount) + tg * amount) / 255;
+        let b = (b * (255 - amount) + tb * amount) / 255;
+        *pixel = 0xFF_00_00_00 | (r << 16) | (g << 8) | b;
+    }
+}
+
 fn draw_panel(
     buf: &mut [u32],
     buf_w: usize,
@@ -466,16 +743,16 @@ pub fn draw_overlay(
     color_correction: bool,
     fast_forward: bool,
 ) {
-    const SCALE: usize = 2;
-    const CELL: usize = CHAR_W * SCALE + SCALE; // 18 px per char
-    const LINE: usize = CHAR_H * SCALE + SCALE; // 18 px per line
+    let scale = if buf_w < 620 || buf_h < 280 { 1 } else { 2 };
+    let cell = CHAR_W * scale + scale;
+    let line = CHAR_H * scale + scale;
 
     // Panel dimensions
-    let cols = 30usize; // characters wide
+    let cols = if scale == 1 { 31usize } else { 30usize };
     let rows = 12usize; // lines tall
     let pad = 6usize;
-    let panel_w = cols * CELL + pad * 2;
-    let panel_h = rows * LINE + pad * 2;
+    let panel_w = (cols * cell + pad * 2).min(buf_w.saturating_sub(16));
+    let panel_h = (rows * line + pad * 2).min(buf_h.saturating_sub(16));
     let px0 = 8usize;
     let py0 = 8usize;
 
@@ -517,22 +794,31 @@ pub fn draw_overlay(
     let bg = 0xFF_10_10_10;
 
     // Title
-    draw_text(buf, buf_w, buf_h, tx, ty, "tinyBird", SCALE, cyan, bg);
-    ty += LINE + SCALE;
+    draw_text(buf, buf_w, buf_h, tx, ty, "tinyBird", scale, cyan, bg);
+    ty += line + scale;
 
     // Separator
-    fill_rect(buf, buf_w, buf_h, tx, ty, panel_w - pad * 2, 1, grey);
-    ty += SCALE * 2;
+    fill_rect(
+        buf,
+        buf_w,
+        buf_h,
+        tx,
+        ty,
+        panel_w.saturating_sub(pad * 2),
+        1,
+        grey,
+    );
+    ty += scale * 2;
 
     // FPS line
     let fps_str = format!("FPS: {:.1}", fps);
-    draw_text(buf, buf_w, buf_h, tx, ty, &fps_str, SCALE, white, bg);
-    ty += LINE;
+    draw_text(buf, buf_w, buf_h, tx, ty, &fps_str, scale, white, bg);
+    ty += line;
 
     // Speed line
-    let speed_str = format!("Speed: {}x  [1] [2] [4]", speed);
-    draw_text(buf, buf_w, buf_h, tx, ty, &speed_str, SCALE, white, bg);
-    ty += LINE;
+    let speed_str = format!("Speed: {}x  1/2/4", speed);
+    draw_text(buf, buf_w, buf_h, tx, ty, &speed_str, scale, white, bg);
+    ty += line;
 
     // Audio line
     let (audio_label, audio_color) = if muted {
@@ -549,16 +835,16 @@ pub fn draw_overlay(
         tx,
         ty,
         audio_label,
-        SCALE,
+        scale,
         audio_color,
         bg,
     );
-    ty += LINE;
+    ty += line;
 
     // Volume line
-    let vol_str = format!("Vol:   {}%  [-/+]", volume_pct);
-    draw_text(buf, buf_w, buf_h, tx, ty, &vol_str, SCALE, white, bg);
-    ty += LINE;
+    let vol_str = format!("Volume: {}%  -/+", volume_pct);
+    draw_text(buf, buf_w, buf_h, tx, ty, &vol_str, scale, white, bg);
+    ty += line;
 
     // Color correction line
     let (cc_label, cc_color) = if color_correction {
@@ -566,12 +852,21 @@ pub fn draw_overlay(
     } else {
         ("LCD color fix: OFF [C]", grey)
     };
-    draw_text(buf, buf_w, buf_h, tx, ty, cc_label, SCALE, cc_color, bg);
-    ty += LINE + SCALE;
+    draw_text(buf, buf_w, buf_h, tx, ty, cc_label, scale, cc_color, bg);
+    ty += line + scale;
 
     // Separator
-    fill_rect(buf, buf_w, buf_h, tx, ty, panel_w - pad * 2, 1, grey);
-    ty += SCALE * 2;
+    fill_rect(
+        buf,
+        buf_w,
+        buf_h,
+        tx,
+        ty,
+        panel_w.saturating_sub(pad * 2),
+        1,
+        grey,
+    );
+    ty += scale * 2;
 
     // Key bindings
     draw_text(
@@ -580,39 +875,47 @@ pub fn draw_overlay(
         buf_h,
         tx,
         ty,
-        "[Esc] Pause/Resume",
-        SCALE,
+        "Esc Pause   O Open",
+        scale,
         grey,
         bg,
     );
-    ty += LINE;
+    ty += line;
     draw_text(
         buf,
         buf_w,
         buf_h,
         tx,
         ty,
-        "[R] Reset  [O] Open ROM",
-        SCALE,
+        "R Reset     F1 HUD",
+        scale,
         grey,
         bg,
     );
-    ty += LINE;
-    draw_text(buf, buf_w, buf_h, tx, ty, "[F1] Close HUD", SCALE, grey, bg);
-    ty += LINE;
+    ty += line;
     draw_text(
         buf,
         buf_w,
         buf_h,
         tx,
         ty,
-        "[F2] Team  [F4] Encounters",
-        SCALE,
+        "F2 Team    F4 Encounters",
+        scale,
         grey,
         bg,
     );
-    ty += LINE;
-    draw_text(buf, buf_w, buf_h, tx, ty, "[F6] Popout", SCALE, grey, bg);
+    ty += line;
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        tx,
+        ty,
+        "F6 Dash  F7 Game  F10 Side",
+        scale,
+        grey,
+        bg,
+    );
 }
 
 pub fn draw_addon_panel(
@@ -621,8 +924,13 @@ pub fn draw_addon_panel(
     buf_h: usize,
     snapshot: &StreamSnapshot,
     sprites: &PokemonSpriteStore,
-    detached: bool,
+    expanded: bool,
     view_mode: AddonViewMode,
+    preview_size: u8,
+    side_panel_size: u8,
+    dashboard_layout: u8,
+    dashboard_theme: u8,
+    wallpaper: Option<&DashboardWallpaper>,
 ) {
     let panel_bg = 0xFF_12_17_26;
     let ink = 0xFF_F7_F3_EC;
@@ -630,49 +938,117 @@ pub fn draw_addon_panel(
     let accent = 0xFF_FF_9F_1C;
     let accent_2 = 0xFF_2E_C4_B6;
 
-    if detached {
-        draw_detached_addon_background(
-            buf,
-            buf_w,
-            buf_h,
-            0xFF_0A_0F_19,
-            0xFF_141B_2A,
-            0xFF_1E_2A_3F,
-        );
+    if expanded {
+        draw_dashboard_background(buf, buf_w, buf_h, dashboard_theme, wallpaper);
     }
 
-    let panel_w = if detached {
-        buf_w.saturating_sub(24).clamp(280, 480)
+    let panel_w = if expanded {
+        buf_w.saturating_sub(24).max(360).min(buf_w)
     } else if view_mode == AddonViewMode::Encounters {
-        buf_w.saturating_sub(16).clamp(260, 360)
+        side_panel_reserved_width(buf_w, side_panel_size)
+            .clamp(260, 420)
+            .min(buf_w.saturating_sub(16))
     } else {
-        buf_w.saturating_sub(20).clamp(220, 296)
+        side_panel_reserved_width(buf_w, side_panel_size)
+            .clamp(240, 380)
+            .min(buf_w.saturating_sub(20))
     };
-    let panel_h = if detached {
-        buf_h.saturating_sub(24).clamp(180, 520)
+    let panel_h = if expanded {
+        buf_h.saturating_sub(24).max(260).min(buf_h)
     } else if view_mode == AddonViewMode::Encounters {
         buf_h.saturating_sub(12).clamp(220, 520)
     } else {
         buf_h.saturating_sub(16).clamp(220, 520)
     };
-    let panel_x = if detached {
+    let panel_x = if expanded {
         (buf_w.saturating_sub(panel_w)) / 2
     } else {
         buf_w.saturating_sub(panel_w + 8)
     };
-    let panel_y = if detached {
+    let panel_y = if expanded {
         (buf_h.saturating_sub(panel_h)) / 2
     } else {
         8
     };
 
-    draw_panel(
-        buf, buf_w, buf_h, panel_x, panel_y, panel_w, panel_h, panel_bg, accent_2, accent,
-    );
+    if expanded {
+        fill_rect(buf, buf_w, buf_h, panel_x, panel_y, panel_w, 2, accent);
+        fill_rect(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x,
+            panel_y + panel_h.saturating_sub(2),
+            panel_w,
+            2,
+            accent_2,
+        );
+        fill_rect(buf, buf_w, buf_h, panel_x, panel_y, 2, panel_h, accent_2);
+        fill_rect(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x + panel_w.saturating_sub(2),
+            panel_y,
+            2,
+            panel_h,
+            accent_2,
+        );
+    } else {
+        draw_panel(
+            buf, buf_w, buf_h, panel_x, panel_y, panel_w, panel_h, panel_bg, accent_2, accent,
+        );
+    }
 
-    let center_x = panel_x + panel_w / 2;
-    let mut y = panel_y + 14;
-    let title_scale = if detached || panel_w > 260 { 2 } else { 1 };
+    let (preview_w, preview_frame_h) = game_preview_dimensions(
+        buf_w,
+        buf_h,
+        preview_size,
+        side_panel_size,
+        dashboard_layout,
+    );
+    let preview_h = preview_frame_h + 28;
+
+    if expanded {
+        if let Some(AddonData::FireRed(data)) = snapshot.addon.as_ref().map(|addon| &addon.data) {
+            draw_firered_dashboard(
+                buf,
+                buf_w,
+                buf_h,
+                panel_x,
+                panel_y,
+                panel_w,
+                panel_h,
+                preview_w,
+                preview_h,
+                side_panel_size,
+                dashboard_layout,
+                snapshot,
+                data,
+                sprites,
+            );
+            return;
+        }
+    }
+
+    let side_by_side_preview = expanded && panel_w >= preview_w + 360 && panel_h >= 300;
+    let content_x = if side_by_side_preview {
+        panel_x + preview_w + 36
+    } else {
+        panel_x + 12
+    };
+    let content_w = panel_x
+        .saturating_add(panel_w)
+        .saturating_sub(content_x)
+        .saturating_sub(12)
+        .max(180);
+    let center_x = content_x + content_w / 2;
+    let mut y = if expanded && !side_by_side_preview {
+        panel_y + preview_h + 18
+    } else {
+        panel_y + 14
+    };
+    let title_scale = if expanded || panel_w > 260 { 2 } else { 1 };
     let title = snapshot
         .addon
         .as_ref()
@@ -694,25 +1070,13 @@ pub fn draw_addon_panel(
     );
     y += title_scale * 10 + 4;
 
-    let subtitle = match &snapshot.rom {
-        Some(rom) => format!("{}  {}", rom.title, rom.game_code),
-        None => "Load a supported game to enable addons".to_string(),
-    };
+    let subtitle = rom_display_label(snapshot);
     draw_text_centered(
         buf, buf_w, buf_h, center_x, y, &subtitle, 1, muted, panel_bg,
     );
     y += 16;
 
-    fill_rect(
-        buf,
-        buf_w,
-        buf_h,
-        panel_x + 12,
-        y,
-        panel_w.saturating_sub(24),
-        1,
-        muted,
-    );
+    fill_rect(buf, buf_w, buf_h, content_x, y, content_w, 1, muted);
     y += 12;
 
     let footer_y = panel_y + panel_h.saturating_sub(18);
@@ -723,9 +1087,9 @@ pub fn draw_addon_panel(
                     buf,
                     buf_w,
                     buf_h,
-                    panel_x + 12,
+                    content_x,
                     y,
-                    panel_w.saturating_sub(24),
+                    content_w,
                     footer_y.saturating_sub(8),
                     data,
                     sprites,
@@ -736,9 +1100,9 @@ pub fn draw_addon_panel(
                     buf,
                     buf_w,
                     buf_h,
-                    panel_x + 12,
+                    content_x,
                     y,
-                    panel_w.saturating_sub(24),
+                    content_w,
                     footer_y.saturating_sub(8),
                     data,
                     sprites,
@@ -763,7 +1127,7 @@ pub fn draw_addon_panel(
                 buf_h,
                 center_x,
                 y + 24,
-                "Load FireRed or LeafGreen and move in-game to populate the live team view.",
+                "Load a supported game to populate this view.",
                 1,
                 muted,
                 panel_bg,
@@ -771,18 +1135,327 @@ pub fn draw_addon_panel(
         }
     }
 
-    let footer = if detached {
+    let footer = if expanded {
         match view_mode {
-            AddonViewMode::Team => "[F4] Open Encounters  [F6] Close",
-            AddonViewMode::Encounters => "[F2] Open Team  [F6] Close",
+            AddonViewMode::Team => "F4 Encounters   F7 Game   F10 Side   F11 Move",
+            AddonViewMode::Encounters => "F2 Team   F7 Game   F10 Side   F11 Move",
         }
     } else if view_mode == AddonViewMode::Team {
-        "[F2] Hide  [F4] Encounters  [F6] Popout"
+        "F4 Encounters   F6 Dash   F3 Hide"
     } else {
-        "[F4] Hide  [F2] Team  [F6] Popout"
+        "F2 Team   F6 Dash   F3 Hide"
     };
+    if !expanded && content_w < text_width(footer, 1) + 8 {
+        let first = match view_mode {
+            AddonViewMode::Team => "F4 Encounters",
+            AddonViewMode::Encounters => "F2 Team",
+        };
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            center_x,
+            footer_y.saturating_sub(12),
+            first,
+            1,
+            muted,
+            panel_bg,
+        );
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            center_x,
+            footer_y,
+            "F6 Dash   F3 Hide",
+            1,
+            muted,
+            panel_bg,
+        );
+    } else {
+        draw_text_centered(
+            buf, buf_w, buf_h, center_x, footer_y, footer, 1, muted, panel_bg,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_firered_dashboard(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    panel_x: usize,
+    panel_y: usize,
+    panel_w: usize,
+    panel_h: usize,
+    preview_w: usize,
+    preview_h: usize,
+    side_panel_size: u8,
+    dashboard_layout: u8,
+    snapshot: &StreamSnapshot,
+    data: &FireRedSnapshot,
+    sprites: &PokemonSpriteStore,
+) {
+    let panel_bg = 0xFF_12_17_26;
+    let muted = 0xFF_96_A0_B4;
+    let accent = 0xFF_FF_9F_1C;
+    let accent_2 = 0xFF_2E_C4_B6;
+
+    let footer_y = panel_y + panel_h.saturating_sub(18);
+    let content_top = panel_y + 14;
+    let content_bottom = footer_y.saturating_sub(24);
+    let preview_outer_w = preview_w + 8;
+    let preview_outer_h = preview_h;
+    let requested_right_w = side_panel_reserved_width(buf_w, side_panel_size);
+    let layout = dashboard_layout % DASHBOARD_LAYOUT_COUNT;
+    let max_right_w = panel_w.saturating_sub(preview_outer_w + 52);
+    let right_w = requested_right_w.clamp(240, max_right_w.max(240));
+    let right_x = if layout == 1 {
+        panel_x + 12
+    } else {
+        panel_x + panel_w.saturating_sub(right_w + 12)
+    };
+    let right_available = right_w >= 240;
+    let party_x = panel_x + 12;
+    let party_w = panel_w.saturating_sub(24);
+    let preview_bottom = panel_y + preview_outer_h + 18;
+
+    if layout == 2 {
+        let max_side_w = (panel_w.saturating_sub(preview_outer_w + 72) / 2).max(240);
+        let side_w = requested_right_w.clamp(240, max_side_w);
+        let left_x = panel_x + 12;
+        let side_bottom = content_bottom;
+        let encounter_x = panel_x + panel_w.saturating_sub(side_w + 12);
+
+        fill_rect(
+            buf,
+            buf_w,
+            buf_h,
+            left_x,
+            content_top + 46,
+            side_w,
+            1,
+            muted,
+        );
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            left_x + side_w / 2,
+            content_top,
+            "Party",
+            2,
+            accent,
+            panel_bg,
+        );
+        draw_firered_party_panel(
+            buf,
+            buf_w,
+            buf_h,
+            left_x,
+            content_top + 58,
+            side_w,
+            side_bottom,
+            data,
+            sprites,
+        );
+
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            encounter_x + side_w / 2,
+            content_top,
+            "Encounters",
+            2,
+            accent,
+            panel_bg,
+        );
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            encounter_x + side_w / 2,
+            content_top + 24,
+            &rom_display_label(snapshot),
+            1,
+            muted,
+            panel_bg,
+        );
+        fill_rect(
+            buf,
+            buf_w,
+            buf_h,
+            encounter_x,
+            content_top + 46,
+            side_w,
+            1,
+            muted,
+        );
+        draw_firered_encounter_panel(
+            buf,
+            buf_w,
+            buf_h,
+            encounter_x,
+            content_top + 58,
+            side_w,
+            side_bottom,
+            data,
+            sprites,
+        );
+
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x + panel_w / 2,
+            footer_y.saturating_sub(12),
+            "F11 Layout   F7 Game   F9 Fullscreen   F12 Theme",
+            1,
+            muted,
+            panel_bg,
+        );
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x + panel_w / 2,
+            footer_y,
+            "F2 Team   F4 Encounters   W Wallpaper",
+            1,
+            muted,
+            panel_bg,
+        );
+        return;
+    }
+
+    let min_party_h = if party_w >= 1200 {
+        126
+    } else if party_w >= 420 {
+        190
+    } else {
+        224
+    };
+    let party_bottom = content_bottom;
+    let party_y = party_bottom
+        .saturating_sub(min_party_h)
+        .max(preview_bottom)
+        .min(party_bottom);
+    let encounter_bottom = if right_available {
+        party_y.saturating_sub(12).max(content_top + 82)
+    } else {
+        party_y.saturating_sub(12)
+    };
+
+    if right_available {
+        let center_x = right_x + right_w / 2;
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            center_x,
+            content_top,
+            "Encounters",
+            2,
+            accent,
+            panel_bg,
+        );
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            center_x,
+            content_top + 24,
+            &rom_display_label(snapshot),
+            1,
+            muted,
+            panel_bg,
+        );
+        fill_rect(
+            buf,
+            buf_w,
+            buf_h,
+            right_x,
+            content_top + 46,
+            right_w,
+            1,
+            muted,
+        );
+        if content_top + 120 < encounter_bottom {
+            draw_firered_encounter_panel(
+                buf,
+                buf_w,
+                buf_h,
+                right_x,
+                content_top + 58,
+                right_w,
+                encounter_bottom,
+                data,
+                sprites,
+            );
+        }
+    }
+
+    if party_y + 52 < party_bottom {
+        fill_rect(
+            buf,
+            buf_w,
+            buf_h,
+            party_x,
+            party_y.saturating_sub(10),
+            party_w,
+            1,
+            accent_2,
+        );
+        draw_text(
+            buf, buf_w, buf_h, party_x, party_y, "Party", 1, accent, panel_bg,
+        );
+        draw_firered_party_panel(
+            buf,
+            buf_w,
+            buf_h,
+            party_x,
+            party_y + 16,
+            party_w,
+            party_bottom,
+            data,
+            sprites,
+        );
+    } else if !right_available {
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x + panel_w / 2,
+            panel_y + preview_h + 20,
+            "Use F7 to favor addon space in this window.",
+            1,
+            muted,
+            panel_bg,
+        );
+    }
+
     draw_text_centered(
-        buf, buf_w, buf_h, center_x, footer_y, footer, 1, muted, panel_bg,
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + panel_w / 2,
+        footer_y.saturating_sub(12),
+        "F7 Game   F9 Fullscreen   F11 Move   F12 Theme",
+        1,
+        muted,
+        panel_bg,
+    );
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + panel_w / 2,
+        footer_y,
+        "F2 Team   F4 Encounters   W Wallpaper",
+        1,
+        muted,
+        panel_bg,
     );
 }
 
@@ -810,19 +1483,6 @@ fn draw_firered_party_panel(
         buf, buf_w, buf_h, panel_x, panel_y, &summary, 1, muted, panel_bg,
     );
 
-    let card_gap = 6usize;
-    let card_h = 70usize;
-    let mut y = panel_y + 18;
-    for member in &snapshot.party {
-        if y + card_h > panel_bottom {
-            break;
-        }
-        draw_firered_party_card(
-            buf, buf_w, buf_h, panel_x, y, panel_w, card_h, member, sprites,
-        );
-        y += card_h + card_gap;
-    }
-
     if snapshot.party.is_empty() {
         draw_text(
             buf,
@@ -835,6 +1495,69 @@ fn draw_firered_party_panel(
             ink,
             panel_bg,
         );
+        return;
+    }
+
+    let card_gap = 6usize;
+    let content_y = panel_y + 18;
+    let available_h = panel_bottom.saturating_sub(content_y);
+    let desired_grid = if panel_w >= 1200 {
+        [(6usize, 1usize), (3usize, 2usize), (2usize, 3usize)].as_slice()
+    } else if panel_w >= 360 {
+        [(3usize, 2usize), (2usize, 3usize)].as_slice()
+    } else {
+        &[]
+    }
+    .iter()
+    .copied()
+    .find_map(|(cols, rows)| {
+        let card_w = panel_w.saturating_sub(card_gap * (cols - 1)) / cols;
+        let card_h = available_h
+            .saturating_sub(card_gap * (rows - 1))
+            .min(70 * rows + card_gap * (rows - 1))
+            / rows;
+        (card_w >= 150 && card_h >= 46).then_some((cols, rows, card_w, card_h))
+    });
+
+    if let Some((grid_cols, grid_rows, grid_card_w, grid_card_h)) = desired_grid {
+        for (idx, member) in snapshot
+            .party
+            .iter()
+            .take(grid_cols * grid_rows)
+            .enumerate()
+        {
+            let col = idx % grid_cols;
+            let row = idx / grid_cols;
+            let x = panel_x + col * (grid_card_w + card_gap);
+            let y = content_y + row * (grid_card_h + card_gap);
+            if y + grid_card_h > panel_bottom {
+                break;
+            }
+            draw_firered_party_card(
+                buf,
+                buf_w,
+                buf_h,
+                x,
+                y,
+                grid_card_w,
+                grid_card_h,
+                member,
+                sprites,
+            );
+        }
+        return;
+    }
+
+    let card_h = if panel_w < 320 { 64usize } else { 70usize };
+    let mut y = content_y;
+    for member in &snapshot.party {
+        if y + card_h > panel_bottom {
+            break;
+        }
+        draw_firered_party_card(
+            buf, buf_w, buf_h, panel_x, y, panel_w, card_h, member, sprites,
+        );
+        y += card_h + card_gap;
     }
 }
 
@@ -850,62 +1573,421 @@ fn draw_firered_encounter_panel(
     sprites: &PokemonSpriteStore,
 ) {
     let panel_bg = 0xFF_12_17_26;
+    let ink = 0xFF_F7_F3_EC;
     let muted = 0xFF_96_A0_B4;
     let accent = 0xFF_FF_9F_1C;
+    let accent_2 = 0xFF_2E_C4_B6;
 
-    if let Some(battle) = &snapshot.battle {
-        draw_firered_battle_panel(
-            buf,
-            buf_w,
-            buf_h,
-            panel_x,
-            panel_y,
-            panel_w,
-            panel_bottom,
-            battle,
-            sprites,
-        );
-        return;
+    match (&snapshot.area, &snapshot.battle) {
+        (Some(area), Some(battle)) => {
+            let available_h = panel_bottom.saturating_sub(panel_y);
+            let battle_reserve = if available_h >= 390 { 206 } else { 176 };
+            let area_bottom = panel_bottom
+                .saturating_sub(battle_reserve)
+                .max(panel_y + 72);
+            let area_end = draw_firered_area_panel(
+                buf,
+                buf_w,
+                buf_h,
+                panel_x,
+                panel_y,
+                panel_w,
+                area_bottom,
+                area,
+            );
+            let battle_y = area_end
+                .saturating_add(12)
+                .min(area_bottom.saturating_add(8));
+            if battle_y + 158 <= panel_bottom {
+                fill_rect(
+                    buf,
+                    buf_w,
+                    buf_h,
+                    panel_x,
+                    battle_y.saturating_sub(8),
+                    panel_w,
+                    1,
+                    accent_2,
+                );
+                draw_text(
+                    buf,
+                    buf_w,
+                    buf_h,
+                    panel_x,
+                    battle_y,
+                    "Encountered Pokemon",
+                    1,
+                    accent,
+                    panel_bg,
+                );
+                draw_firered_battle_panel(
+                    buf,
+                    buf_w,
+                    buf_h,
+                    panel_x,
+                    battle_y + 14,
+                    panel_w,
+                    panel_bottom,
+                    battle,
+                    sprites,
+                );
+            }
+        }
+        (Some(area), None) => {
+            let y = draw_firered_area_panel(
+                buf,
+                buf_w,
+                buf_h,
+                panel_x,
+                panel_y,
+                panel_w,
+                panel_bottom,
+                area,
+            );
+            if area.encounter_groups.is_empty() && y + 12 <= panel_bottom {
+                draw_text(
+                    buf,
+                    buf_w,
+                    buf_h,
+                    panel_x,
+                    y,
+                    "Try a route, cave, water, or grass area.",
+                    1,
+                    muted,
+                    panel_bg,
+                );
+            } else if y + 28 <= panel_bottom {
+                fill_rect(buf, buf_w, buf_h, panel_x, y + 4, panel_w, 1, accent_2);
+                draw_text(
+                    buf,
+                    buf_w,
+                    buf_h,
+                    panel_x,
+                    y + 12,
+                    "No active encounter",
+                    1,
+                    muted,
+                    panel_bg,
+                );
+            }
+        }
+        (None, Some(battle)) => {
+            draw_text(
+                buf,
+                buf_w,
+                buf_h,
+                panel_x,
+                panel_y,
+                "Encountered Pokemon",
+                1,
+                accent,
+                panel_bg,
+            );
+            draw_firered_battle_panel(
+                buf,
+                buf_w,
+                buf_h,
+                panel_x,
+                panel_y + 14,
+                panel_w,
+                panel_bottom,
+                battle,
+                sprites,
+            );
+        }
+        (None, None) => {
+            draw_text(
+                buf,
+                buf_w,
+                buf_h,
+                panel_x,
+                panel_y,
+                "Area data pending",
+                1,
+                accent,
+                panel_bg,
+            );
+            if panel_y + 18 <= panel_bottom {
+                draw_text(
+                    buf,
+                    buf_w,
+                    buf_h,
+                    panel_x,
+                    panel_y + 14,
+                    "Move in-game to refresh encounter data.",
+                    1,
+                    ink,
+                    panel_bg,
+                );
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn draw_firered_battle_panel_compact(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    panel_x: usize,
+    panel_y: usize,
+    panel_w: usize,
+    panel_bottom: usize,
+    battle: &FireRedBattleSnapshot,
+    sprites: &PokemonSpriteStore,
+) -> usize {
+    let card_h = panel_bottom.saturating_sub(panel_y).min(180);
+    if card_h < 158 || panel_y + card_h > panel_bottom {
+        return panel_y;
     }
 
-    let Some(area) = &snapshot.area else {
-        draw_text(
-            buf,
-            buf_w,
-            buf_h,
-            panel_x,
-            panel_y,
-            "Area data pending",
-            1,
-            accent,
-            panel_bg,
-        );
-        return;
-    };
+    let card_bg = 0xFF_1A_23_36;
+    let border = 0xFF_FF_9F_1C;
+    let accent = 0xFF_FF_9F_1C;
+    let accent_2 = 0xFF_2E_C4_B6;
+    let ink = 0xFF_F7_F3_EC;
+    let muted = 0xFF_96_A0_B4;
+    let danger = 0xFF_FC_76_6A;
+    let sprite_bg = 0xFF_0D_12_1F;
 
-    let y = draw_firered_area_panel(
+    draw_panel(
+        buf, buf_w, buf_h, panel_x, panel_y, panel_w, card_h, card_bg, border, accent_2,
+    );
+
+    let title = format!("Now Fighting  {}", battle.battle_kind);
+    draw_text(
         buf,
         buf_w,
         buf_h,
-        panel_x,
-        panel_y,
-        panel_w,
-        panel_bottom,
-        area,
+        panel_x + 8,
+        panel_y + 7,
+        &short_label(&title, if panel_w >= 280 { 31 } else { 23 }),
+        1,
+        accent,
+        card_bg,
     );
-    if area.encounter_groups.is_empty() && y + 12 <= panel_bottom {
-        draw_text(
-            buf,
-            buf_w,
-            buf_h,
-            panel_x,
-            y,
-            "Try a route, cave, water, or grass area.",
-            1,
-            muted,
-            panel_bg,
-        );
-    }
+
+    let opponent = &battle.opponent;
+    let sprite_box = if panel_w >= 300 { 64 } else { 54 };
+    let sprite_x = panel_x + panel_w.saturating_sub(sprite_box + 8);
+    let sprite_y = panel_y + 62;
+    let text_w = sprite_x.saturating_sub(panel_x + 18);
+    let level = format!("Lv{}", opponent.level);
+    let level_x = panel_x + panel_w.saturating_sub(8 + text_width(&level, 1));
+    let name_max = if panel_w >= 280 { 18 } else { 12 };
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8,
+        panel_y + 22,
+        &short_label(&opponent.species_name, name_max),
+        1,
+        ink,
+        card_bg,
+    );
+
+    draw_species_sprite_box(
+        buf,
+        buf_w,
+        buf_h,
+        sprite_x,
+        sprite_y,
+        sprite_box,
+        opponent.species_id,
+        "Foe",
+        &format!("#{:03}", opponent.species_id),
+        sprites,
+        sprite_bg,
+        accent_2,
+        accent,
+        muted,
+    );
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        level_x,
+        panel_y + 22,
+        &level,
+        1,
+        ink,
+        card_bg,
+    );
+
+    let hp = format!("{}/{} HP", opponent.current_hp, opponent.max_hp);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8,
+        panel_y + 36,
+        &hp,
+        1,
+        muted,
+        card_bg,
+    );
+    let catch = match opponent.catch_rate {
+        Some(rate) => format!("Catch {}", rate),
+        None => "Catch --".to_string(),
+    };
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + panel_w.saturating_sub(8 + text_width(&catch, 1)),
+        panel_y + 36,
+        &catch,
+        1,
+        accent_2,
+        card_bg,
+    );
+
+    let held = opponent
+        .held_item
+        .as_ref()
+        .map(|item| item.name.as_str())
+        .unwrap_or("No item");
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8,
+        panel_y + 50,
+        &short_label(held, if panel_w >= 280 { 22 } else { 14 }),
+        1,
+        muted,
+        card_bg,
+    );
+
+    let left_x = panel_x + 8;
+    let right_x = panel_x + (panel_w / 2).max(120);
+    let mut stat_y = panel_y + 66;
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        left_x,
+        stat_y,
+        &format!("HP  {}", opponent.stats.hp),
+        1,
+        ink,
+        card_bg,
+    );
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        right_x,
+        stat_y,
+        &format!("Spd {}", opponent.stats.speed),
+        1,
+        muted,
+        card_bg,
+    );
+    stat_y += 12;
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        left_x,
+        stat_y,
+        &format!("Atk {}", opponent.stats.attack),
+        1,
+        ink,
+        card_bg,
+    );
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        right_x,
+        stat_y,
+        &format!("SpA {}", opponent.stats.sp_attack),
+        1,
+        muted,
+        card_bg,
+    );
+    stat_y += 12;
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        left_x,
+        stat_y,
+        &format!("Def {}", opponent.stats.defense),
+        1,
+        ink,
+        card_bg,
+    );
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        right_x,
+        stat_y,
+        &format!("SpD {}", opponent.stats.sp_def),
+        1,
+        muted,
+        card_bg,
+    );
+
+    let iv_line = format_spread_line("IV", &opponent.ivs, opponent.iv_total);
+    let ev_line = format_spread_line("EV", &opponent.evs, opponent.ev_total);
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        left_x,
+        panel_y + 104,
+        &short_label(&iv_line, if text_w > 170 { 26 } else { 19 }),
+        1,
+        accent_2,
+        card_bg,
+    );
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        left_x,
+        panel_y + 118,
+        &short_label(&ev_line, if text_w > 170 { 26 } else { 19 }),
+        1,
+        danger,
+        card_bg,
+    );
+
+    let moves = opponent
+        .move_slots
+        .iter()
+        .map(|slot| format!("{} {}", slot.name, slot.pp))
+        .collect::<Vec<_>>()
+        .join("  ");
+    draw_text(
+        buf,
+        buf_w,
+        buf_h,
+        left_x,
+        panel_y + 134,
+        &short_label(&moves, if panel_w >= 320 { 38 } else { 26 }),
+        1,
+        ink,
+        card_bg,
+    );
+
+    draw_hp_bar(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + 8,
+        panel_y + card_h.saturating_sub(12),
+        panel_w.saturating_sub(16),
+        4,
+        opponent.current_hp,
+        opponent.max_hp,
+    );
+
+    panel_y + card_h
 }
 
 fn draw_firered_battle_panel(
@@ -1315,7 +2397,7 @@ fn draw_firered_area_panel(
             buf_h,
             panel_x,
             y,
-            "Resize popout to show encounters.",
+            "Expand dashboard to show encounters.",
             1,
             muted,
             panel_bg,
@@ -1537,31 +2619,50 @@ fn draw_firered_party_card(
     );
     draw_text(buf, buf_w, buf_h, info_x, y + 18, &meta, 1, muted, card_bg);
 
-    let ivs = format_spread_line("IV", &member.ivs, member.iv_total);
-    draw_text(
-        buf,
-        buf_w,
-        buf_h,
-        info_x,
-        y + 31,
-        &short_label(&ivs, if w >= 280 { 30 } else { 22 }),
-        1,
-        0xFF_2E_C4_B6,
-        card_bg,
-    );
+    if h >= 68 {
+        let ivs = format_spread_line("IV", &member.ivs, member.iv_total);
+        draw_text(
+            buf,
+            buf_w,
+            buf_h,
+            info_x,
+            y + 31,
+            &short_label(&ivs, if w >= 280 { 30 } else { 22 }),
+            1,
+            0xFF_2E_C4_B6,
+            card_bg,
+        );
 
-    let evs = format_spread_line("EV", &member.evs, member.ev_total);
-    draw_text(
-        buf,
-        buf_w,
-        buf_h,
-        info_x,
-        y + 44,
-        &short_label(&evs, if w >= 280 { 30 } else { 22 }),
-        1,
-        accent,
-        card_bg,
-    );
+        let evs = format_spread_line("EV", &member.evs, member.ev_total);
+        draw_text(
+            buf,
+            buf_w,
+            buf_h,
+            info_x,
+            y + 44,
+            &short_label(&evs, if w >= 280 { 30 } else { 22 }),
+            1,
+            accent,
+            card_bg,
+        );
+    } else {
+        let nature = format!(
+            "{} {}",
+            short_label(member.nature, 7),
+            format_move_summary(&member.move_slots, 1)
+        );
+        draw_text(
+            buf,
+            buf_w,
+            buf_h,
+            info_x,
+            y + 32,
+            &short_label(&nature, if w >= 280 { 28 } else { 20 }),
+            1,
+            0xFF_2E_C4_B6,
+            card_bg,
+        );
+    }
 
     let bar_x = info_x;
     let bar_y = y + h.saturating_sub(8);
@@ -1952,17 +3053,8 @@ pub fn draw_pause_screen(buf: &mut [u32], buf_w: usize, buf_h: usize, screen: Pa
         panel_bg,
     );
     y += 14;
-    draw_text_centered(
-        buf,
-        buf_w,
-        buf_h,
-        center_x,
-        y,
-        "Save: [F5]  Load: [F8]",
-        1,
-        ink,
-        panel_bg,
-    );
+    let save_line = "States: F5 Save Menu   F8 Load Menu";
+    draw_text_centered(buf, buf_w, buf_h, center_x, y, &save_line, 1, ink, panel_bg);
     y += 14;
     draw_text_centered(
         buf,
@@ -1994,7 +3086,19 @@ pub fn draw_pause_screen(buf: &mut [u32], buf_w: usize, buf_h: usize, screen: Pa
         buf_h,
         center_x,
         y,
-        "Reset: [R]  Popout: [F6]",
+        "Fullscreen: [F9]  Theme: [F12]",
+        1,
+        muted,
+        panel_bg,
+    );
+    y += 14;
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        center_x,
+        y,
+        "Reset: [R]  Dashboard: [F6]",
         1,
         muted,
         panel_bg,
@@ -2028,5 +3132,204 @@ pub fn draw_toast(buf: &mut [u32], buf_w: usize, buf_h: usize, toast: Toast<'_>)
         scale,
         text,
         bg,
+    );
+}
+
+pub fn draw_save_state_menu(buf: &mut [u32], buf_w: usize, buf_h: usize, menu: SaveStateMenu) {
+    let panel_bg = 0xFF_12_17_26;
+    let row_bg = 0xFF_1A_23_36;
+    let ink = 0xFF_F7_F3_EC;
+    let muted = 0xFF_96_A0_B4;
+    let accent = 0xFF_FF_9F_1C;
+    let accent_2 = 0xFF_2E_C4_B6;
+    let danger = 0xFF_FC_76_6A;
+
+    let panel_w = buf_w.saturating_sub(32).clamp(260, 420);
+    let panel_h = 188usize.min(buf_h.saturating_sub(24)).max(150);
+    let panel_x = (buf_w.saturating_sub(panel_w)) / 2;
+    let panel_y = (buf_h.saturating_sub(panel_h)) / 2;
+    draw_panel(
+        buf, buf_w, buf_h, panel_x, panel_y, panel_w, panel_h, panel_bg, accent_2, accent,
+    );
+
+    let title = match menu.mode {
+        SaveStateMenuMode::Save => "Save State",
+        SaveStateMenuMode::Load => "Load State",
+    };
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + panel_w / 2,
+        panel_y + 12,
+        title,
+        2,
+        accent,
+        panel_bg,
+    );
+
+    let mut y = panel_y + 42;
+    for slot in 1..=5u8 {
+        let idx = (slot - 1) as usize;
+        let selected = slot == menu.selected_slot;
+        let bg = if selected { 0xFF_22_2D_44 } else { row_bg };
+        let border = if selected { accent } else { accent_2 };
+        draw_panel(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x + 16,
+            y,
+            panel_w.saturating_sub(32),
+            20,
+            bg,
+            border,
+            border,
+        );
+        let line = format!("{slot}. Slot {slot}");
+        draw_text(buf, buf_w, buf_h, panel_x + 26, y + 6, &line, 1, ink, bg);
+
+        let status = if menu.slot_exists[idx] {
+            "Saved"
+        } else {
+            "Empty"
+        };
+        let status_color = if menu.slot_exists[idx] {
+            accent_2
+        } else {
+            muted
+        };
+        let status_x = panel_x + panel_w.saturating_sub(26 + text_width(status, 1));
+        draw_text(
+            buf,
+            buf_w,
+            buf_h,
+            status_x,
+            y + 6,
+            status,
+            1,
+            status_color,
+            bg,
+        );
+        y += 24;
+    }
+
+    let help = match menu.mode {
+        SaveStateMenuMode::Save if menu.confirm_overwrite => {
+            "Enter confirms overwrite   Esc cancels"
+        }
+        SaveStateMenuMode::Save => "1-5 select   Enter saves   Esc cancels",
+        SaveStateMenuMode::Load => "1-5 load   Enter loads   Esc cancels",
+    };
+    let help_color = if menu.confirm_overwrite {
+        danger
+    } else {
+        muted
+    };
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + panel_w / 2,
+        panel_y + panel_h.saturating_sub(18),
+        help,
+        1,
+        help_color,
+        panel_bg,
+    );
+}
+
+pub fn draw_theme_menu(buf: &mut [u32], buf_w: usize, buf_h: usize, menu: ThemeMenu) {
+    let panel_bg = 0xFF_12_17_26;
+    let row_bg = 0xFF_1A_23_36;
+    let ink = 0xFF_F7_F3_EC;
+    let muted = 0xFF_96_A0_B4;
+    let accent = 0xFF_FF_9F_1C;
+    let accent_2 = 0xFF_2E_C4_B6;
+    let danger = 0xFF_FC_76_6A;
+
+    let panel_w = buf_w.saturating_sub(32).clamp(280, 460);
+    let panel_h = 176usize.min(buf_h.saturating_sub(24)).max(142);
+    let panel_x = (buf_w.saturating_sub(panel_w)) / 2;
+    let panel_y = (buf_h.saturating_sub(panel_h)) / 2;
+    draw_panel(
+        buf, buf_w, buf_h, panel_x, panel_y, panel_w, panel_h, panel_bg, accent_2, accent,
+    );
+
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + panel_w / 2,
+        panel_y + 12,
+        "Theme",
+        2,
+        accent,
+        panel_bg,
+    );
+
+    let mut y = panel_y + 42;
+    for theme in 0..DASHBOARD_THEME_COUNT {
+        let selected = theme == menu.selected_theme % DASHBOARD_THEME_COUNT;
+        let active = theme == menu.active_theme % DASHBOARD_THEME_COUNT;
+        let bg = if selected { 0xFF_22_2D_44 } else { row_bg };
+        let border = if selected { accent } else { accent_2 };
+        draw_panel(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x + 16,
+            y,
+            panel_w.saturating_sub(32),
+            22,
+            bg,
+            border,
+            border,
+        );
+
+        let number = theme + 1;
+        let label = format!("{number}. {}", dashboard_theme_label(theme));
+        draw_text(buf, buf_w, buf_h, panel_x + 26, y + 7, &label, 1, ink, bg);
+
+        let status = if theme == 3 && !menu.has_wallpaper {
+            "Needs W"
+        } else if active {
+            "Active"
+        } else {
+            ""
+        };
+        if !status.is_empty() {
+            let status_color = if theme == 3 && !menu.has_wallpaper {
+                danger
+            } else {
+                accent_2
+            };
+            let status_x = panel_x + panel_w.saturating_sub(26 + text_width(status, 1));
+            draw_text(
+                buf,
+                buf_w,
+                buf_h,
+                status_x,
+                y + 7,
+                status,
+                1,
+                status_color,
+                bg,
+            );
+        }
+        y += 26;
+    }
+
+    let help = "1-4 select   Enter applies   W wallpaper   Esc cancels";
+    draw_text_centered(
+        buf,
+        buf_w,
+        buf_h,
+        panel_x + panel_w / 2,
+        panel_y + panel_h.saturating_sub(18),
+        help,
+        1,
+        muted,
+        panel_bg,
     );
 }
