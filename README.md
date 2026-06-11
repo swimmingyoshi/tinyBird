@@ -10,7 +10,7 @@ A Game Boy Advance emulator written in Rust.
 - PPU rendering with backgrounds, sprites, affine transforms, windows, and effects
 - Audio output via CPAL
 - Controller support via gilrs
-- Battery saves plus quicksave/quickload
+- Battery saves plus multiple save-state slots with overwrite confirmation
 - Desktop frontend with home screen, pause menu, speed controls, color-correction toggle, and game-specific addon exports
 
 ## Requirements
@@ -49,17 +49,34 @@ Startup behavior:
 - `Tab`: hold for temporary 4x fast-forward
 - `1` / `2` / `4`: 1x / 2x / 4x speed (`3` still works as a legacy alias for 4x)
   Fast-forward keeps frame pacing stable and mutes output audio intentionally.
-- `F1`: toggle emulator HUD
-- `F2`: toggle addon team panel
-- `F4`: toggle addon encounter panel
-- `F6`: open/close addon popout window
-- `F5` / `F8`: quicksave / quickload
 - `M`: mute
 - `[` or `-`: volume down
 - `]` or `=`: volume up
 - `C`: toggle color correction
 - `R`: reset
 - `O`: open ROM picker
+
+### Function Keys
+
+- `F1`: toggle emulator HUD
+- `F2`: show the team panel
+- `F3`: hide addon UI
+- `F4`: show the encounters panel
+- `F5`: open the save-state slot menu
+- `F6`: expand or dock the addon dashboard
+- `F7`: cycle game/dashboard space: Compact, Balanced, Game Focus
+- `F8`: open the load-state slot menu
+- `F9`: toggle borderless fullscreen
+- `F10`: cycle side panel width: Slim, Normal, Wide
+- `F11`: cycle dashboard placement: Classic, Left Info, Split Sidebars
+- `F12`: open the dashboard theme menu
+
+Save/load menus use arrow keys or `1`-`5` to choose a slot, `Enter` to confirm, and `Esc` to cancel. Saving over an existing slot asks for confirmation in the menu before overwriting.
+The theme menu uses arrow keys or `1`-`4` to choose a theme, `Enter` to apply, `W` to pick a wallpaper, and `Esc` to cancel.
+
+### Dashboard
+
+- `W`: choose a dashboard wallpaper image (`.png`, `.jpg`, `.jpeg`)
 
 ## Examples
 
@@ -77,8 +94,9 @@ The desktop frontend now writes a structured snapshot to `stream-data/current-ga
 - Unsupported games export ROM metadata only.
 - Fire Red exports a live party snapshot that can be consumed by overlays, bots, or a future web battle client.
 - Fire Red can also export current-area encounter data for early routes/caves, including slot rates and catch rates.
-- Supported games can render addon data in dedicated in-game panels with `F2` and `F4`, or in a detached popout window with `F6`.
+- Supported games can render addon data in dedicated in-game panels with `F2` and `F4`, or in the integrated dashboard with `F6`.
 - The first time a species appears, the desktop frontend downloads and caches its PNG artwork in `stream-data/pokemon-sprites/` for later offline reuse.
+- The dashboard auto-loads a custom wallpaper from `TINYBIRD_WALLPAPER`, `stream-data/wallpaper.png`, `stream-data/wallpaper.jpg`, `stream-data/background.png`, or `wallpaper.png` when present.
 
 ## Web Overlay
 

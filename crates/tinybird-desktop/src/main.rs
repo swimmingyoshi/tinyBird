@@ -21,8 +21,9 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window};
 
+use tinybird_core::ppu::render::Pixel;
 use tinybird_core::{Color, Framebuffer, Gba, GbaButton, GbaState, CLOCK_SPEED, CYCLES_PER_FRAME};
 
 const SCREEN_WIDTH: u32 = 240;
@@ -36,6 +37,8 @@ const FRAME_CATCHUP_LIMIT: u32 = 3;
 const AUDIO_BACKPRESSURE_MILLIS: u32 = 94;
 const ADDON_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const RGB555_COLOR_COUNT: usize = 1 << 15;
+const SAVE_STATE_SLOT_COUNT: u8 = 5;
+const WALLPAPER_MAX_DIMENSION: u32 = 1920;
 
 fn frame_duration_for_speed(speed_multiplier: u32) -> Duration {
     let speed = speed_multiplier.max(1) as u128;
@@ -101,10 +104,16 @@ fn default_bios_path() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-enum QuicksaveLoadResult {
+enum SaveStateLoadResult {
     Loaded,
     Missing,
     Failed,
+}
+
+struct SaveStateMenuState {
+    mode: overlay::SaveStateMenuMode,
+    selected_slot: u8,
+    confirm_overwrite: bool,
 }
 
 struct StatusMessage {
@@ -113,19 +122,11 @@ struct StatusMessage {
     expires_at: Instant,
 }
 
-struct AddonPopout {
-    view_mode: overlay::AddonViewMode,
-    window: Arc<Window>,
-    surface: Surface<Arc<Window>, Arc<Window>>,
-    surface_size: (u32, u32),
-}
-
 struct App {
     window: Option<Arc<Window>>,
     surface: Option<Surface<Arc<Window>, Arc<Window>>>,
     surface_size: (u32, u32),
-    addon_popouts: Vec<AddonPopout>,
-    gba: Gba,
+    gba: Box<Gba>,
     speed_multiplier: u32,
     next_frame_deadline: Instant,
     audio_handler: Option<audio::AudioHandler>,
@@ -148,13 +149,23 @@ struct App {
     current_fps: f64,
     show_overlay: bool,
     show_addon_panel: bool,
+    addon_panel_expanded: bool,
+    game_preview_size: u8,
+    side_panel_size: u8,
+    dashboard_layout: u8,
+    dashboard_theme: u8,
+    dashboard_wallpaper: Option<overlay::DashboardWallpaper>,
     addon_view_mode: overlay::AddonViewMode,
     muted: bool,
     volume: f32,
     color_correction: bool,
     cart_save_dirty: bool,
     last_save_flush: Instant,
-    quicksave_slot: Option<Gba>,
+    save_state_slot: u8,
+    loaded_save_state_slot: Option<Box<Gba>>,
+    save_state_menu: Option<SaveStateMenuState>,
+    theme_menu_selected: Option<u8>,
+    fullscreen: bool,
     hovered_file: Option<PathBuf>,
     status_message: Option<StatusMessage>,
     addon_snapshot: game_addons::StreamSnapshot,
@@ -165,53 +176,38 @@ struct App {
 
 impl App {
     fn new(rom: Option<(PathBuf, Vec<u8>)>, bios: Option<Vec<u8>>) -> Self {
-        let mut gba = Gba::new();
+        let mut gba = Box::new(Gba::new());
         if let Some(bios_data) = bios {
             gba.load_bios(bios_data);
         }
-        let (rom_loaded, rom_path, rom_title, save_path, state_path, quicksave_slot) =
+        let (rom_loaded, rom_path, rom_title, save_path, state_path) =
             if let Some((path, rom_data)) = rom {
                 gba.load_rom(rom_data);
                 let title = Self::rom_title_from_path(&path);
                 let save_path = Some(Self::save_path_for_rom(&path));
-                let state_path = Some(Self::state_path_for_rom(&path));
+                let state_path = Some(Self::state_path_for_rom_slot(&path, 1));
                 if let Some(save_path) = &save_path {
                     if let Ok(save_data) = fs::read(save_path) {
                         gba.load_save_data(&save_data);
                     }
                 }
-                let quicksave_slot = state_path
-                    .as_ref()
-                    .and_then(|path| fs::read(path).ok())
-                    .and_then(|bytes| {
-                        let mut state = gba.clone();
-                        state.load_state_bytes(&bytes).ok()?;
-                        Some(state)
-                    });
-                (
-                    true,
-                    Some(path),
-                    Some(title),
-                    save_path,
-                    state_path,
-                    quicksave_slot,
-                )
+                (true, Some(path), Some(title), save_path, state_path)
             } else {
-                (false, None, None, None, None, None)
+                (false, None, None, None, None)
             };
         let addon_snapshot = if rom_loaded {
-            game_addons::capture_stream_snapshot(Some(&gba))
+            game_addons::capture_stream_snapshot(Some(gba.as_ref()))
         } else {
             game_addons::capture_stream_snapshot(None)
         };
         let mut pokemon_sprites = pokemon_assets::PokemonSpriteStore::new();
         pokemon_sprites.queue_snapshot(&addon_snapshot);
+        let dashboard_wallpaper = Self::load_default_dashboard_wallpaper();
 
         Self {
             window: None,
             surface: None,
             surface_size: (0, 0),
-            addon_popouts: Vec::new(),
             gba,
             speed_multiplier: 1,
             next_frame_deadline: Instant::now() + frame_duration_for_speed(1),
@@ -235,13 +231,23 @@ impl App {
             current_fps: 0.0,
             show_overlay: false,
             show_addon_panel: false,
+            addon_panel_expanded: false,
+            game_preview_size: 1,
+            side_panel_size: 1,
+            dashboard_layout: 0,
+            dashboard_theme: dashboard_wallpaper.as_ref().map_or(0, |_| 3),
+            dashboard_wallpaper,
             addon_view_mode: overlay::AddonViewMode::Team,
             muted: false,
             volume: 1.0,
             color_correction: false,
             cart_save_dirty: false,
             last_save_flush: Instant::now(),
-            quicksave_slot,
+            save_state_slot: 1,
+            loaded_save_state_slot: None,
+            save_state_menu: None,
+            theme_menu_selected: None,
+            fullscreen: false,
             hovered_file: None,
             status_message: None,
             addon_snapshot,
@@ -251,24 +257,9 @@ impl App {
         }
     }
 
-    fn addon_popout_index(&self, view_mode: overlay::AddonViewMode) -> Option<usize> {
-        self.addon_popouts
-            .iter()
-            .position(|popout| popout.view_mode == view_mode)
-    }
-
-    fn addon_popout_window_index(&self, window_id: WindowId) -> Option<usize> {
-        self.addon_popouts
-            .iter()
-            .position(|popout| popout.window.id() == window_id)
-    }
-
     fn request_redraw(&self) {
         if let Some(window) = &self.window {
             window.request_redraw();
-        }
-        for popout in &self.addon_popouts {
-            popout.window.request_redraw();
         }
     }
 
@@ -289,23 +280,6 @@ impl App {
         if let Some(window) = &self.window {
             window.set_title(&title);
         }
-        self.refresh_addon_window_titles();
-    }
-
-    fn addon_window_title(&self, view_mode: overlay::AddonViewMode) -> String {
-        let label = view_mode.label();
-        match self.rom_title.as_ref() {
-            Some(name) => format!("tinyBird - {label} | {name}"),
-            None => format!("tinyBird - {label}"),
-        }
-    }
-
-    fn refresh_addon_window_titles(&self) {
-        for popout in &self.addon_popouts {
-            popout
-                .window
-                .set_title(&self.addon_window_title(popout.view_mode));
-        }
     }
 
     fn set_status(&mut self, text: impl Into<String>, tone: overlay::ToastTone) {
@@ -322,15 +296,320 @@ impl App {
         self.request_redraw();
     }
 
-    fn show_addon_view(&mut self, view_mode: overlay::AddonViewMode) {
+    fn show_docked_addon_view(&mut self, view_mode: overlay::AddonViewMode) {
         self.addon_view_mode = view_mode;
         self.show_addon_panel = true;
-        self.refresh_addon_window_titles();
+        self.addon_panel_expanded = false;
         self.request_redraw();
         self.set_status(
-            format!("{} panel shown", view_mode.label()),
+            format!("{} panel docked", view_mode.label()),
             overlay::ToastTone::Info,
         );
+    }
+
+    fn hide_addon_ui(&mut self) {
+        if !self.show_addon_panel {
+            return;
+        }
+        self.show_addon_panel = false;
+        self.addon_panel_expanded = false;
+        self.request_redraw();
+        self.set_status("Addon UI hidden", overlay::ToastTone::Info);
+    }
+
+    fn toggle_addon_dashboard(&mut self) {
+        if !self.show_addon_panel {
+            self.show_addon_panel = true;
+            self.addon_panel_expanded = true;
+            self.set_status(
+                format!("{} dashboard shown", self.addon_view_mode.label()),
+                overlay::ToastTone::Info,
+            );
+        } else {
+            self.addon_panel_expanded = !self.addon_panel_expanded;
+            self.set_status(
+                if self.addon_panel_expanded {
+                    format!("{} dashboard expanded", self.addon_view_mode.label())
+                } else {
+                    format!("{} panel docked", self.addon_view_mode.label())
+                },
+                overlay::ToastTone::Info,
+            );
+        }
+        self.request_redraw();
+    }
+
+    fn cycle_game_preview_size(&mut self) {
+        self.game_preview_size = (self.game_preview_size + 1) % overlay::GAME_PREVIEW_SIZE_COUNT;
+        self.request_redraw();
+        self.set_status(
+            format!(
+                "Dashboard layout: {}",
+                overlay::game_preview_size_label(self.game_preview_size)
+            ),
+            overlay::ToastTone::Info,
+        );
+    }
+
+    fn cycle_side_panel_size(&mut self) {
+        self.side_panel_size = match self.side_panel_size % overlay::SIDE_PANEL_SIZE_COUNT {
+            1 => 0,
+            0 => 2,
+            _ => 1,
+        };
+        self.request_redraw();
+        self.set_status(
+            format!(
+                "Side panel: {}",
+                overlay::side_panel_size_label(self.side_panel_size)
+            ),
+            overlay::ToastTone::Info,
+        );
+    }
+
+    fn cycle_dashboard_layout(&mut self) {
+        self.dashboard_layout = (self.dashboard_layout + 1) % overlay::DASHBOARD_LAYOUT_COUNT;
+        self.request_redraw();
+        self.set_status(
+            format!(
+                "Dashboard layout: {}",
+                overlay::dashboard_layout_label(self.dashboard_layout)
+            ),
+            overlay::ToastTone::Info,
+        );
+    }
+
+    fn open_theme_menu(&mut self) {
+        self.keyboard_buttons = GbaButton::empty();
+        self.save_state_menu = None;
+        self.theme_menu_selected = Some(self.dashboard_theme % overlay::DASHBOARD_THEME_COUNT);
+        self.sync_input_state();
+        self.request_redraw();
+        self.set_status("Theme menu", overlay::ToastTone::Info);
+    }
+
+    fn active_theme_menu_overlay(&self) -> Option<overlay::ThemeMenu> {
+        self.theme_menu_selected
+            .map(|selected_theme| overlay::ThemeMenu {
+                selected_theme,
+                active_theme: self.dashboard_theme,
+                has_wallpaper: self.dashboard_wallpaper.is_some(),
+            })
+    }
+
+    fn handle_theme_menu_key(&mut self, logical_key: &Key) -> bool {
+        let Some(selected_theme) = self.theme_menu_selected.as_mut() else {
+            return false;
+        };
+
+        match logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.theme_menu_selected = None;
+                self.sync_input_state();
+                self.request_redraw();
+                true
+            }
+            Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowLeft) => {
+                *selected_theme = if *selected_theme == 0 {
+                    overlay::DASHBOARD_THEME_COUNT - 1
+                } else {
+                    *selected_theme - 1
+                };
+                self.request_redraw();
+                true
+            }
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowRight) => {
+                *selected_theme = (*selected_theme + 1) % overlay::DASHBOARD_THEME_COUNT;
+                self.request_redraw();
+                true
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.apply_selected_theme();
+                true
+            }
+            Key::Character(c) if c.as_str() == "w" || c.as_str() == "W" => {
+                self.choose_dashboard_wallpaper();
+                self.theme_menu_selected = Some(3);
+                self.sync_input_state();
+                true
+            }
+            Key::Character(c) => {
+                let Some(theme) = c.as_str().chars().next().and_then(|ch| ch.to_digit(10)) else {
+                    return true;
+                };
+                if !(1..=overlay::DASHBOARD_THEME_COUNT as u32).contains(&theme) {
+                    return true;
+                }
+                self.theme_menu_selected = Some((theme - 1) as u8);
+                self.apply_selected_theme();
+                true
+            }
+            _ => true,
+        }
+    }
+
+    fn apply_selected_theme(&mut self) {
+        let Some(theme) = self.theme_menu_selected else {
+            return;
+        };
+
+        if theme == 3 && self.dashboard_wallpaper.is_none() {
+            self.set_status(
+                "Choose a wallpaper with W before applying Wallpaper",
+                overlay::ToastTone::Warning,
+            );
+            self.request_redraw();
+            return;
+        }
+
+        self.dashboard_theme = theme % overlay::DASHBOARD_THEME_COUNT;
+        self.theme_menu_selected = None;
+        self.sync_input_state();
+        self.request_redraw();
+        self.set_status(
+            format!(
+                "Theme: {}",
+                overlay::dashboard_theme_label(self.dashboard_theme)
+            ),
+            overlay::ToastTone::Info,
+        );
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        self.fullscreen = !self.fullscreen;
+        if let Some(window) = &self.window {
+            if self.fullscreen {
+                window.set_fullscreen(Some(Fullscreen::Borderless(window.current_monitor())));
+            } else {
+                window.set_fullscreen(None);
+            }
+        }
+        self.request_redraw();
+        self.set_status(
+            if self.fullscreen {
+                "Fullscreen on"
+            } else {
+                "Fullscreen off"
+            },
+            overlay::ToastTone::Info,
+        );
+    }
+
+    fn choose_dashboard_wallpaper(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg"])
+            .pick_file()
+        else {
+            return;
+        };
+        self.load_dashboard_wallpaper_from_path(path);
+    }
+
+    fn load_dashboard_wallpaper_from_path(&mut self, path: PathBuf) {
+        match Self::decode_dashboard_wallpaper(&path) {
+            Ok(wallpaper) => {
+                self.dashboard_wallpaper = Some(wallpaper);
+                self.dashboard_theme = 3;
+                self.request_redraw();
+                let label = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| Self::short_label(name, 24))
+                    .unwrap_or_else(|| "wallpaper".to_string());
+                self.set_status(
+                    format!("Wallpaper loaded: {label}"),
+                    overlay::ToastTone::Success,
+                );
+            }
+            Err(err) => {
+                eprintln!("Failed to load wallpaper '{}': {err}", path.display());
+                self.set_status("Could not load wallpaper", overlay::ToastTone::Warning);
+            }
+        }
+    }
+
+    fn load_default_dashboard_wallpaper() -> Option<overlay::DashboardWallpaper> {
+        let env_path = env::var_os("TINYBIRD_WALLPAPER").map(PathBuf::from);
+        let candidates = env_path.into_iter().chain(
+            [
+                "stream-data/wallpaper.png",
+                "stream-data/wallpaper.jpg",
+                "stream-data/background.png",
+                "wallpaper.png",
+            ]
+            .into_iter()
+            .map(PathBuf::from),
+        );
+
+        for path in candidates {
+            if path.is_file() {
+                match Self::decode_dashboard_wallpaper(&path) {
+                    Ok(wallpaper) => return Some(wallpaper),
+                    Err(err) => eprintln!("Failed to load wallpaper '{}': {err}", path.display()),
+                }
+            }
+        }
+        None
+    }
+
+    fn decode_dashboard_wallpaper(
+        path: &Path,
+    ) -> Result<overlay::DashboardWallpaper, image::ImageError> {
+        let image = image::open(path)?.into_rgba8();
+        let image =
+            image::imageops::thumbnail(&image, WALLPAPER_MAX_DIMENSION, WALLPAPER_MAX_DIMENSION);
+        let width = image.width() as usize;
+        let height = image.height() as usize;
+        let pixels = image
+            .pixels()
+            .map(|pixel| {
+                let [r, g, b, a] = pixel.0;
+                if a == 0xFF {
+                    0xFF_00_00_00 | ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+                } else {
+                    let inv = 255 - a as u32;
+                    let r = (r as u32 * a as u32 + 10 * inv) / 255;
+                    let g = (g as u32 * a as u32 + 15 * inv) / 255;
+                    let b = (b as u32 * a as u32 + 25 * inv) / 255;
+                    0xFF_00_00_00 | (r << 16) | (g << 8) | b
+                }
+            })
+            .collect();
+        Ok(overlay::DashboardWallpaper {
+            width,
+            height,
+            pixels,
+        })
+    }
+
+    fn open_save_state_menu(&mut self, mode: overlay::SaveStateMenuMode) {
+        self.keyboard_buttons = GbaButton::empty();
+        self.theme_menu_selected = None;
+        self.save_state_menu = Some(SaveStateMenuState {
+            mode,
+            selected_slot: self.save_state_slot,
+            confirm_overwrite: false,
+        });
+        self.sync_input_state();
+        self.request_redraw();
+        let label = match mode {
+            overlay::SaveStateMenuMode::Save => "Save slot menu",
+            overlay::SaveStateMenuMode::Load => "Load slot menu",
+        };
+        self.set_status(label, overlay::ToastTone::Info);
+    }
+
+    fn save_state_slot_exists(&self, slot: u8) -> bool {
+        self.state_path_for_slot(slot)
+            .is_some_and(|path| path.is_file())
+    }
+
+    fn save_state_slot_statuses(&self) -> [bool; SAVE_STATE_SLOT_COUNT as usize] {
+        let mut slots = [false; SAVE_STATE_SLOT_COUNT as usize];
+        for slot in 1..=SAVE_STATE_SLOT_COUNT {
+            slots[(slot - 1) as usize] = self.save_state_slot_exists(slot);
+        }
+        slots
     }
 
     fn active_toast(&mut self) -> Option<(String, overlay::ToastTone)> {
@@ -345,6 +624,129 @@ impl App {
         self.status_message
             .as_ref()
             .map(|status| (status.text.clone(), status.tone))
+    }
+
+    fn active_save_state_menu_overlay(&self) -> Option<overlay::SaveStateMenu> {
+        self.save_state_menu
+            .as_ref()
+            .map(|menu| overlay::SaveStateMenu {
+                mode: menu.mode,
+                selected_slot: menu.selected_slot,
+                slot_exists: self.save_state_slot_statuses(),
+                confirm_overwrite: menu.confirm_overwrite,
+            })
+    }
+
+    fn handle_save_state_menu_key(&mut self, logical_key: &Key) -> bool {
+        let Some(menu) = self.save_state_menu.as_mut() else {
+            return false;
+        };
+
+        match logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.save_state_menu = None;
+                self.sync_input_state();
+                self.request_redraw();
+                true
+            }
+            Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowLeft) => {
+                menu.selected_slot = if menu.selected_slot <= 1 {
+                    SAVE_STATE_SLOT_COUNT
+                } else {
+                    menu.selected_slot - 1
+                };
+                menu.confirm_overwrite = false;
+                self.request_redraw();
+                true
+            }
+            Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowRight) => {
+                menu.selected_slot = if menu.selected_slot >= SAVE_STATE_SLOT_COUNT {
+                    1
+                } else {
+                    menu.selected_slot + 1
+                };
+                menu.confirm_overwrite = false;
+                self.request_redraw();
+                true
+            }
+            Key::Named(NamedKey::Enter) => {
+                self.activate_save_state_menu_slot();
+                true
+            }
+            Key::Character(c) => {
+                let Some(slot) = c.as_str().chars().next().and_then(|ch| ch.to_digit(10)) else {
+                    return true;
+                };
+                if !(1..=SAVE_STATE_SLOT_COUNT as u32).contains(&slot) {
+                    return true;
+                }
+                let slot = slot as u8;
+                if let Some(menu) = self.save_state_menu.as_mut() {
+                    menu.selected_slot = slot;
+                    menu.confirm_overwrite = false;
+                }
+                self.activate_save_state_menu_slot();
+                true
+            }
+            _ => true,
+        }
+    }
+
+    fn activate_save_state_menu_slot(&mut self) {
+        let Some(menu) = self.save_state_menu.as_ref() else {
+            return;
+        };
+        let slot = menu.selected_slot;
+        let mode = menu.mode;
+        let confirm_overwrite = menu.confirm_overwrite;
+        match mode {
+            overlay::SaveStateMenuMode::Save => {
+                if self.save_state_slot_exists(slot) && !confirm_overwrite {
+                    if let Some(menu) = self.save_state_menu.as_mut() {
+                        menu.confirm_overwrite = true;
+                    }
+                    self.request_redraw();
+                    self.set_status(
+                        format!("Slot {slot} exists - press Enter to overwrite"),
+                        overlay::ToastTone::Warning,
+                    );
+                    return;
+                }
+                self.save_state_menu = None;
+                self.write_save_state_slot(slot);
+                self.sync_input_state();
+            }
+            overlay::SaveStateMenuMode::Load => {
+                if !self.save_state_slot_exists(slot) {
+                    self.set_status(
+                        format!("No save state in slot {slot}"),
+                        overlay::ToastTone::Warning,
+                    );
+                    self.request_redraw();
+                    return;
+                }
+                self.save_state_menu = None;
+                self.sync_input_state();
+                if matches!(
+                    self.try_load_save_state_slot(slot),
+                    SaveStateLoadResult::Failed
+                ) {
+                    return;
+                }
+                if let Some(state) = &self.loaded_save_state_slot {
+                    self.gba = state.clone();
+                    self.cart_save_dirty = true;
+                    self.sync_input_state();
+                    self.clear_audio_output();
+                    self.reset_timing_state();
+                    self.update_audio_emulation_state();
+                    self.refresh_window_title();
+                    self.refresh_game_addon_state(true);
+                    println!("Save state slot {} loaded", self.save_state_slot);
+                    self.set_status(format!("Loaded slot {slot}"), overlay::ToastTone::Success);
+                }
+            }
+        }
     }
 
     fn short_label(text: &str, max_chars: usize) -> String {
@@ -398,7 +800,7 @@ impl App {
         }
 
         let snapshot = if self.rom_loaded {
-            game_addons::capture_stream_snapshot(Some(&self.gba))
+            game_addons::capture_stream_snapshot(Some(self.gba.as_ref()))
         } else {
             game_addons::capture_stream_snapshot(None)
         };
@@ -406,7 +808,6 @@ impl App {
 
         if self.addon_snapshot != snapshot {
             self.addon_snapshot = snapshot;
-            self.refresh_addon_window_titles();
             self.request_redraw();
         }
 
@@ -424,23 +825,43 @@ impl App {
         path.with_extension("sav")
     }
 
-    fn state_path_for_rom(path: &Path) -> PathBuf {
-        path.with_extension("state")
+    fn state_path_for_rom_slot(path: &Path, slot: u8) -> PathBuf {
+        if slot <= 1 {
+            return path.with_extension("state");
+        }
+
+        let file_stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("savestate");
+        path.with_file_name(format!("{file_stem}.slot{slot}.state"))
     }
 
-    fn write_quicksave_file(&mut self) {
-        let Some(state_path) = &self.state_path else {
+    fn state_path_for_slot(&self, slot: u8) -> Option<PathBuf> {
+        self.rom_path
+            .as_deref()
+            .map(|path| Self::state_path_for_rom_slot(path, slot))
+    }
+
+    fn write_save_state_slot(&mut self, slot: u8) {
+        let Some(state_path) = self.state_path_for_slot(slot) else {
             eprintln!("No ROM loaded for savestate");
             self.set_status("No ROM loaded for save state", overlay::ToastTone::Warning);
             return;
         };
+        self.state_path = Some(state_path.clone());
+        self.save_state_slot = slot;
 
         match self.gba.save_state_bytes() {
-            Ok(bytes) => match fs::write(state_path, bytes) {
+            Ok(bytes) => match fs::write(&state_path, bytes) {
                 Ok(()) => {
-                    self.quicksave_slot = Some(self.gba.clone());
-                    println!("Quicksave written to {}", state_path.display());
-                    self.set_status("Quicksave written", overlay::ToastTone::Success);
+                    self.loaded_save_state_slot = Some(self.gba.clone());
+                    println!(
+                        "Save state slot {} written to {}",
+                        slot,
+                        state_path.display()
+                    );
+                    self.set_status(format!("Saved slot {slot}"), overlay::ToastTone::Success);
                 }
                 Err(err) => {
                     eprintln!(
@@ -448,23 +869,31 @@ impl App {
                         state_path.display(),
                         err
                     );
-                    self.set_status("Failed to write quicksave", overlay::ToastTone::Warning);
+                    self.set_status(
+                        format!("Failed to write slot {slot}"),
+                        overlay::ToastTone::Warning,
+                    );
                 }
             },
             Err(err) => {
                 eprintln!("Failed to serialize savestate: {}", err);
-                self.set_status("Failed to serialize quicksave", overlay::ToastTone::Warning);
+                self.set_status(
+                    format!("Failed to serialize slot {slot}"),
+                    overlay::ToastTone::Warning,
+                );
             }
         }
     }
 
-    fn try_load_quicksave_file(&mut self) -> QuicksaveLoadResult {
-        let Some(state_path) = &self.state_path else {
-            return QuicksaveLoadResult::Missing;
+    fn try_load_save_state_slot(&mut self, slot: u8) -> SaveStateLoadResult {
+        let Some(state_path) = self.state_path_for_slot(slot) else {
+            return SaveStateLoadResult::Missing;
         };
+        self.state_path = Some(state_path.clone());
+        self.save_state_slot = slot;
 
-        let Ok(bytes) = fs::read(state_path) else {
-            return QuicksaveLoadResult::Missing;
+        let Ok(bytes) = fs::read(&state_path) else {
+            return SaveStateLoadResult::Missing;
         };
 
         let mut state = self.gba.clone();
@@ -475,11 +904,11 @@ impl App {
                 err
             );
             self.set_status("Savestate could not be loaded", overlay::ToastTone::Warning);
-            return QuicksaveLoadResult::Failed;
+            return SaveStateLoadResult::Failed;
         }
 
-        self.quicksave_slot = Some(state);
-        QuicksaveLoadResult::Loaded
+        self.loaded_save_state_slot = Some(state);
+        SaveStateLoadResult::Loaded
     }
 
     fn maybe_mark_cart_save_dirty(&mut self) {
@@ -532,7 +961,7 @@ impl App {
         println!("Loading ROM: {}", path.display());
         let name = Self::rom_title_from_path(&path);
         let save_path = Self::save_path_for_rom(&path);
-        let state_path = Self::state_path_for_rom(&path);
+        let state_path = Self::state_path_for_rom_slot(&path, 1);
         let save_data = fs::read(&save_path).ok();
         let loaded_save = save_data.is_some();
 
@@ -545,6 +974,7 @@ impl App {
         self.rom_path = Some(path);
         self.save_path = Some(save_path);
         self.state_path = Some(state_path.clone());
+        self.save_state_slot = 1;
         self.rom_title = Some(name.clone());
         self.fps_frame_count = 0;
         self.fps_timer = Instant::now();
@@ -552,11 +982,7 @@ impl App {
         self.keyboard_buttons = GbaButton::empty();
         self.gamepad_buttons = GbaButton::empty();
         self.gamepad_axis_buttons = GbaButton::empty();
-        self.quicksave_slot = fs::read(&state_path).ok().and_then(|bytes| {
-            let mut state = self.gba.clone();
-            state.load_state_bytes(&bytes).ok()?;
-            Some(state)
-        });
+        self.loaded_save_state_slot = None;
         self.cart_save_dirty = false;
         self.last_save_flush = Instant::now();
         self.hovered_file = None;
@@ -677,6 +1103,8 @@ impl App {
         }
 
         let toast = self.active_toast();
+        let save_state_menu = self.active_save_state_menu_overlay();
+        let theme_menu = self.active_theme_menu_overlay();
         let hovered_file = self.hovered_file.as_ref().and_then(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
@@ -704,9 +1132,10 @@ impl App {
                 None,
                 Some(home),
                 None,
+                None,
+                None,
                 toast,
             );
-            self.present_addon_popouts();
             return;
         }
 
@@ -715,6 +1144,12 @@ impl App {
             &self.addon_snapshot,
             &self.pokemon_sprites,
             self.addon_view_mode,
+            self.addon_panel_expanded,
+            self.game_preview_size,
+            self.side_panel_size,
+            self.dashboard_layout,
+            self.dashboard_theme,
+            self.dashboard_wallpaper.as_ref(),
         ));
         let Some(surface) = &mut self.surface else {
             return;
@@ -751,9 +1186,10 @@ impl App {
             addon_panel,
             None,
             pause_screen,
+            save_state_menu,
+            theme_menu,
             toast,
         );
-        self.present_addon_popouts();
     }
 
     fn render_frame(&mut self, base_frames: u32) {
@@ -771,9 +1207,17 @@ impl App {
             &game_addons::StreamSnapshot,
             &pokemon_assets::PokemonSpriteStore,
             overlay::AddonViewMode,
+            bool,
+            u8,
+            u8,
+            u8,
+            u8,
+            Option<&overlay::DashboardWallpaper>,
         )>,
         home_screen: Option<overlay::HomeScreen<'_>>,
         pause_screen: Option<overlay::PauseScreen<'_>>,
+        save_state_menu: Option<overlay::SaveStateMenu>,
+        theme_menu: Option<overlay::ThemeMenu>,
         toast: Option<overlay::Toast<'_>>,
     ) {
         if surface_size.0 == 0 || surface_size.1 == 0 {
@@ -784,8 +1228,8 @@ impl App {
             return;
         };
 
-        let win_w = surface_size.0 as usize;
-        let win_h = surface_size.1 as usize;
+        let win_w = buffer.width().get() as usize;
+        let win_h = buffer.height().get() as usize;
 
         let Some(framebuffer) = framebuffer else {
             if let Some(home) = home_screen {
@@ -796,6 +1240,7 @@ impl App {
             if let Some(toast) = toast {
                 overlay::draw_toast(&mut buffer, win_w, win_h, toast);
             }
+            Self::normalize_softbuffer_pixels(&mut buffer);
             let _ = buffer.present();
             return;
         };
@@ -861,24 +1306,59 @@ impl App {
                         fast_forward,
                     );
                 }
-                if let Some((snapshot, sprites, view_mode)) = addon_panel {
+                if let Some((
+                    snapshot,
+                    sprites,
+                    view_mode,
+                    expanded,
+                    preview_size,
+                    side_panel_size,
+                    dashboard_layout,
+                    dashboard_theme,
+                    dashboard_wallpaper,
+                )) = addon_panel
+                {
                     overlay::draw_addon_panel(
                         &mut buffer,
                         win_w,
                         win_h,
                         snapshot,
                         sprites,
-                        false,
+                        expanded,
                         view_mode,
+                        preview_size,
+                        side_panel_size,
+                        dashboard_layout,
+                        dashboard_theme,
+                        dashboard_wallpaper,
                     );
+                    if expanded {
+                        Self::draw_game_preview(
+                            &mut buffer,
+                            win_w,
+                            win_h,
+                            pixels,
+                            color_lookup,
+                            preview_size,
+                            side_panel_size,
+                            dashboard_layout,
+                        );
+                    }
                 }
                 if let Some(paused) = pause_screen {
                     overlay::dim_screen(&mut buffer);
                     overlay::draw_pause_screen(&mut buffer, win_w, win_h, paused);
                 }
+                if let Some(menu) = save_state_menu {
+                    overlay::draw_save_state_menu(&mut buffer, win_w, win_h, menu);
+                }
+                if let Some(menu) = theme_menu {
+                    overlay::draw_theme_menu(&mut buffer, win_w, win_h, menu);
+                }
                 if let Some(toast) = toast {
                     overlay::draw_toast(&mut buffer, win_w, win_h, toast);
                 }
+                Self::normalize_softbuffer_pixels(&mut buffer);
                 let _ = buffer.present();
                 return;
             }
@@ -908,69 +1388,166 @@ impl App {
                 fast_forward,
             );
         }
-        if let Some((snapshot, sprites, view_mode)) = addon_panel {
+        if let Some((
+            snapshot,
+            sprites,
+            view_mode,
+            expanded,
+            preview_size,
+            side_panel_size,
+            dashboard_layout,
+            dashboard_theme,
+            dashboard_wallpaper,
+        )) = addon_panel
+        {
             overlay::draw_addon_panel(
                 &mut buffer,
                 win_w,
                 win_h,
                 snapshot,
                 sprites,
-                false,
+                expanded,
                 view_mode,
+                preview_size,
+                side_panel_size,
+                dashboard_layout,
+                dashboard_theme,
+                dashboard_wallpaper,
             );
+            if expanded {
+                Self::draw_game_preview(
+                    &mut buffer,
+                    win_w,
+                    win_h,
+                    pixels,
+                    color_lookup,
+                    preview_size,
+                    side_panel_size,
+                    dashboard_layout,
+                );
+            }
         }
         if let Some(paused) = pause_screen {
             overlay::dim_screen(&mut buffer);
             overlay::draw_pause_screen(&mut buffer, win_w, win_h, paused);
         }
+        if let Some(menu) = save_state_menu {
+            overlay::draw_save_state_menu(&mut buffer, win_w, win_h, menu);
+        }
+        if let Some(menu) = theme_menu {
+            overlay::draw_theme_menu(&mut buffer, win_w, win_h, menu);
+        }
         if let Some(toast) = toast {
             overlay::draw_toast(&mut buffer, win_w, win_h, toast);
         }
+        Self::normalize_softbuffer_pixels(&mut buffer);
         let _ = buffer.present();
     }
 
-    fn present_addon_popouts(&mut self) {
-        let view_modes = self
-            .addon_popouts
-            .iter()
-            .map(|popout| popout.view_mode)
-            .collect::<Vec<_>>();
-        for view_mode in view_modes {
-            self.present_addon_popout(view_mode);
+    fn normalize_softbuffer_pixels(buffer: &mut [u32]) {
+        for pixel in buffer.iter_mut() {
+            *pixel &= 0x00FF_FFFF;
         }
     }
 
-    fn present_addon_popout(&mut self, view_mode: overlay::AddonViewMode) {
-        let Some(index) = self.addon_popout_index(view_mode) else {
+    fn draw_game_preview(
+        buffer: &mut [u32],
+        win_w: usize,
+        win_h: usize,
+        pixels: &[Pixel],
+        color_lookup: &[u32; RGB555_COLOR_COUNT],
+        preview_size: u8,
+        side_panel_size: u8,
+        dashboard_layout: u8,
+    ) {
+        let src_w = SCREEN_WIDTH as usize;
+        let src_h = SCREEN_HEIGHT as usize;
+        let Some((frame_x, frame_y, preview_w, preview_h)) = overlay::game_preview_frame_rect(
+            win_w,
+            win_h,
+            preview_size,
+            side_panel_size,
+            dashboard_layout,
+        ) else {
             return;
         };
 
-        let snapshot = &self.addon_snapshot;
-        let sprites = &self.pokemon_sprites;
-        let popout = &mut self.addon_popouts[index];
-        if popout.surface_size.0 == 0 || popout.surface_size.1 == 0 {
-            return;
-        }
-
-        let Ok(mut buffer) = popout.surface.buffer_mut() else {
-            return;
-        };
-        overlay::draw_addon_panel(
-            &mut buffer,
-            popout.surface_size.0 as usize,
-            popout.surface_size.1 as usize,
-            snapshot,
-            sprites,
-            true,
-            popout.view_mode,
+        let outer_x = frame_x.saturating_sub(4);
+        let outer_y = frame_y.saturating_sub(24);
+        let outer_w = preview_w + 8;
+        let outer_h = preview_h + 28;
+        overlay::fill_rect(
+            buffer,
+            win_w,
+            win_h,
+            outer_x + 3,
+            outer_y + 3,
+            outer_w,
+            outer_h,
+            0x00_03_05_0C,
         );
-        let _ = buffer.present();
+        overlay::fill_rect(
+            buffer,
+            win_w,
+            win_h,
+            outer_x,
+            outer_y,
+            outer_w,
+            outer_h,
+            0x00_0A_0F_19,
+        );
+        overlay::fill_rect(
+            buffer,
+            win_w,
+            win_h,
+            outer_x,
+            outer_y,
+            outer_w,
+            2,
+            0x00_2E_C4_B6,
+        );
+        overlay::draw_text(
+            buffer,
+            win_w,
+            win_h,
+            outer_x + 6,
+            outer_y + 7,
+            "LIVE GAME",
+            1,
+            0x00_F7_F3_EC,
+            0x00_0A_0F_19,
+        );
+
+        overlay::fill_rect(
+            buffer,
+            win_w,
+            win_h,
+            frame_x - 1,
+            frame_y - 1,
+            preview_w + 2,
+            preview_h + 2,
+            0x00_2E_C4_B6,
+        );
+
+        for y in 0..preview_h {
+            let src_y = y * src_h / preview_h;
+            let src_row = src_y * src_w;
+            let dst_row = (frame_y + y) * win_w + frame_x;
+            for x in 0..preview_w {
+                let src_x = x * src_w / preview_w;
+                buffer[dst_row + x] =
+                    color_lookup[pixels[src_row + src_x].color.to_rgb555() as usize];
+            }
+        }
     }
 
     fn sync_input_state(&mut self) {
-        self.gba
-            .input
-            .set_buttons(self.keyboard_buttons | self.gamepad_buttons | self.gamepad_axis_buttons);
+        let buttons = if self.save_state_menu.is_some() || self.theme_menu_selected.is_some() {
+            GbaButton::empty()
+        } else {
+            self.keyboard_buttons | self.gamepad_buttons | self.gamepad_axis_buttons
+        };
+        self.gba.input.set_buttons(buttons);
     }
 
     fn recompute_gamepad_axis_buttons(&mut self) {
@@ -1056,11 +1633,24 @@ impl App {
 
     fn handle_key(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
         physical_key: &PhysicalKey,
         logical_key: &Key,
         pressed: bool,
     ) {
+        if self.save_state_menu.is_some() {
+            if pressed {
+                self.handle_save_state_menu_key(logical_key);
+            }
+            return;
+        }
+        if self.theme_menu_selected.is_some() {
+            if pressed {
+                self.handle_theme_menu_key(logical_key);
+            }
+            return;
+        }
+
         if let Some(btn) = input_map::map_physical_key(physical_key) {
             if pressed {
                 self.keyboard_buttons.insert(btn);
@@ -1082,7 +1672,13 @@ impl App {
                     self.set_speed_multiplier(4);
                 }
                 Key::Named(NamedKey::Escape) => {
-                    if self.gba.state == GbaState::Running {
+                    if self.addon_panel_expanded {
+                        self.addon_panel_expanded = false;
+                        self.request_redraw();
+                        self.set_status("Dashboard docked", overlay::ToastTone::Info);
+                    } else if self.show_addon_panel {
+                        self.hide_addon_ui();
+                    } else if self.gba.state == GbaState::Running {
                         self.gba.pause();
                         self.clear_audio_output();
                         self.reset_timing_state();
@@ -1097,92 +1693,41 @@ impl App {
                     }
                 }
                 Key::Named(NamedKey::F5) => {
-                    self.write_quicksave_file();
+                    self.open_save_state_menu(overlay::SaveStateMenuMode::Save);
                 }
                 Key::Named(NamedKey::F8) => {
-                    if self.quicksave_slot.is_none()
-                        && matches!(self.try_load_quicksave_file(), QuicksaveLoadResult::Failed)
-                    {
-                        return;
-                    }
-                    if let Some(state) = &self.quicksave_slot {
-                        self.gba = state.clone();
-                        self.cart_save_dirty = true;
-                        self.sync_input_state();
-                        self.clear_audio_output();
-                        self.reset_timing_state();
-                        self.update_audio_emulation_state();
-                        self.refresh_window_title();
-                        self.refresh_game_addon_state(true);
-                        println!("Quicksave loaded");
-                        self.set_status("Quicksave loaded", overlay::ToastTone::Success);
-                    } else {
-                        eprintln!("No quicksave available yet");
-                        self.set_status("No quicksave available", overlay::ToastTone::Warning);
-                    }
+                    self.open_save_state_menu(overlay::SaveStateMenuMode::Load);
+                }
+                Key::Named(NamedKey::F9) => {
+                    self.toggle_fullscreen();
                 }
                 Key::Named(NamedKey::F1) => {
                     self.show_overlay = !self.show_overlay;
                     self.request_redraw();
                 }
                 Key::Named(NamedKey::F2) => {
-                    let other_popout_open = self
-                        .addon_popouts
-                        .iter()
-                        .any(|popout| popout.view_mode != overlay::AddonViewMode::Team);
-                    if other_popout_open
-                        && self
-                            .addon_popout_index(overlay::AddonViewMode::Team)
-                            .is_none()
-                    {
-                        self.ensure_addon_popout(event_loop, overlay::AddonViewMode::Team);
-                        self.set_status("Team popout opened", overlay::ToastTone::Info);
-                    } else if self.show_addon_panel
-                        && self.addon_view_mode == overlay::AddonViewMode::Team
-                    {
-                        self.show_addon_panel = false;
-                        self.request_redraw();
-                        self.set_status("Team panel hidden", overlay::ToastTone::Info);
-                    } else {
-                        self.show_addon_view(overlay::AddonViewMode::Team);
-                    }
+                    self.show_docked_addon_view(overlay::AddonViewMode::Team);
+                }
+                Key::Named(NamedKey::F3) => {
+                    self.hide_addon_ui();
                 }
                 Key::Named(NamedKey::F6) => {
-                    let view_mode = self.addon_view_mode;
-                    if self.close_addon_popout(view_mode) {
-                        self.set_status(
-                            format!("{} popout closed", view_mode.label()),
-                            overlay::ToastTone::Info,
-                        );
-                    } else {
-                        self.ensure_addon_popout(event_loop, view_mode);
-                        self.set_status(
-                            format!("{} popout opened", view_mode.label()),
-                            overlay::ToastTone::Info,
-                        );
-                    }
+                    self.toggle_addon_dashboard();
+                }
+                Key::Named(NamedKey::F7) => {
+                    self.cycle_game_preview_size();
+                }
+                Key::Named(NamedKey::F10) => {
+                    self.cycle_side_panel_size();
+                }
+                Key::Named(NamedKey::F11) => {
+                    self.cycle_dashboard_layout();
+                }
+                Key::Named(NamedKey::F12) => {
+                    self.open_theme_menu();
                 }
                 Key::Named(NamedKey::F4) => {
-                    let other_popout_open = self
-                        .addon_popouts
-                        .iter()
-                        .any(|popout| popout.view_mode != overlay::AddonViewMode::Encounters);
-                    if other_popout_open
-                        && self
-                            .addon_popout_index(overlay::AddonViewMode::Encounters)
-                            .is_none()
-                    {
-                        self.ensure_addon_popout(event_loop, overlay::AddonViewMode::Encounters);
-                        self.set_status("Encounters popout opened", overlay::ToastTone::Info);
-                    } else if self.show_addon_panel
-                        && self.addon_view_mode == overlay::AddonViewMode::Encounters
-                    {
-                        self.show_addon_panel = false;
-                        self.request_redraw();
-                        self.set_status("Encounters panel hidden", overlay::ToastTone::Info);
-                    } else {
-                        self.show_addon_view(overlay::AddonViewMode::Encounters);
-                    }
+                    self.show_docked_addon_view(overlay::AddonViewMode::Encounters);
                 }
                 Key::Character(c) if c.as_str() == "1" => {
                     self.set_speed_multiplier(1);
@@ -1204,6 +1749,9 @@ impl App {
                     } else {
                         self.set_status("Audio unmuted", overlay::ToastTone::Info);
                     }
+                }
+                Key::Character(c) if c.as_str() == "w" || c.as_str() == "W" => {
+                    self.choose_dashboard_wallpaper();
                 }
                 Key::Character(c) if c.as_str() == "-" || c.as_str() == "[" => {
                     self.volume = (self.volume - 0.1).clamp(0.0, 1.0);
@@ -1255,67 +1803,6 @@ impl App {
         }
     }
 
-    fn handle_addon_window_key(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        source_view_mode: overlay::AddonViewMode,
-        logical_key: &Key,
-        pressed: bool,
-    ) {
-        if !pressed {
-            return;
-        }
-
-        match logical_key {
-            Key::Named(NamedKey::Escape) | Key::Named(NamedKey::F6) => {
-                self.close_addon_popout(source_view_mode);
-                self.set_status(
-                    format!("{} popout closed", source_view_mode.label()),
-                    overlay::ToastTone::Info,
-                );
-            }
-            Key::Named(NamedKey::F2) => {
-                let created = self.ensure_addon_popout(event_loop, overlay::AddonViewMode::Team);
-                self.set_status(
-                    if created {
-                        "Team popout opened"
-                    } else {
-                        "Team popout already open"
-                    },
-                    overlay::ToastTone::Info,
-                );
-            }
-            Key::Named(NamedKey::F4) => {
-                let created =
-                    self.ensure_addon_popout(event_loop, overlay::AddonViewMode::Encounters);
-                self.set_status(
-                    if created {
-                        "Encounters popout opened"
-                    } else {
-                        "Encounters popout already open"
-                    },
-                    overlay::ToastTone::Info,
-                );
-            }
-            Key::Named(NamedKey::F1) => {
-                self.show_overlay = !self.show_overlay;
-                self.request_redraw();
-            }
-            Key::Character(c) if c.as_str() == "o" || c.as_str() == "O" => {
-                self.open_rom();
-                self.request_redraw();
-            }
-            Key::Named(NamedKey::Enter) if !self.rom_loaded => {
-                self.open_rom();
-                self.request_redraw();
-            }
-            Key::Named(NamedKey::Tab) => {
-                self.ensure_addon_popout(event_loop, source_view_mode);
-            }
-            _ => {}
-        }
-    }
-
     fn open_rom(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("GBA ROMs", &["gba", "bin"])
@@ -1323,56 +1810,6 @@ impl App {
         {
             self.load_rom_from_path(path);
         }
-    }
-
-    fn ensure_addon_popout(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        view_mode: overlay::AddonViewMode,
-    ) -> bool {
-        if self.addon_popout_index(view_mode).is_some() {
-            self.request_redraw();
-            return false;
-        }
-
-        let window_size = LogicalSize::new(460.0, 540.0);
-        let attrs = Window::default_attributes()
-            .with_title(self.addon_window_title(view_mode))
-            .with_inner_size(window_size)
-            .with_min_inner_size(LogicalSize::new(260.0, 220.0))
-            .with_resizable(true);
-
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("Failed to create addon window"),
-        );
-        let context =
-            softbuffer::Context::new(window.clone()).expect("Failed to create addon context");
-        let mut surface =
-            Surface::new(&context, window.clone()).expect("Failed to create addon surface");
-        let surface_size = (window_size.width as u32, window_size.height as u32);
-        let _ = surface.resize(
-            NonZeroU32::new(surface_size.0).unwrap(),
-            NonZeroU32::new(surface_size.1).unwrap(),
-        );
-
-        self.addon_popouts.push(AddonPopout {
-            view_mode,
-            window,
-            surface,
-            surface_size,
-        });
-        self.request_redraw();
-        true
-    }
-
-    fn close_addon_popout(&mut self, view_mode: overlay::AddonViewMode) -> bool {
-        let Some(index) = self.addon_popout_index(view_mode) else {
-            return false;
-        };
-        self.addon_popouts.remove(index);
-        true
     }
 
     fn resize_main_surface(&mut self, width: u32, height: u32) {
@@ -1386,21 +1823,6 @@ impl App {
                 NonZeroU32::new(height).unwrap(),
             );
         }
-    }
-
-    fn resize_addon_popout_at_index(&mut self, index: usize, width: u32, height: u32) {
-        let Some(popout) = self.addon_popouts.get_mut(index) else {
-            return;
-        };
-
-        popout.surface_size = (width, height);
-        if width == 0 || height == 0 {
-            return;
-        }
-        let _ = popout.surface.resize(
-            NonZeroU32::new(width).unwrap(),
-            NonZeroU32::new(height).unwrap(),
-        );
     }
 }
 
@@ -1428,7 +1850,10 @@ impl ApplicationHandler for App {
 
         self.window = Some(window);
         self.surface = Some(surface);
-        self.resize_main_surface(SCREEN_WIDTH * SCALE, SCREEN_HEIGHT * SCALE);
+        let inner_size = self.window.as_ref().map(|window| window.inner_size());
+        if let Some(size) = inner_size {
+            self.resize_main_surface(size.width, size.height);
+        }
         self.refresh_window_title();
 
         // Try to init audio
@@ -1444,59 +1869,29 @@ impl ApplicationHandler for App {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        window_id: WindowId,
+        _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        let addon_window_index = self.addon_popout_window_index(window_id);
-        let addon_window_view =
-            addon_window_index.and_then(|index| self.addon_popouts.get(index).map(|p| p.view_mode));
-        let is_addon_window = addon_window_view.is_some();
-
         match event {
             WindowEvent::CloseRequested => {
-                if let Some(view_mode) = addon_window_view {
-                    self.close_addon_popout(view_mode);
-                    self.set_status(
-                        format!("{} popout closed", view_mode.label()),
-                        overlay::ToastTone::Info,
-                    );
-                } else {
-                    self.flush_battery_save(true);
-                    event_loop.exit();
-                }
+                self.flush_battery_save(true);
+                event_loop.exit();
             }
             WindowEvent::Resized(size) => {
-                if let Some(index) = addon_window_index {
-                    self.resize_addon_popout_at_index(index, size.width, size.height);
-                } else {
-                    self.resize_main_surface(size.width, size.height);
-                }
-                if let Some(index) = addon_window_index {
-                    if let Some(popout) = self.addon_popouts.get(index) {
-                        popout.window.request_redraw();
-                    }
-                } else if let Some(window) = &self.window {
+                self.resize_main_surface(size.width, size.height);
+                if let Some(window) = &self.window {
                     window.request_redraw();
                 }
             }
             WindowEvent::HoveredFile(path) => {
-                if is_addon_window {
-                    return;
-                }
                 self.hovered_file = Some(path);
                 self.request_redraw();
             }
             WindowEvent::HoveredFileCancelled => {
-                if is_addon_window {
-                    return;
-                }
                 self.hovered_file = None;
                 self.request_redraw();
             }
             WindowEvent::DroppedFile(path) => {
-                if is_addon_window {
-                    return;
-                }
                 self.hovered_file = None;
                 self.load_rom_from_path(path);
             }
@@ -1512,18 +1907,9 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 let pressed = state == ElementState::Pressed;
-                if let Some(view_mode) = addon_window_view {
-                    self.handle_addon_window_key(event_loop, view_mode, &logical_key, pressed);
-                } else {
-                    self.handle_key(event_loop, &physical_key, &logical_key, pressed);
-                }
+                self.handle_key(event_loop, &physical_key, &logical_key, pressed);
             }
             WindowEvent::RedrawRequested => {
-                if let Some(view_mode) = addon_window_view {
-                    self.present_addon_popout(view_mode);
-                    return;
-                }
-
                 if !self.rom_loaded || self.gba.state != GbaState::Running {
                     self.render_frame(0);
                     return;
