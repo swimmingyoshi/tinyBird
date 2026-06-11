@@ -609,8 +609,7 @@ fn locate_fire_red_battle(
         return None;
     }
 
-    let raw = read_party_slot(gba, FIRE_RED_ENEMY_PARTY_BASE);
-    let member = parse_party_member(&raw, 1)?;
+    let member = locate_active_enemy_party_member(gba)?;
     let (species_name, catch_rate) = fire_red_species_info(member.species_id, area);
     let catchable = battle_is_catchable(battle_type_flags);
 
@@ -640,6 +639,15 @@ fn locate_fire_red_battle(
             catch_rate: catchable.then_some(catch_rate).flatten(),
         },
     })
+}
+
+fn locate_active_enemy_party_member(gba: &Gba) -> Option<FireRedPartyMember> {
+    let enemy_party = parse_party_prefix_at(gba, FIRE_RED_ENEMY_PARTY_BASE)?;
+    enemy_party
+        .iter()
+        .find(|member| !member.is_egg && member.current_hp > 0)
+        .or_else(|| enemy_party.first())
+        .cloned()
 }
 
 fn fire_red_battle_is_active(gba: &Gba, battle_type_flags: u32) -> bool {
@@ -1400,6 +1408,29 @@ mod tests {
         assert!(!battle.catchable);
         assert_eq!(battle.opponent.species_name, "Squirtle");
         assert_eq!(battle.opponent.catch_rate, None);
+    }
+
+    #[test]
+    fn test_locate_fire_red_trainer_battle_advances_after_first_faints() {
+        let mut gba = Gba::new();
+        gba.write_u32(FIRE_RED_BATTLE_TYPE_FLAGS_ADDR, BATTLE_TYPE_TRAINER);
+        gba.write_u8(FIRE_RED_BATTLE_OUTCOME_ADDR, BATTLE_OUTCOME_NONE);
+        write_party_slot(
+            &mut gba,
+            FIRE_RED_ENEMY_PARTY_BASE,
+            &build_party_member_raw(0x1111_2222, 0x3333_4444, "RATTATA", 19, 4, 0, 13),
+        );
+        write_party_slot(
+            &mut gba,
+            FIRE_RED_ENEMY_PARTY_BASE + PARTY_SLOT_SIZE as u32,
+            &build_party_member_raw(0x2222_3333, 0x4444_5555, "PIDGEY", 16, 5, 17, 17),
+        );
+
+        let battle = locate_fire_red_battle(&gba, None).expect("battle should be found");
+        assert_eq!(battle.battle_kind, "Trainer");
+        assert_eq!(battle.opponent.nickname, "PIDGEY");
+        assert_eq!(battle.opponent.species_id, 16);
+        assert_eq!(battle.opponent.current_hp, 17);
     }
 
     #[test]
