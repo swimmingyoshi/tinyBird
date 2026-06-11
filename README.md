@@ -68,7 +68,7 @@ Startup behavior:
 - `F8`: open the load-state slot menu
 - `F9`: toggle borderless fullscreen
 - `F10`: cycle side panel width: Slim, Normal, Wide
-- `F11`: cycle dashboard placement: Classic, Left Info, Split Sidebars
+- `F11`: cycle dashboard placement: Classic, Left Info, Split Sidebars, Cozy Game
 - `F12`: open the dashboard theme menu
 
 Save/load menus use arrow keys or `1`-`5` to choose a slot, `Enter` to confirm, and `Esc` to cancel. Saving over an existing slot asks for confirmation in the menu before overwriting.

@@ -95,7 +95,7 @@ fn rom_display_label(snapshot: &StreamSnapshot) -> String {
 
 pub const GAME_PREVIEW_SIZE_COUNT: u8 = 3;
 pub const SIDE_PANEL_SIZE_COUNT: u8 = 3;
-pub const DASHBOARD_LAYOUT_COUNT: u8 = 3;
+pub const DASHBOARD_LAYOUT_COUNT: u8 = 4;
 pub const DASHBOARD_THEME_COUNT: u8 = 4;
 
 pub struct DashboardWallpaper {
@@ -124,7 +124,8 @@ pub fn dashboard_layout_label(layout: u8) -> &'static str {
     match layout % DASHBOARD_LAYOUT_COUNT {
         0 => "Classic",
         1 => "Left Info",
-        _ => "Split Sidebars",
+        2 => "Split Sidebars",
+        _ => "Cozy Game",
     }
 }
 
@@ -176,18 +177,17 @@ pub fn game_preview_dimensions(
         return (0, 0);
     }
 
+    let layout = dashboard_layout % DASHBOARD_LAYOUT_COUNT;
     let right_min = side_panel_reserved_width(buf_w, side_panel_size);
-    let side_columns = if dashboard_layout % DASHBOARD_LAYOUT_COUNT == 2 {
-        2
-    } else {
-        1
+    let side_columns = match layout {
+        2 => 2,
+        3 => 0,
+        _ => 1,
     };
-    let bottom_min = if buf_w >= 1280 {
-        if side_columns == 2 {
-            132
-        } else {
-            142
-        }
+    let bottom_min = if layout >= 2 {
+        24
+    } else if buf_w >= 1280 {
+        142
     } else if buf_h >= 760 {
         172
     } else {
@@ -198,7 +198,9 @@ pub fn game_preview_dimensions(
         .saturating_sub(bottom_min + footer_min + 42)
         .saturating_mul(3)
         / 2;
-    let max_w_by_side_panel = if dashboard_layout % DASHBOARD_LAYOUT_COUNT == 0 {
+    let max_w_by_side_panel = if layout == 3 {
+        buf_w.saturating_sub(40)
+    } else if layout == 0 {
         buf_w.saturating_sub((right_min + 32) * 2)
     } else {
         buf_w.saturating_sub(right_min * side_columns + 80)
@@ -210,7 +212,9 @@ pub fn game_preview_dimensions(
         return (0, 0);
     }
 
-    let remaining_for_game = if dashboard_layout % DASHBOARD_LAYOUT_COUNT == 0 {
+    let remaining_for_game = if layout == 3 {
+        buf_w.saturating_sub(40)
+    } else if layout == 0 {
         buf_w.saturating_sub((right_min + 32) * 2)
     } else {
         buf_w.saturating_sub(right_min * side_columns + 80)
@@ -239,7 +243,8 @@ pub fn game_preview_frame_rect(
     }
 
     let outer_w = preview_w + 8;
-    let outer_x = match dashboard_layout % DASHBOARD_LAYOUT_COUNT {
+    let layout = dashboard_layout % DASHBOARD_LAYOUT_COUNT;
+    let outer_x = match layout {
         1 => side_panel_reserved_width(buf_w, side_panel_size) + 40,
         2 => {
             let side_w = side_panel_reserved_width(buf_w, side_panel_size);
@@ -248,6 +253,7 @@ pub fn game_preview_frame_rect(
             let available = right.saturating_sub(left);
             left + available.saturating_sub(outer_w) / 2
         }
+        3 => buf_w.saturating_sub(outer_w) / 2,
         _ => {
             let side_w = side_panel_reserved_width(buf_w, side_panel_size);
             let centered = buf_w.saturating_sub(outer_w) / 2;
@@ -256,8 +262,17 @@ pub fn game_preview_frame_rect(
         }
     }
     .min(buf_w.saturating_sub(outer_w + 4));
+    let outer_h = preview_h + 28;
+    let outer_y = if layout >= 2 {
+        let top = 12usize;
+        let bottom = buf_h.saturating_sub(34);
+        let available_h = bottom.saturating_sub(top);
+        top + available_h.saturating_sub(outer_h) / 2
+    } else {
+        12
+    };
 
-    Some((outer_x + 4, 36, preview_w, preview_h))
+    Some((outer_x + 4, outer_y + 24, preview_w, preview_h))
 }
 
 /// 8×8 bitmap font, ASCII 0x20–0x7E (95 printable characters).
@@ -1220,19 +1235,58 @@ fn draw_firered_dashboard(
     let party_w = panel_w.saturating_sub(24);
     let preview_bottom = panel_y + preview_outer_h + 18;
 
+    if layout == 3 {
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x + panel_w / 2,
+            footer_y.saturating_sub(12),
+            "F11 Layout   F7 Game   F9 Fullscreen   F12 Theme",
+            1,
+            muted,
+            panel_bg,
+        );
+        draw_text_centered(
+            buf,
+            buf_w,
+            buf_h,
+            panel_x + panel_w / 2,
+            footer_y,
+            "F2 Team   F4 Encounters   W Wallpaper",
+            1,
+            muted,
+            panel_bg,
+        );
+        return;
+    }
+
     if layout == 2 {
         let max_side_w = (panel_w.saturating_sub(preview_outer_w + 72) / 2).max(240);
         let side_w = requested_right_w.clamp(240, max_side_w);
         let left_x = panel_x + 12;
         let side_bottom = content_bottom;
         let encounter_x = panel_x + panel_w.saturating_sub(side_w + 12);
+        let column_h = side_bottom.saturating_sub(content_top);
+        let party_body_h = estimated_party_panel_height(side_w, data.party.len());
+        let party_group_h = (58 + party_body_h).min(column_h);
+        let party_group_y = centered_group_y(content_top, side_bottom, party_group_h);
+        let party_panel_y = party_group_y + 58;
+        let party_panel_bottom = party_panel_y.saturating_add(party_body_h).min(side_bottom);
+        let encounter_body_h = estimated_encounter_panel_height(data);
+        let encounter_group_h = (58 + encounter_body_h).min(column_h);
+        let encounter_group_y = centered_group_y(content_top, side_bottom, encounter_group_h);
+        let encounter_panel_y = encounter_group_y + 58;
+        let encounter_panel_bottom = encounter_panel_y
+            .saturating_add(encounter_body_h)
+            .min(side_bottom);
 
         fill_rect(
             buf,
             buf_w,
             buf_h,
             left_x,
-            content_top + 46,
+            party_group_y + 46,
             side_w,
             1,
             muted,
@@ -1242,7 +1296,7 @@ fn draw_firered_dashboard(
             buf_w,
             buf_h,
             left_x + side_w / 2,
-            content_top,
+            party_group_y,
             "Party",
             2,
             accent,
@@ -1253,9 +1307,9 @@ fn draw_firered_dashboard(
             buf_w,
             buf_h,
             left_x,
-            content_top + 58,
+            party_panel_y,
             side_w,
-            side_bottom,
+            party_panel_bottom,
             data,
             sprites,
         );
@@ -1265,7 +1319,7 @@ fn draw_firered_dashboard(
             buf_w,
             buf_h,
             encounter_x + side_w / 2,
-            content_top,
+            encounter_group_y,
             "Encounters",
             2,
             accent,
@@ -1276,7 +1330,7 @@ fn draw_firered_dashboard(
             buf_w,
             buf_h,
             encounter_x + side_w / 2,
-            content_top + 24,
+            encounter_group_y + 24,
             &rom_display_label(snapshot),
             1,
             muted,
@@ -1287,7 +1341,7 @@ fn draw_firered_dashboard(
             buf_w,
             buf_h,
             encounter_x,
-            content_top + 46,
+            encounter_group_y + 46,
             side_w,
             1,
             muted,
@@ -1297,9 +1351,9 @@ fn draw_firered_dashboard(
             buf_w,
             buf_h,
             encounter_x,
-            content_top + 58,
+            encounter_panel_y,
             side_w,
-            side_bottom,
+            encounter_panel_bottom,
             data,
             sprites,
         );
@@ -1559,6 +1613,58 @@ fn draw_firered_party_panel(
         );
         y += card_h + card_gap;
     }
+}
+
+fn centered_group_y(top: usize, bottom: usize, desired_h: usize) -> usize {
+    let available_h = bottom.saturating_sub(top);
+    if desired_h >= available_h {
+        top
+    } else {
+        top + (available_h - desired_h) / 2
+    }
+}
+
+fn estimated_party_panel_height(panel_w: usize, party_len: usize) -> usize {
+    if party_len == 0 {
+        return 44;
+    }
+
+    let card_gap = 6usize;
+    if panel_w >= 1200 {
+        return 18 + 70;
+    }
+    if panel_w >= 360 {
+        let rows = party_len.min(6).div_ceil(3).clamp(1, 2);
+        return 18 + rows * 70 + rows.saturating_sub(1) * card_gap;
+    }
+
+    let card_h = if panel_w < 320 { 64usize } else { 70usize };
+    let cards = party_len.min(6);
+    18 + cards * card_h + cards.saturating_sub(1) * card_gap
+}
+
+fn estimated_encounter_panel_height(snapshot: &FireRedSnapshot) -> usize {
+    let area_h = snapshot
+        .area
+        .as_ref()
+        .map(estimated_area_panel_height)
+        .unwrap_or(0);
+
+    match (&snapshot.area, &snapshot.battle) {
+        (Some(_), Some(_)) => area_h + 12 + 14 + 180,
+        (Some(area), None) if area.encounter_groups.is_empty() => area_h + 14,
+        (Some(_), None) => area_h + 32,
+        (None, Some(_)) => 14 + 180,
+        (None, None) => 34,
+    }
+}
+
+fn estimated_area_panel_height(area: &FireRedAreaSnapshot) -> usize {
+    let mut h = 24usize;
+    for group in &area.encounter_groups {
+        h += 14 + group.entries.len().min(8) * 12 + 8;
+    }
+    h.max(44)
 }
 
 fn draw_firered_encounter_panel(
