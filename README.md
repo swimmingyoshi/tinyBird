@@ -131,6 +131,7 @@ As of June 3, 2026:
 
 ```
 crates/
+  tinybird-addons/   # Shared addon snapshot schema and metadata contract
   tinybird-core/     # Emulator core (CPU, PPU, memory, scheduler)
   tinybird-desktop/  # Desktop frontend (windowing, audio, input)
   tinybird-web/      # Local web overlay/API server for OBS and browser tools

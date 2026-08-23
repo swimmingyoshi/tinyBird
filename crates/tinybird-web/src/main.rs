@@ -6,6 +6,7 @@ use axum::Router;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
+use tinybird_addons::SNAPSHOT_SCHEMA_VERSION;
 use tokio::net::TcpListener;
 
 const DEFAULT_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -17,10 +18,6 @@ const INDEX_HTML: &str = include_str!("assets/index.html");
 const OVERLAY_HTML: &str = include_str!("assets/overlay.html");
 const APP_JS: &str = include_str!("assets/app.js");
 const STYLES_CSS: &str = include_str!("assets/styles.css");
-
-const EMPTY_SNAPSHOT: &str = r#"{
-  "schema_version": 1
-}"#;
 
 #[derive(Clone, Debug)]
 struct AppState {
@@ -155,10 +152,14 @@ async fn snapshot(State(state): State<AppState>) -> Response {
         }
         Ok(_) | Err(_) => text(
             StatusCode::OK,
-            EMPTY_SNAPSHOT.to_string(),
+            empty_snapshot_json(),
             "application/json; charset=utf-8",
         ),
     }
+}
+
+fn empty_snapshot_json() -> String {
+    format!("{{\n  \"schema_version\": {SNAPSHOT_SCHEMA_VERSION}\n}}")
 }
 
 async fn sprite_png(Path(species_id): Path<u16>, State(state): State<AppState>) -> Response {

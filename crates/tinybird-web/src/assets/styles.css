@@ -317,6 +317,15 @@ pre {
   display: none;
 }
 
+.generic-panel {
+  display: none;
+  gap: 14px;
+}
+
+.generic-panel.is-visible {
+  display: grid;
+}
+
 .party-panel.is-visible {
   display: block;
 }
@@ -695,6 +704,120 @@ pre {
 .party-grid {
   display: grid;
   gap: 14px;
+}
+
+.generic-section {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(17, 26, 45, 0.92), rgba(10, 16, 28, 0.94));
+  box-shadow: var(--shadow);
+}
+
+.generic-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.generic-heading h2 {
+  margin: 0;
+  font: 700 1.2rem/1 var(--font-display);
+}
+
+.generic-heading p,
+.generic-fields dt,
+.generic-table strong {
+  margin: 0;
+  color: var(--accent);
+  font: 800 0.58rem/1 var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.generic-fields {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.generic-fields div {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.45fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.generic-fields dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.generic-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.generic-list li {
+  min-height: 30px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.generic-table-wrap {
+  overflow-x: auto;
+}
+
+.generic-table {
+  display: grid;
+  grid-template-columns: repeat(var(--columns), minmax(84px, 1fr));
+  gap: 1px;
+  min-width: max-content;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+}
+
+.generic-table strong,
+.generic-table span {
+  min-width: 0;
+  padding: 9px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  white-space: nowrap;
+}
+
+.generic-table span {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.generic-json {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--muted);
 }
 
 .party-card {

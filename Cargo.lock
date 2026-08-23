@@ -2988,6 +2988,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinybird-addons"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tinybird-core"
 version = "0.1.0"
 dependencies = [
@@ -3010,6 +3018,7 @@ dependencies = [
  "serde",
  "serde_json",
  "softbuffer",
+ "tinybird-addons",
  "tinybird-core",
  "winit",
 ]
@@ -3019,6 +3028,7 @@ name = "tinybird-web"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "tinybird-addons",
  "tokio",
 ]
 

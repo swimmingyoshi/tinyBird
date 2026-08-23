@@ -11,5 +11,6 @@ name = "tinybird-web"
 path = "src/main.rs"
 
 [dependencies]
+tinybird-addons.workspace = true
 axum.workspace = true
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread"] }

@@ -367,7 +367,7 @@ const MOVE_NAME_OVERRIDES = {
   WILL_O_WISP: "Will-O-Wisp",
 };
 
-const OVERLAY_SECTIONS = new Set(["full", "party", "area", "battle"]);
+const OVERLAY_SECTIONS = new Set(["full", "party", "area", "battle", "generic"]);
 
 const state = {
   lastOkAt: 0,
@@ -401,6 +401,7 @@ const areaPanel = document.getElementById("area-panel");
 const areaName = document.getElementById("area-name");
 const areaMapId = document.getElementById("area-map-id");
 const encounterList = document.getElementById("encounter-list");
+const genericPanel = document.getElementById("generic-panel");
 const partyCardTemplate = document.getElementById("party-card-template");
 const encounterMethodTemplate = document.getElementById("encounter-method-template");
 
@@ -471,14 +472,26 @@ function overlaySectionFromLocation(params) {
 function renderSnapshot(snapshot) {
   const addon = snapshot?.addon;
   const fireRed = addon?.data?.type === "fire_red" ? addon.data.payload : null;
+  const genericSections = Array.isArray(addon?.sections) ? addon.sections : [];
   const section = state.section;
+
+  if (section === "generic" || (!fireRed && genericSections.length)) {
+    renderGenericSnapshot(snapshot, genericSections);
+    return;
+  }
 
   if (!fireRed?.party?.length) {
     overlayTitle.textContent = addon?.display_name || snapshot?.rom?.title || "tinyBird Overlay";
     overlaySubtitle.textContent = fireRed
       ? "Supported addon found, but no live party members were exported yet."
-      : "Load FireRed or LeafGreen in the desktop app to populate the party overlay.";
-    renderEmpty("No party payload is available yet.", state.showEmpty);
+      : genericSections.length
+        ? "Generic addon sections are available."
+        : "Load FireRed or LeafGreen in the desktop app to populate the party overlay.";
+    if (genericSections.length) {
+      renderGenericSnapshot(snapshot, genericSections);
+    } else {
+      renderEmpty("No party payload is available yet.", state.showEmpty);
+    }
     return;
   }
 
@@ -491,6 +504,7 @@ function renderSnapshot(snapshot) {
   const showArea = section === "area" || (section === "full" && !fireRed.battle);
 
   emptyState.classList.remove("is-visible");
+  renderGenericPanel([]);
   renderPartyPanel(showParty ? fireRed.party : []);
   renderBattlePanel(showBattle ? fireRed.battle : null);
   renderAreaPanel(showArea ? fireRed.area : null);
@@ -499,6 +513,29 @@ function renderSnapshot(snapshot) {
     renderEmpty("No active battle right now.", state.showEmpty);
   } else if (section === "area" && !fireRed.area) {
     renderEmpty("Area data is pending.", state.showEmpty);
+  }
+}
+
+function renderGenericSnapshot(snapshot, sections) {
+  const addon = snapshot?.addon;
+  const rom = snapshot?.rom;
+  overlayTitle.textContent = addon?.display_name || rom?.title || "tinyBird Overlay";
+  overlaySubtitle.textContent = [
+    addon?.addon_id,
+    addon?.version ? `v${addon.version}` : null,
+    rom?.game_code,
+  ]
+    .filter(Boolean)
+    .join("  ");
+
+  renderPartyPanel([]);
+  renderBattlePanel(null);
+  renderAreaPanel(null);
+  emptyState.classList.remove("is-visible");
+  renderGenericPanel(sections);
+
+  if (!sections.length) {
+    renderEmpty("No generic addon sections are available yet.", state.showEmpty);
   }
 }
 
@@ -591,6 +628,96 @@ function renderAreaPanel(area) {
 
     encounterList.appendChild(fragment);
   }
+}
+
+function renderGenericPanel(sections) {
+  genericPanel.innerHTML = "";
+  genericPanel.classList.toggle("is-visible", sections.length > 0);
+  for (const section of sections) {
+    genericPanel.appendChild(renderGenericSection(section));
+  }
+}
+
+function renderGenericSection(section) {
+  const article = document.createElement("article");
+  article.className = "generic-section";
+
+  const heading = document.createElement("div");
+  heading.className = "generic-heading";
+  const title = document.createElement("h2");
+  title.textContent = section.title || section.section_id || "Addon Section";
+  const kind = document.createElement("p");
+  kind.textContent = section.kind || "section";
+  heading.append(title, kind);
+  article.appendChild(heading);
+
+  if (section.kind === "key_value") {
+    article.appendChild(renderGenericFields(section.payload || []));
+  } else if (section.kind === "table") {
+    article.appendChild(renderGenericTable(section.payload));
+  } else if (section.kind === "list") {
+    article.appendChild(renderGenericList(section.payload || []));
+  } else {
+    const fallback = document.createElement("pre");
+    fallback.className = "generic-json";
+    fallback.textContent = JSON.stringify(section.payload ?? section, null, 2);
+    article.appendChild(fallback);
+  }
+
+  return article;
+}
+
+function renderGenericFields(fields) {
+  const list = document.createElement("dl");
+  list.className = "generic-fields";
+  for (const field of fields) {
+    const item = document.createElement("div");
+    const label = document.createElement("dt");
+    const value = document.createElement("dd");
+    label.textContent = field.label || "";
+    value.textContent = field.value ?? "";
+    item.append(label, value);
+    list.appendChild(item);
+  }
+  return list;
+}
+
+function renderGenericList(items) {
+  const list = document.createElement("ul");
+  list.className = "generic-list";
+  for (const item of items) {
+    const row = document.createElement("li");
+    row.textContent = item;
+    list.appendChild(row);
+  }
+  return list;
+}
+
+function renderGenericTable(table) {
+  const wrap = document.createElement("div");
+  wrap.className = "generic-table-wrap";
+  const grid = document.createElement("div");
+  grid.className = "generic-table";
+  const columns = Array.isArray(table?.columns) ? table.columns : [];
+  const rows = Array.isArray(table?.rows) ? table.rows : [];
+  grid.style.setProperty("--columns", Math.max(1, columns.length));
+
+  for (const column of columns) {
+    const cell = document.createElement("strong");
+    cell.textContent = column;
+    grid.appendChild(cell);
+  }
+  for (const row of rows) {
+    const values = Array.isArray(row) ? row : [row];
+    for (let idx = 0; idx < Math.max(columns.length, values.length); idx += 1) {
+      const cell = document.createElement("span");
+      cell.textContent = values[idx] ?? "";
+      grid.appendChild(cell);
+    }
+  }
+
+  wrap.appendChild(grid);
+  return wrap;
 }
 
 function renderEncounterRow(entry) {
@@ -742,6 +869,7 @@ function renderEmpty(message, visible = true) {
   renderPartyPanel([]);
   renderBattlePanel(null);
   renderAreaPanel(null);
+  renderGenericPanel([]);
   if (!visible) {
     emptyState.classList.remove("is-visible");
     return;

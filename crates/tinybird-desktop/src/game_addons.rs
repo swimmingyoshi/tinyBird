@@ -6,6 +6,10 @@
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
+use tinybird_addons::{
+    AddonField, AddonSection, AddonSectionContent, AddonSnapshot as ContractAddonSnapshot,
+    AddonTable, RomIdentity, StreamSnapshot as ContractStreamSnapshot, SNAPSHOT_SCHEMA_VERSION,
+};
 use tinybird_core::Gba;
 
 pub const STREAM_SNAPSHOT_PATH: &str = "stream-data/current-game.json";
@@ -62,40 +66,8 @@ const SUBSTRUCT_ORDERS: [[usize; 4]; 24] = [
     [3, 2, 1, 0],
 ];
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct StreamSnapshot {
-    pub schema_version: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rom: Option<RomIdentity>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub addon: Option<AddonSnapshot>,
-}
-
-impl Default for StreamSnapshot {
-    fn default() -> Self {
-        Self {
-            schema_version: 1,
-            rom: None,
-            addon: None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct RomIdentity {
-    pub title: String,
-    pub game_code: String,
-    pub maker_code: String,
-    pub revision: u8,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct AddonSnapshot {
-    pub addon_id: &'static str,
-    pub display_name: &'static str,
-    pub overlay_lines: Vec<String>,
-    pub data: AddonData,
-}
+pub type StreamSnapshot = ContractStreamSnapshot<AddonData>;
+pub type AddonSnapshot = ContractAddonSnapshot<AddonData>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
@@ -235,13 +207,13 @@ pub fn capture_stream_snapshot(gba: Option<&Gba>) -> StreamSnapshot {
         return StreamSnapshot::default();
     };
 
-    let Some(rom) = RomIdentity::from_gba(gba) else {
+    let Some(rom) = rom_identity_from_gba(gba) else {
         return StreamSnapshot::default();
     };
 
     let addon = detect_addon_snapshot(gba, &rom);
     StreamSnapshot {
-        schema_version: 1,
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
         rom: Some(rom),
         addon,
     }
@@ -277,21 +249,19 @@ pub fn write_stream_snapshot(snapshot: &StreamSnapshot, previous_json: &mut Opti
     }
 }
 
-impl RomIdentity {
-    fn from_gba(gba: &Gba) -> Option<Self> {
-        let title = read_header_ascii(gba, 0xA0, 12);
-        let game_code = read_header_ascii(gba, 0xAC, 4);
-        if title.is_empty() && game_code.is_empty() {
-            return None;
-        }
-
-        Some(Self {
-            title,
-            game_code,
-            maker_code: read_header_ascii(gba, 0xB0, 2),
-            revision: gba.read_u8(ROM_HEADER_BASE + 0xBC),
-        })
+fn rom_identity_from_gba(gba: &Gba) -> Option<RomIdentity> {
+    let title = read_header_ascii(gba, 0xA0, 12);
+    let game_code = read_header_ascii(gba, 0xAC, 4);
+    if title.is_empty() && game_code.is_empty() {
+        return None;
     }
+
+    Some(RomIdentity {
+        title,
+        game_code,
+        maker_code: read_header_ascii(gba, 0xB0, 2),
+        revision: gba.read_u8(ROM_HEADER_BASE + 0xBC),
+    })
 }
 
 fn detect_addon_snapshot(gba: &Gba, rom: &RomIdentity) -> Option<AddonSnapshot> {
@@ -366,19 +336,137 @@ impl GameAddon for FireRedAddon {
             ));
         }
 
-        Some(AddonSnapshot {
-            addon_id: self.addon_id(),
-            display_name: frlg_display_name(rom),
-            overlay_lines,
-            data: AddonData::FireRed(FireRedSnapshot {
-                source: "live_memory",
-                party_base_address,
-                party,
-                area,
-                battle,
-            }),
-        })
+        let fire_red = FireRedSnapshot {
+            source: "live_memory",
+            party_base_address,
+            party,
+            area,
+            battle,
+        };
+        let sections = fire_red_sections(&fire_red);
+
+        Some(
+            AddonSnapshot::new(
+                self.addon_id(),
+                frlg_display_name(rom),
+                overlay_lines,
+                AddonData::FireRed(fire_red),
+            )
+            .with_version("0.1.0")
+            .with_capabilities(vec!["party", "area", "battle"])
+            .with_sections(sections),
+        )
     }
+}
+
+fn fire_red_sections(snapshot: &FireRedSnapshot) -> Vec<AddonSection> {
+    let mut sections = Vec::new();
+
+    sections.push(AddonSection {
+        section_id: "party",
+        title: "Party".to_string(),
+        content: AddonSectionContent::Table(AddonTable {
+            columns: vec![
+                "Slot".to_string(),
+                "Name".to_string(),
+                "Species".to_string(),
+                "Level".to_string(),
+                "HP".to_string(),
+            ],
+            rows: snapshot
+                .party
+                .iter()
+                .map(|member| {
+                    vec![
+                        member.slot.to_string(),
+                        member.nickname.clone(),
+                        member.species_name.clone(),
+                        if member.is_egg {
+                            "Egg".to_string()
+                        } else {
+                            member.level.to_string()
+                        },
+                        format!("{}/{}", member.current_hp, member.max_hp),
+                    ]
+                })
+                .collect(),
+        }),
+    });
+
+    if let Some(area) = &snapshot.area {
+        sections.push(AddonSection {
+            section_id: "area",
+            title: "Area".to_string(),
+            content: AddonSectionContent::KeyValue(vec![
+                AddonField {
+                    label: "Name".to_string(),
+                    value: area.name.clone(),
+                },
+                AddonField {
+                    label: "Map".to_string(),
+                    value: format!("{} {}:{}", area.map_key, area.map_group, area.map_num),
+                },
+                AddonField {
+                    label: "Encounter groups".to_string(),
+                    value: area.encounter_groups.len().to_string(),
+                },
+            ]),
+        });
+
+        let encounters = area
+            .encounter_groups
+            .iter()
+            .flat_map(|group| {
+                group.entries.iter().map(move |entry| {
+                    format!(
+                        "{}: {} Lv{}-{} {}%",
+                        group.method,
+                        entry.species_name,
+                        entry.min_level,
+                        entry.max_level,
+                        entry.slot_rate
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if !encounters.is_empty() {
+            sections.push(AddonSection {
+                section_id: "encounters",
+                title: "Encounters".to_string(),
+                content: AddonSectionContent::List(encounters),
+            });
+        }
+    }
+
+    if let Some(battle) = &snapshot.battle {
+        sections.push(AddonSection {
+            section_id: "battle",
+            title: "Battle".to_string(),
+            content: AddonSectionContent::KeyValue(vec![
+                AddonField {
+                    label: "Kind".to_string(),
+                    value: battle.battle_kind.to_string(),
+                },
+                AddonField {
+                    label: "Opponent".to_string(),
+                    value: format!(
+                        "{} Lv{}",
+                        battle.opponent.species_name, battle.opponent.level
+                    ),
+                },
+                AddonField {
+                    label: "HP".to_string(),
+                    value: format!("{}/{}", battle.opponent.current_hp, battle.opponent.max_hp),
+                },
+                AddonField {
+                    label: "Catchable".to_string(),
+                    value: if battle.catchable { "Yes" } else { "No" }.to_string(),
+                },
+            ]),
+        });
+    }
+
+    sections
 }
 
 fn frlg_display_name(rom: &RomIdentity) -> &'static str {
