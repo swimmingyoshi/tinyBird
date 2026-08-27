@@ -400,6 +400,16 @@
           <section class="panel deckpanel" id="info-panel">
             <div class="tabs__pane" id="right-pane"></div>
 
+            <!-- Screenshots. A pane like saves, so it can be moved to the
+                 other column or shown under something else. -->
+            <div class="tabs__pane" id="pane-shots" hidden>
+              <ul class="shots" id="shots-list"></ul>
+              <p class="rail-note" id="shots-off">
+                Press <b>Screenshot</b> under the game and the pictures appear
+                here.
+              </p>
+            </div>
+
             <div class="tabs__pane" id="pane-saves" hidden>
               <div id="saves-panel" hidden>
                 <ul class="saves__list" id="saves-list"></ul>
@@ -480,6 +490,28 @@
 
             <ul class="lobby__list" id="lobby-members"></ul>
           </div>
+        </div>
+      </dialog>
+
+      <!-- A screenshot, full size.
+
+           The rail can only ever show a thumbnail, and a 240x160 picture shown
+           at 60px is a reminder that a screenshot exists rather than a way to
+           look at one. -->
+      <dialog class="sheet sheet--shot" id="shot-viewer">
+        <form method="dialog" class="sheet__head">
+          <p class="panel__eyebrow">
+            Screenshot<span class="panel__note" id="shot-when"></span>
+          </p>
+          <button class="key key--slim" type="submit">Close</button>
+        </form>
+        <div class="sheet__body sheet__body--shot">
+          <img class="shot__full" id="shot-full" alt="" />
+        </div>
+        <div class="sheet__foot">
+          <a class="key key--slim" id="shot-open" href="#" target="_blank" rel="noreferrer">
+            Open original
+          </a>
         </div>
       </dialog>
 

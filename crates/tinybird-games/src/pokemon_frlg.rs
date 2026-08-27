@@ -17,6 +17,7 @@ use tinybird_addons::schema::{
 };
 use tinybird_addons::{AddonInfo, GameAddon, MemoryView, RomIdentity};
 
+use crate::gen3_names;
 use crate::{AddonData, AddonSnapshot};
 
 const ADDON_VERSION: &str = "0.2.0";
@@ -1733,27 +1734,42 @@ fn move_slots(moves: [u16; 4], pp: [u8; 4]) -> Vec<FireRedMoveSlot> {
             (move_id != 0).then(|| FireRedMoveSlot {
                 slot: idx as u8 + 1,
                 move_id,
-                name: move_name(move_id).to_string(),
+                name: move_display_name(move_id),
                 pp,
             })
         })
         .collect()
 }
 
+/// The species name, preferring what the cartridge says.
+///
+/// The compiled table is a fallback, not the source of truth: it is right for
+/// the retail games and says nothing about a ROM hack, which the cartridge
+/// itself always describes correctly.
 fn species_display_name(species_id: u16) -> String {
-    fallback_species_info(species_id)
-        .map(|(name, _)| name.to_string())
+    gen3_names::species(species_id)
+        .or_else(|| fallback_species_info(species_id).map(|(name, _)| name.to_string()))
         .unwrap_or_else(|| format!("Species #{species_id:03}"))
 }
 
 fn held_item(item_id: u16) -> Option<FireRedHeldItem> {
     (item_id != 0).then(|| FireRedHeldItem {
         item_id,
-        name: item_name(item_id).to_string(),
+        name: item_display_name(item_id),
     })
 }
 
-fn item_name(item_id: u16) -> &'static str {
+/// The item name, preferring what the cartridge says.
+///
+/// This is the table the compiled fallback covers worst — a few dozen of the
+/// several hundred a Generation 3 game has — which is exactly why reading it
+/// out of the ROM was worth doing.
+fn item_display_name(item_id: u16) -> String {
+    gen3_names::item(item_id)
+        .unwrap_or_else(|| fallback_item_name(item_id).to_string())
+}
+
+fn fallback_item_name(item_id: u16) -> &'static str {
     match item_id {
         1 => "Master Ball",
         2 => "Ultra Ball",
@@ -2203,8 +2219,14 @@ fn move_data(move_id: u16) -> Option<(&'static str, u8)> {
     })
 }
 
-fn move_name(move_id: u16) -> &'static str {
-    move_data(move_id).map(|(name, _)| name).unwrap_or("Unknown Move")
+/// The move name, preferring what the cartridge says.
+///
+/// PP still comes from the compiled table: it lives in a different structure
+/// with its own layout, and a wrong bar is a worse trade than a right name.
+fn move_display_name(move_id: u16) -> String {
+    gen3_names::move_name(move_id)
+        .or_else(|| move_data(move_id).map(|(name, _)| name.to_string()))
+        .unwrap_or_else(|| format!("Move #{move_id:03}"))
 }
 
 /// Starting PP, so a move's remaining PP has something to be a fraction of.
@@ -3151,6 +3173,47 @@ mod tests {
         assert_eq!(battle.opponent.nickname, "PIDGEY");
         assert_eq!(battle.opponent.species_id, 16);
         assert_eq!(battle.opponent.current_hp, 17);
+    }
+
+    /// The name tables, found in a real cartridge rather than assumed.
+    ///
+    /// This is the test that would have caught a wrong stride or a bad anchor:
+    /// the unit tests plant their own tables, so they prove the search works on
+    /// a table shaped the way this code expects. Only a real ROM proves the
+    /// shape is right.
+    #[test]
+    #[ignore = "Needs a commercial ROM"]
+    fn name_tables_are_found_in_a_real_cartridge() {
+        let rom_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("roms/pokemon_fire_red.gba");
+        if !rom_path.is_file() {
+            eprintln!("no ROM at {}; nothing to check", rom_path.display());
+            return;
+        }
+
+        let mut gba = Gba::new();
+        gba.load_rom(std::fs::read(&rom_path).expect("read ROM"));
+        let memory = view(&gba);
+        let rom = tinybird_addons::read_rom_identity(&memory).expect("header");
+
+        gen3_names::ensure(&memory, &rom);
+
+        // Species, including the Hoenn block that sits past the unused slots.
+        assert_eq!(gen3_names::species(1).as_deref(), Some("Bulbasaur"));
+        assert_eq!(gen3_names::species(151).as_deref(), Some("Mew"));
+        assert_eq!(gen3_names::species(277).as_deref(), Some("Treecko"));
+
+        // Moves, including one well past where the old table stopped.
+        assert_eq!(gen3_names::move_name(1).as_deref(), Some("Pound"));
+        assert_eq!(gen3_names::move_name(33).as_deref(), Some("Tackle"));
+        assert_eq!(gen3_names::move_name(354).as_deref(), Some("Psycho Boost"));
+
+        // Items, which the compiled fallback barely covers.
+        assert_eq!(gen3_names::item(1).as_deref(), Some("Master Ball"));
+        assert_eq!(gen3_names::item(13).as_deref(), Some("Potion"));
+
+        eprintln!("item 179 = {:?}", gen3_names::item(179));
     }
 
     #[test]

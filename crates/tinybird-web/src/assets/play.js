@@ -113,6 +113,13 @@ const el = {
   deckHint: $("deck-hint"),
   savesOff: $("saves-off"),
   savesPane: $("pane-saves"),
+  shotsPane: $("pane-shots"),
+  shotsList: $("shots-list"),
+  shotsOff: $("shots-off"),
+  shotViewer: $("shot-viewer"),
+  shotFull: $("shot-full"),
+  shotWhen: $("shot-when"),
+  shotOpen: $("shot-open"),
   panePark: $("pane-park"),
   leftPane: $("left-pane"),
   rightPane: $("right-pane"),
@@ -874,6 +881,7 @@ function toggleCard(key) {
 
 const SIDES = ["left", "right"];
 const SAVES_PANE = "saves";
+const SHOTS_PANE = "shots";
 /** Most panes one column will stack. Two each is four on screen at once. */
 const MAX_SLOTS = 2;
 
@@ -928,9 +936,10 @@ function saveSlots() {
 }
 
 function sideOf(id) {
-  // Saves is the one pane worth defaulting to the right: it belongs to no game,
-  // and without it that rail would be empty until an addon claimed a cartridge.
-  return placement[id] ?? (id === SAVES_PANE ? "right" : "left");
+  // Saves and shots belong to no game, so they default to the right: without
+  // them that rail would be empty until an addon claimed a cartridge.
+  const ownsNoGame = id === SAVES_PANE || id === SHOTS_PANE;
+  return placement[id] ?? (ownsNoGame ? "right" : "left");
 }
 
 function moveTo(id, side) {
@@ -994,6 +1003,7 @@ function railItems(sections) {
       build: () => renderContent(section),
     })),
     { id: SAVES_PANE, title: "Saves", note: savesCount, node: el.savesPane },
+    { id: SHOTS_PANE, title: "Shots", note: shotsCount, node: el.shotsPane },
   ];
 }
 
@@ -1005,6 +1015,7 @@ function renderRails(sections) {
   // showing it will take it straight back; the rest of the time it sits in the
   // park rather than being detached from the document entirely.
   el.panePark.append(el.savesPane);
+  el.panePark.append(el.shotsPane);
 
   for (const side of SIDES) {
     const mine = items.filter((item) => sideOf(item.id) === side);
@@ -1033,6 +1044,7 @@ function renderRails(sections) {
 
   // Shown exactly when a rail took it back out of the park.
   el.savesPane.hidden = el.savesPane.parentElement === el.panePark;
+  el.shotsPane.hidden = el.shotsPane.parentElement === el.panePark;
 }
 
 /**
@@ -1077,6 +1089,8 @@ function renderSlot(side, index, available, item) {
           tab.append(flag);
         } else if (option.id === SAVES_PANE && savesCount) {
           tab.append(span("tabs__count", savesCount));
+        } else if (option.id === SHOTS_PANE && shotsCount) {
+          tab.append(span("tabs__count", shotsCount));
         }
         tab.addEventListener("click", () => selectTab(side, index, option.id));
         return tab;
@@ -2636,6 +2650,7 @@ window.addEventListener("gamepadconnected", () => {
 
 paintShortcuts();
 refreshPadPresence();
+refreshShots();
 
 /** Ask who we are. Also tells us whether accounts exist at all. */
 async function refreshAccount() {
@@ -2910,6 +2925,102 @@ function setSavesCount(text) {
   if (savesCount === text) return;
   savesCount = text;
   renderRails(lastSections);
+}
+
+// --- screenshots --------------------------------------------------------
+//
+// Taking one already worked; looking at one did not. The vault holds them as
+// ordinary images, so listing them is a filter on the same call the library
+// already makes, and the only new work is showing them at a size worth looking
+// at — a 240x160 picture in a 60px thumbnail is a reminder that a screenshot
+// exists rather than a way to see it.
+
+/** The count drawn on the Shots tab. */
+let shotsCount = "";
+
+function setShotsCount(text) {
+  if (shotsCount === text) return;
+  shotsCount = text;
+  renderRails(lastSections);
+}
+
+/**
+ * The screenshots in the vault, newest first.
+ *
+ * Names carry the millisecond they were taken, which is the only ordering the
+ * vault gives us — it lists by whatever order it likes.
+ */
+async function refreshShots() {
+  let assets = [];
+  try {
+    const response = await fetch("/api/library");
+    const body = await response.json();
+    if (!body.configured) {
+      el.shotsOff.textContent =
+        "Screenshots need the vault. Set TINYBIRD_MEDIA_KEY in .env and restart.";
+      showShots(false);
+      return;
+    }
+    assets = (body.assets ?? []).filter((asset) =>
+      /^image\//.test(asset.content_type ?? ""),
+    );
+  } catch {
+    showShots(false);
+    return;
+  }
+
+  if (assets.length === 0) {
+    showShots(false);
+    setShotsCount("");
+    return;
+  }
+
+  assets.sort((a, b) => takenAt(b.name) - takenAt(a.name));
+  showShots(true);
+  setShotsCount(`${assets.length}`);
+  el.shotsList.replaceChildren(...assets.map(renderShot));
+}
+
+function showShots(visible) {
+  el.shotsList.hidden = !visible;
+  el.shotsOff.hidden = visible;
+}
+
+/** The timestamp the upload put in the name, or 0 for anything older. */
+function takenAt(name) {
+  const match = /(\d{10,})\.png$/i.exec(name ?? "");
+  return match ? Number(match[1]) : 0;
+}
+
+function renderShot(asset) {
+  const item = document.createElement("li");
+
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "shots__item";
+  open.title = asset.name;
+
+  const image = document.createElement("img");
+  image.className = "shots__thumb";
+  image.src = asset.url;
+  image.alt = "";
+  image.loading = "lazy";
+  open.append(image);
+
+  const when = takenAt(asset.name);
+  if (when) open.append(span("shots__when", formatWhen(when)));
+
+  open.addEventListener("click", () => showShot(asset, when));
+  item.append(open);
+  return item;
+}
+
+function showShot(asset, when) {
+  el.shotFull.src = asset.url;
+  el.shotFull.alt = asset.name;
+  el.shotWhen.textContent = when ? formatWhen(when) : "";
+  el.shotOpen.href = asset.url;
+  el.shotViewer.showModal();
 }
 
 /** Reload the saves list for the current cartridge. */
@@ -3370,6 +3481,8 @@ el.store.addEventListener("click", async () => {
     const body = await response.json();
     if (!response.ok) throw new Error(body.error ?? `${response.status}`);
     say(`Uploaded ${body.name}`, "good");
+    // Straight into the gallery, so the picture is there when you look.
+    refreshShots();
     // The vault URL is public, so it is worth handing over.
     if (body.url) console.info("screenshot url:", body.url);
     lastUploadUrl = body.url ?? null;

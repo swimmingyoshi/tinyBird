@@ -112,6 +112,66 @@ fn parent_only(frame: u32) -> (GbaButton, GbaButton) {
     (beat(frame, 40, 6), GbaButton::empty())
 }
 
+/// Where FireRed keeps the player's party, and how big a slot is.
+const PARTY_BASE: u32 = 0x0202_4284;
+const PARTY_SLOT: u32 = 100;
+const PARTY_SLOTS: u32 = 6;
+
+/// Who is in a party right now, by the two fields that identify a Pokemon.
+///
+/// Personality value and original-trainer id, at offsets 0 and 4 of a slot.
+/// Both are **unencrypted** — the rest of the slot is XOR-scrambled with a key
+/// derived from these two — so a trade is detectable without decrypting
+/// anything or knowing what any of it means.
+///
+/// That is the whole trick: "did a Pokemon change hands" stops being a
+/// judgement call about a filmstrip and becomes a set comparison.
+fn party_ids(gba: &Gba) -> Vec<(u32, u32)> {
+    (0..PARTY_SLOTS)
+        .map(|slot| {
+            let at = PARTY_BASE + slot * PARTY_SLOT;
+            (gba.read_u32(at), gba.read_u32(at + 4))
+        })
+        // A personality of zero is an empty slot, not a Pokemon.
+        .filter(|(personality, _)| *personality != 0)
+        .collect()
+}
+
+/// What changed hands between two consoles, if anything.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Exchange {
+    /// Pokemon the parent has now that the child had before.
+    parent_received: usize,
+    /// And the other way.
+    child_received: usize,
+    /// Either party changed at all, trade or not — a level-up or an item
+    /// would do this too, so it is a hint rather than a verdict.
+    parties_changed: bool,
+}
+
+impl Exchange {
+    fn traded(&self) -> bool {
+        self.parent_received > 0 && self.child_received > 0
+    }
+}
+
+fn exchange(before: (&[(u32, u32)], &[(u32, u32)]), after: (&[(u32, u32)], &[(u32, u32)])) -> Exchange {
+    let (parent_before, child_before) = before;
+    let (parent_after, child_after) = after;
+
+    let gained = |now: &[(u32, u32)], had: &[(u32, u32)], theirs: &[(u32, u32)]| {
+        now.iter()
+            .filter(|id| !had.contains(id) && theirs.contains(id))
+            .count()
+    };
+
+    Exchange {
+        parent_received: gained(parent_after, parent_before, child_before),
+        child_received: gained(child_after, child_before, parent_before),
+        parties_changed: parent_after != parent_before || child_after != child_before,
+    }
+}
+
 /// What a run of one strategy came to.
 struct Outcome {
     transfers: usize,
@@ -120,6 +180,10 @@ struct Outcome {
     parent_values: usize,
     child_values: usize,
     ports: String,
+    /// Whether anything actually changed hands. This is the one that matters:
+    /// everything above says the cable is working, and only this says the
+    /// trade completed.
+    exchange: Exchange,
 }
 
 fn run(script: Script, seconds: u32, film: Option<&str>) -> Option<Outcome> {
@@ -182,6 +246,8 @@ fn run_with_jitter(
     }
     let mut consoles = vec![a, b];
     let mut targets: Vec<u64> = consoles.iter().map(|c| c.frame_count).collect();
+
+    let parties_before = (party_ids(&consoles[0]), party_ids(&consoles[1]));
 
     let mut transfers = 0usize;
     let mut parent_seen = HashSet::new();
@@ -277,11 +343,17 @@ fn run_with_jitter(
         println!("    screens changed {changes} times while filming");
     }
 
+    let parties_after = (party_ids(&consoles[0]), party_ids(&consoles[1]));
+
     Some(Outcome {
         transfers,
         parent_values: parent_seen.len(),
         child_values: child_seen.len(),
         ports: format!("{} | {}", port(&consoles[0]), port(&consoles[1])),
+        exchange: exchange(
+            (&parties_before.0, &parties_before.1),
+            (&parties_after.0, &parties_after.1),
+        ),
     })
 }
 
@@ -522,6 +594,7 @@ fn find_the_input_that_starts_a_trade() {
     ];
 
     let mut best: Option<(usize, &str)> = None;
+    let mut traded: Vec<&str> = Vec::new();
     for (name, script) in strategies {
         let outcome = run(script, 15, Some(name)).expect("consoles");
         println!(
@@ -529,6 +602,11 @@ fn find_the_input_that_starts_a_trade() {
             outcome.transfers, outcome.parent_values, outcome.child_values
         );
         println!("    {}", outcome.ports);
+        println!("    {}", describe(&outcome.exchange));
+
+        if outcome.exchange.traded() {
+            traded.push(name);
+        }
 
         // A console that only ever put one value on the wire never joined in.
         // Two that are actually trading both say many different things.
@@ -539,6 +617,35 @@ fn find_the_input_that_starts_a_trade() {
     }
 
     if let Some((score, name)) = best {
-        println!("\nfurthest: {name}, both consoles saying {score} distinct things");
+        println!("\nfurthest by chatter: {name}, both consoles saying {score} distinct things");
     }
+
+    // The line that matters. Chatter says the cable works; this says the trade
+    // finished, and until one of these strategies prints a name here the last
+    // step is still unsolved.
+    if traded.is_empty() {
+        println!("traded: none - every strategy links up and none completes an exchange");
+    } else {
+        println!("traded: {}", traded.join(", "));
+    }
+}
+
+/// A run's exchange, in words.
+fn describe(exchange: &Exchange) -> String {
+    if exchange.traded() {
+        return format!(
+            "TRADED: parent received {}, child received {}",
+            exchange.parent_received, exchange.child_received
+        );
+    }
+    if exchange.parent_received > 0 || exchange.child_received > 0 {
+        return format!(
+            "half a trade: parent received {}, child received {}",
+            exchange.parent_received, exchange.child_received
+        );
+    }
+    if exchange.parties_changed {
+        return "no trade, though a party changed somehow".to_string();
+    }
+    "no trade; both parties identical".to_string()
 }

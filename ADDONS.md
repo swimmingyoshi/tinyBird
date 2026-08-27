@@ -247,11 +247,10 @@ Use `tinybird-probe` to find the addresses —
   of the cartridge. Both are complete for Generation 3 — all 354 moves and all
   386 species — but see below for why reading them from the ROM would be
   better still.
-- FRLG: reading the name tables out of the ROM would beat hardcoding them. The
-  cartridge has moves, species and items, but at addresses that move between
-  FireRed, LeafGreen and their revisions — so it wants *searching* for a known
-  name rather than a hardcoded offset. That would also pick up items, which are
-  still barely covered.
+- FRLG: PP and catch rates are still compiled tables. Names are read from the
+  cartridge (see `gen3_names.rs`), but the numbers beside them live in
+  differently-shaped structures — `gBattleMoves` and the species base stats —
+  and would each need their own anchor to find.
 - FRLG: encounter tables are hand-entered per map, so an area with none names
   the map it is missing rather than being read from the ROM's wild-encounter
   header.
