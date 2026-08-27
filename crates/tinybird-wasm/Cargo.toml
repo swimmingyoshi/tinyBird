@@ -1,0 +1,20 @@
+[package]
+name = "tinybird-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "tinyBird emulator compiled to WebAssembly with a plain C ABI"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+tinybird-addons.workspace = true
+tinybird-core.workspace = true
+tinybird-games.workspace = true
+
+[package.metadata.tinybird]
+# Built with a plain `cargo build --target wasm32-unknown-unknown`; there is no
+# wasm-bindgen step, so the only prerequisite is `rustup target add`.
+target = "wasm32-unknown-unknown"

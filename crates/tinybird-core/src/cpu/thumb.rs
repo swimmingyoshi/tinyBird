@@ -1015,7 +1015,7 @@ fn exec_ldr<B: Bus>(
     let value = if is_byte {
         bus.read_u8(addr) as u32
     } else if is_half {
-        armv4_load_halfword(bus, addr) as u32
+        armv4_load_halfword(bus, addr)
     } else {
         armv4_load_word(bus, addr)
     };
@@ -1113,7 +1113,7 @@ fn exec_swi<B: Bus>(bus: &mut B, regs: &mut Registers, pipeline: &mut Pipeline, 
 
     // If a real BIOS is present, dispatch SWI via exception vector.
     // The built-in HLE stub starts with BX LR at 0x00000000.
-    let has_real_bios = bus.read_u32(0x0000_0000) != 0xE12F_FF1E;
+    let has_real_bios = bus.has_real_bios();
     if has_real_bios && !Bios::should_hle_with_real_bios(swi_comment) {
         let lr_offset = if regs.is_thumb_mode() { 2 } else { 4 };
         regs.enter_exception(CpuMode::Supervisor, lr_offset);
@@ -1343,7 +1343,9 @@ mod tests {
         // LDRH R0, [R1, #0]
         run_thumb_with_bus(0x8808, &mut regs, &mut bus, &mut pipeline);
 
-        assert_eq!(regs.get_reg(0), 0x3412);
+        // Thumb rotates the 32-bit value too; jsmolka's thumb.gba checks this
+        // as test 211.
+        assert_eq!(regs.get_reg(0), 0x3400_0012);
     }
 
     #[test]

@@ -236,19 +236,47 @@ impl AudioHandler {
     pub fn push_samples(&self, samples: &[i16], source_rate: u32) {
         let mut state = lock_shared_state(self.shared_state.as_ref());
         state.source_rate = source_rate.max(1);
-        let max_samples = frames_for_millis(state.source_rate, MAX_BUFFERED_MILLIS) * 2;
-        let incoming = samples.len();
-        let overflow = state
-            .samples
-            .len()
-            .saturating_add(incoming)
-            .saturating_sub(max_samples);
-        let overflow = (overflow + 1) & !1;
-        if overflow > 0 {
-            state.samples.drain(..overflow);
-        }
-        state.samples.extend(samples.iter().copied());
+        let max_samples = (frames_for_millis(state.source_rate, MAX_BUFFERED_MILLIS) * 2).max(2);
+        append_bounded(&mut state.samples, samples, max_samples);
     }
+}
+
+/// Append `samples` to `buffer`, dropping the oldest audio to stay within
+/// `max_samples`.
+///
+/// Split out from `AudioHandler` so it can be tested without an audio device.
+///
+/// The size checks are not decoration: a batch larger than the whole buffer is
+/// reachable in practice — loading a savestate that carries a backlog of
+/// undrained audio hands the backend millions of samples at once — and the
+/// previous arithmetic computed a drain range past the end of the buffer and
+/// panicked.
+fn append_bounded(buffer: &mut VecDeque<i16>, samples: &[i16], max_samples: usize) {
+    if samples.len() >= max_samples {
+        // Keep the newest audio, starting on an even index so the kept run
+        // begins on a left sample, and trimming any trailing half-frame so the
+        // buffer length stays even.
+        let keep_from = samples.len() - max_samples;
+        let keep_from = keep_from + (keep_from % 2);
+        let mut tail = &samples[keep_from..];
+        if !tail.len().is_multiple_of(2) {
+            tail = &tail[..tail.len() - 1];
+        }
+        buffer.clear();
+        buffer.extend(tail.iter().copied());
+        return;
+    }
+
+    let overflow = buffer
+        .len()
+        .saturating_add(samples.len())
+        .saturating_sub(max_samples);
+    // Round up to a whole stereo frame, and never drain more than is there.
+    let overflow = ((overflow + 1) & !1).min(buffer.len());
+    if overflow > 0 {
+        buffer.drain(..overflow);
+    }
+    buffer.extend(samples.iter().copied());
 }
 
 fn write_output_f32(
@@ -316,6 +344,84 @@ where
                 let value = if idx % 2 == 0 { left } else { right };
                 *sample = convert(value);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer_of(values: &[i16]) -> VecDeque<i16> {
+        values.iter().copied().collect()
+    }
+
+    fn contents(buffer: &VecDeque<i16>) -> Vec<i16> {
+        buffer.iter().copied().collect()
+    }
+
+    #[test]
+    fn a_batch_that_fits_is_appended_whole() {
+        let mut buffer = buffer_of(&[1, 2]);
+        append_bounded(&mut buffer, &[3, 4], 8);
+        assert_eq!(contents(&buffer), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn the_oldest_audio_is_dropped_at_the_limit() {
+        let mut buffer = buffer_of(&[1, 2, 3, 4]);
+        append_bounded(&mut buffer, &[5, 6], 4);
+        assert_eq!(contents(&buffer), vec![3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn an_oversized_batch_replaces_the_buffer_instead_of_panicking() {
+        // This is the savestate case: the APU handed over far more audio than
+        // the output buffer can hold. The previous code drained past the end.
+        let mut buffer = buffer_of(&[1, 2]);
+        let huge: Vec<i16> = (0..1000).collect();
+        append_bounded(&mut buffer, &huge, 4);
+
+        assert_eq!(buffer.len(), 4);
+        assert_eq!(contents(&buffer), vec![996, 997, 998, 999], "keeps the newest audio");
+    }
+
+    #[test]
+    fn an_oversized_batch_stays_stereo_aligned() {
+        // An odd keep-point would swap left and right for the whole batch.
+        let mut buffer = VecDeque::new();
+        // An odd-length batch is not something the APU produces, but the audio
+        // path must not corrupt channel order if it ever sees one.
+        let huge: Vec<i16> = (0..1001).collect();
+        append_bounded(&mut buffer, &huge, 4);
+
+        assert!(
+            buffer.len().is_multiple_of(2),
+            "an odd buffer swaps left and right for everything after it"
+        );
+        assert_eq!(buffer[0] % 2, 0, "batch must start on a left sample");
+    }
+
+    #[test]
+    fn a_batch_exactly_the_limit_is_kept_entirely() {
+        let mut buffer = buffer_of(&[9, 9]);
+        append_bounded(&mut buffer, &[1, 2, 3, 4], 4);
+        assert_eq!(contents(&buffer), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn an_empty_batch_leaves_the_buffer_alone() {
+        let mut buffer = buffer_of(&[1, 2]);
+        append_bounded(&mut buffer, &[], 8);
+        assert_eq!(contents(&buffer), vec![1, 2]);
+    }
+
+    #[test]
+    fn the_buffer_never_exceeds_the_limit_across_many_pushes() {
+        let mut buffer = VecDeque::new();
+        for round in 0..50i16 {
+            append_bounded(&mut buffer, &[round, round], 10);
+            assert!(buffer.len() <= 10, "overshot at round {round}");
         }
     }
 }

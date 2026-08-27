@@ -4,8 +4,12 @@ members = [
     "crates/tinybird-addons",
     "crates/tinybird-core",
     "crates/tinybird-desktop",
+    "crates/tinybird-games",
+    "crates/tinybird-probe",
+    "crates/tinybird-wasm",
     "crates/tinybird-web",
 ]
+default-members = ["crates/tinybird-desktop"]
 
 [workspace.package]
 version = "0.1.0"
@@ -23,6 +27,8 @@ opt-level = 3
 # Internal crates
 tinybird-addons = { path = "crates/tinybird-addons" }
 tinybird-core = { path = "crates/tinybird-core" }
+tinybird-games = { path = "crates/tinybird-games" }
+tinybird-wasm = { path = "crates/tinybird-wasm" }
 
 # External dependencies (common)
 bitflags = "2.4"

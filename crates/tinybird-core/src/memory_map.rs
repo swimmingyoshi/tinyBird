@@ -75,7 +75,10 @@ pub const REGION_ROM_MAX_SIZE: usize = 0x200_0000;
 #[allow(missing_docs)]
 pub const REGION_SRAM_START: u32 = 0x0E00_0000;
 #[allow(missing_docs)]
-pub const REGION_SRAM_END: u32 = 0x0E00_FFFF;
+/// The Game Pak SRAM window runs to the top of the address space, mirroring the
+/// 64 KB chip every 64 KB. Stopping the region at the first mirror left reads
+/// above `0x0E00FFFF` falling through to open bus.
+pub const REGION_SRAM_END: u32 = 0x0FFF_FFFF;
 #[allow(missing_docs)]
 pub const REGION_SRAM_SIZE: usize = 0x10000;
 

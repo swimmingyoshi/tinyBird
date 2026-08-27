@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The desktop frontend needs a windowing stack; the core, the addons and
+      # the web server do not, so CI builds what it can check rather than
+      # pulling in a display server to compile a binary it never runs.
+      - name: Build
+        run: cargo build -p tinybird-core -p tinybird-addons -p tinybird-games -p tinybird-web
+
+      - name: Unit tests
+        run: cargo test -p tinybird-core -p tinybird-addons -p tinybird-games -p tinybird-web
+
+      # Reporting only. The core carries a lint backlog that predates this
+      # workflow, and because the crates share a workspace its warnings surface
+      # when the others are linted too — so there is no subset that could be
+      # gated honestly today. Clear the backlog, then add `-- -D warnings`.
+      # A gate nobody can pass gets switched off rather than fixed.
+      - name: Clippy
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets
+
+      # No `cargo fmt --check` yet: the tree predates one and a formatting pass
+      # would bury real changes under a diff nobody can review. Run `cargo fmt`
+      # once on a quiet commit, then add the gate here.
+
+  accuracy:
+    name: Accuracy (GBA test ROMs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch test ROMs
+        run: ./scripts/fetch-test-roms.sh
+
+      # A gate. Every ROM in the suite passes, so a failure here is a
+      # regression rather than a known gap.
+      - name: Run the accuracy suite
+        run: cargo test -p tinybird-core --test accuracy -- --nocapture --test-threads=1
+
+  wasm:
+    name: WebAssembly build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the emulator module
+        run: cargo build -p tinybird-wasm --target wasm32-unknown-unknown --release
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # The browser-side modules that carry real logic and no DOM. This runs
+      # after the module is built because one of them needs it: the link cable
+      # tests load two copies of the emulator and cable them together, which is
+      # the closest thing to two players that fits in a test.
+      - name: Browser module tests
+        run: node --test crates/tinybird-web/src/assets/*.test.mjs

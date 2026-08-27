@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Desktop frontend for the tinyBird GBA emulator"
+default-run = "tinybird"
 
 [[bin]]
 name = "tinybird"
@@ -13,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 tinybird-addons.workspace = true
 tinybird-core.workspace = true
+tinybird-games.workspace = true
 winit.workspace = true
 softbuffer.workspace = true
 cpal.workspace = true

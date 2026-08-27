@@ -1,0 +1,2403 @@
+/* tinyBird console
+   ----------------------------------------------------------------------
+   The page's job is to boot a cartridge, so the running screen is the hero
+   and everything else is instrumentation around it.
+
+   Two decisions carry the identity:
+
+   1. Everything is monospace. Nearly all the content is machine data — game
+      codes, HP values, byte counts, addresses — and a mono body face makes
+      those columns line up without tabular-figure tricks. Silkscreen, a true
+      bitmap face, is used only for headings and the cartridge label, where
+      its poor legibility at small sizes does not matter.
+
+   2. Amber marks identity, teal marks live data. The pair is inherited from
+      the desktop app's palette so the two frontends read as one product.
+
+   Hard edges throughout: no border-radius anywhere. A GBA is a moulded
+   plastic brick and a 240x160 grid of square pixels; rounding corners here
+   would fight both.
+   ---------------------------------------------------------------------- */
+
+:root {
+  /* Palette ------------------------------------------------------------ */
+  --void: #06090f; /* page ground, darker than the panels so the screen glows */
+  --shell: #101724; /* panel fill */
+  --shell-hi: #17203100; /* transparent stop for shell gradients */
+  --rule: #24304a; /* hairlines and borders */
+  --amber: #ff9f1c; /* identity: headings, the active cartridge, focus */
+  --teal: #2ec4b6; /* live data: values read out of the running game */
+  --ink: #f7f3ec;
+  --dim: #7c8aa3;
+  --bad: #e55a5a;
+
+  /* Type --------------------------------------------------------------- */
+  --display: "Silkscreen", "Courier New", monospace;
+  --body: "IBM Plex Mono", ui-monospace, "Consolas", monospace;
+
+  /* The screen is 240x160; every size below is a multiple of 8 so the
+     layout shares the console's own grid. */
+  --unit: 8px;
+  --gutter: calc(var(--unit) * 3);
+  --edge: 1px solid var(--rule);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Any rule that sets `display` beats the `hidden` attribute, and several below
+   do. Without this the drop overlay and the cartridge panel are always on. */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  background: var(--void);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 13px;
+  line-height: 1.5;
+  /* Deliberately flat. An earlier version tinted the ground with a teal
+     pinstripe; it read as noise behind body text and carried no meaning. */
+}
+
+a {
+  color: inherit;
+}
+
+b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+code {
+  font-family: var(--body);
+  color: var(--teal);
+}
+
+:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+.rig {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: var(--gutter);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gutter);
+  min-height: 100vh;
+}
+
+/* Chrome ---------------------------------------------------------------- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--gutter);
+  padding-bottom: var(--unit);
+  border-bottom: var(--edge);
+}
+
+.bar__mark {
+  display: flex;
+  align-items: center;
+  gap: var(--unit);
+  font-family: var(--display);
+  font-size: 15px;
+  color: var(--amber);
+  text-decoration: none;
+  letter-spacing: 0.02em;
+}
+
+/* The mark: a 3x3 block of pixels, drawn with shadows rather than an image
+   so it stays crisp at any zoom and needs no network request. */
+.bar__glyph {
+  width: 4px;
+  height: 4px;
+  background: var(--amber);
+  box-shadow:
+    6px 0 var(--amber),
+    12px 0 var(--teal),
+    0 6px var(--teal),
+    6px 6px var(--amber),
+    0 12px var(--amber),
+    12px 12px var(--amber);
+  margin-right: 12px;
+}
+
+.bar__nav {
+  display: flex;
+  gap: calc(var(--unit) * 2);
+  margin-left: auto;
+  font-size: 12px;
+}
+
+.bar__nav a {
+  color: var(--dim);
+  text-decoration: none;
+  padding-bottom: 2px;
+  border-bottom: 2px solid transparent;
+}
+
+.bar__nav a:hover {
+  color: var(--ink);
+}
+
+.bar__nav a.is-current {
+  color: var(--ink);
+  border-bottom-color: var(--amber);
+}
+
+.bar__state {
+  display: flex;
+  align-items: center;
+  gap: var(--unit);
+  margin: 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  background: var(--dim);
+}
+
+.bar__state[data-state="live"] .dot {
+  background: var(--teal);
+  /* Only the live indicator animates. One moving thing on the page. */
+  animation: pulse 1.6s steps(2, end) infinite;
+}
+
+.bar__state[data-state="live"] {
+  color: var(--teal);
+}
+
+.bar__state[data-state="error"] .dot {
+  background: var(--bad);
+}
+
+.bar__state[data-state="error"] {
+  color: var(--bad);
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* Footer ---------------------------------------------------------------- */
+
+/* The home page still has one. The play page moved its status line to the top,
+   where you can read it without leaving the game. */
+.foot {
+  display: flex;
+  gap: var(--gutter);
+  padding-top: var(--unit);
+  border-top: var(--edge);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.foot #foot-msg {
+  margin-left: auto;
+  text-align: right;
+}
+
+.foot #foot-msg[data-tone="bad"] {
+  color: var(--bad);
+}
+
+.foot #foot-msg[data-tone="good"] {
+  color: var(--teal);
+}
+
+/* Status ---------------------------------------------------------------- */
+
+/* Frame rate and the last message, directly under the header. Fixed height so
+   a message arriving never nudges the screen down a few pixels mid-game. */
+.status {
+  display: flex;
+  align-items: center;
+  gap: var(--gutter);
+  min-height: 22px;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.status__perf {
+  font-family: var(--display);
+  font-size: 10px;
+  color: var(--teal);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.status__msg {
+  margin-left: auto;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status__msg[data-tone="bad"] {
+  color: var(--bad);
+}
+
+.status__msg[data-tone="good"] {
+  color: var(--teal);
+}
+
+/* Layout ---------------------------------------------------------------- */
+
+/* Addons left, game centre, cartridge and storage right.
+
+   The rails are fixed and the centre is fluid, so the screen takes every pixel
+   the rails do not need and stays optically centred in the page. Placement is
+   by named area rather than source order: the screen comes first in the markup
+   because it is what the page is for, and that is the order a keyboard and a
+   narrow viewport should both get. */
+.deck {
+  display: grid;
+  grid-template-columns: 356px minmax(0, 1fr) 300px;
+  grid-template-areas: "addons screen info";
+  gap: var(--gutter);
+  align-items: start;
+  flex: 1;
+}
+
+.screen-col {
+  grid-area: screen;
+}
+
+.readout--addons {
+  grid-area: addons;
+  /* A full FireRed read-out is several times the height of the screen it
+     describes. Scrolling it with the page would carry the game out of view,
+     which is backwards: the read-out is the thing you scroll, the screen is
+     the thing you are watching. So the rail sticks and scrolls inside itself. */
+  position: sticky;
+  top: var(--gutter);
+  max-height: calc(100vh - var(--gutter) * 2);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule) transparent;
+}
+
+.readout--info {
+  grid-area: info;
+}
+
+/* Says what the empty rail is for. Hidden by script as soon as an addon
+   claims the cartridge, so the column is never just a blank stripe. */
+.rail-note {
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.6;
+  border-left: 2px solid var(--rule);
+  padding-left: var(--unit);
+}
+
+.screen-col {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--unit) * 2);
+  min-width: 0;
+}
+
+/* Screen ---------------------------------------------------------------- */
+
+.screen {
+  position: relative;
+  aspect-ratio: 240 / 160;
+  background: #000;
+  border: var(--edge);
+  /* The bezel: a thin inner glow so the lit panel sits inside a dark shell,
+     the way the real hardware's screen sits inside its moulding. */
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.9),
+    0 0 0 1px rgba(46, 196, 182, 0.12),
+    0 20px 60px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+
+/* The screen centres a panel that is an exact multiple of 240x160. Stretching
+   the canvas to fill produced uneven pixel widths — some source pixels two
+   device pixels wide, some three — which is what made the picture look mushy
+   next to the desktop build. */
+.screen {
+  display: grid;
+  place-items: center;
+}
+
+/* Filling the display, the bezel has nothing to sit inside, and the fixed
+   aspect ratio would letterbox the letterbox. The panel keeps its own shape;
+   the shell around it just gets out of the way. */
+.screen:fullscreen {
+  width: 100vw;
+  height: 100vh;
+  aspect-ratio: auto;
+  border: 0;
+  box-shadow: none;
+}
+
+.screen__panel {
+  position: relative;
+  line-height: 0;
+}
+
+.screen canvas {
+  display: block;
+  /* Sized by script in whole pixels; never stretched by the layout. */
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/* Scanlines, off by default.
+   One dark line per *source* pixel row, aligned to the integer scale via
+   --px. A fixed 3px pattern over a fractionally scaled canvas moirés against
+   the picture, which is worse than no texture at all. Horizontal only: a full
+   grid removes far too much light at the sizes this actually renders at. */
+.screen__grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(
+    rgba(0, 0, 0, 0.28) 1px,
+    transparent 1px
+  );
+  background-size: 100% var(--px, 3px);
+  opacity: 0;
+  transition: opacity 120ms linear;
+}
+
+.screen[data-grid="on"] .screen__grid {
+  opacity: 1;
+}
+
+/* Below 3x there is no room for a line and a lit row, so the overlay would
+   just dim the picture. */
+.screen[data-scale="1"] .screen__grid,
+.screen[data-scale="2"] .screen__grid {
+  opacity: 0;
+}
+
+/* Power-on wipe. The hardware's own vernacular, and it marks the moment a
+   cartridge takes over the screen. */
+.screen__boot {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: var(--ink);
+  opacity: 0;
+}
+
+.screen.is-booting .screen__boot {
+  animation: boot 420ms steps(6, end) 1;
+}
+
+@keyframes boot {
+  0% {
+    opacity: 0.85;
+    transform: scaleY(0.02);
+  }
+  40% {
+    opacity: 0.55;
+    transform: scaleY(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scaleY(1);
+  }
+}
+
+.screen__empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: var(--unit);
+  padding: var(--gutter);
+  text-align: center;
+}
+
+.screen[data-mode="running"] .screen__empty {
+  display: none;
+}
+
+.screen__empty-title {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 15px;
+  color: var(--amber);
+}
+
+.screen__empty-body {
+  margin: 0;
+  max-width: 34ch;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+/* Focus mode -------------------------------------------------------------
+
+   Everything that is not the game or the read-out gets out of the way: the
+   header bar, the control deck, the key legend. What stays is the screen and
+   the two rails, because the rails are what you are reading *while* you play —
+   hiding them would make this a fullscreen button, which the deck already has.
+
+   The status line stays too. It is one line, it carries the frame rate and
+   whatever the page last said, and losing it would mean a mode where the page
+   can no longer tell you anything — including how to leave. */
+
+.rig[data-focus="on"] .bar,
+.rig[data-focus="on"] .deckplate,
+.rig[data-focus="on"] .hint,
+.rig[data-focus="on"] .stage {
+  display: none;
+}
+
+/* The picture is width-bound: the screen keeps a 240x160 aspect ratio, so its
+   height follows its width and only width decides how big the game gets. Two
+   things cap it, and focus mode lifts both — the page's reading measure, which
+   exists for text there is now less of, and the rails, which give up the width
+   they were using for comfort.
+
+   Worth about one whole integer step of scale on a 1600px screen: 2x to 3x. */
+.rig[data-focus="on"] {
+  max-width: none;
+}
+
+.rig[data-focus="on"] .deck {
+  /* The right rail gives up more than the left. It usually holds only saves,
+     while the left is carrying party cards whose names wrap the moment the
+     column gets tight. */
+  grid-template-columns: 320px minmax(0, 1fr) 256px;
+}
+
+/* The way back, in the corner it would be looked for. Not a control — the key
+   does the work — just a reminder that the key exists. */
+.focus-exit {
+  position: fixed;
+  right: var(--gutter);
+  bottom: var(--gutter);
+  z-index: 5;
+  padding: 4px 8px;
+  background: var(--shell);
+  border: var(--edge);
+  color: var(--dim);
+  font-size: 10px;
+  pointer-events: none;
+}
+
+.rig[data-focus="off"] .focus-exit {
+  display: none;
+}
+
+/* Controls -------------------------------------------------------------- */
+
+.deckplate {
+  display: flex;
+  flex-direction: column;
+  gap: var(--unit);
+  padding: calc(var(--unit) * 1.5);
+  background: var(--shell);
+  border: var(--edge);
+}
+
+.deckplate__row {
+  display: flex;
+  gap: var(--unit);
+  flex-wrap: wrap;
+}
+
+.deckplate__row--split {
+  border-top: var(--edge);
+  padding-top: calc(var(--unit) * 1.5);
+  margin-top: calc(var(--unit) * 0.5);
+}
+
+.key {
+  flex: 1 1 auto;
+  min-width: 96px;
+  padding: 9px 12px;
+  background: #182131;
+  color: var(--ink);
+  border: var(--edge);
+  border-radius: 0;
+  font-family: var(--body);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  text-align: center;
+  /* A one-pixel lip on top, so the buttons read as physical keys without
+     any gradient or shadow doing the work. */
+  border-top-color: #2d3a54;
+  transition: background 90ms linear, color 90ms linear;
+}
+
+.key:hover:not(:disabled) {
+  background: #212c40;
+  border-color: var(--teal);
+}
+
+.key:active:not(:disabled) {
+  background: #0d1420;
+  border-top-color: var(--rule);
+}
+
+.key:disabled {
+  color: #4a566c;
+  cursor: not-allowed;
+  background: #121926;
+}
+
+.key[aria-pressed="true"] {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: #10141f;
+  font-weight: 600;
+}
+
+.key--file {
+  display: inline-block;
+}
+
+.key--wide {
+  width: 100%;
+  margin-top: var(--unit);
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--unit);
+  font-size: 12px;
+  color: var(--dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* A square checkbox that fills amber. Native controls are rounded and
+   platform-coloured, which would be the one soft shape on the page. */
+.toggle input {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  background: #0b111c;
+  border: 1px solid var(--rule);
+  cursor: pointer;
+}
+
+.toggle input:checked {
+  background: var(--amber);
+  border-color: var(--amber);
+}
+
+.toggle input:checked + span {
+  color: var(--ink);
+}
+
+.hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--dim);
+  line-height: 1.7;
+}
+
+/* Racks ------------------------------------------------------------------
+
+   The deck used to be four undifferentiated rows of keys. "Save state", "Save
+   to vault" and "Screenshot to vault" sat next to each other with nothing
+   saying that the first is a file on this computer and the second is a thing
+   kept in an account — you had to click one to learn the difference.
+
+   Each group now says what it is for, and the keys carry their own keyboard
+   shortcut, so the deck teaches the keyboard rather than competing with it. */
+
+.rack + .rack {
+  padding-top: calc(var(--unit) * 1.5);
+  border-top: var(--edge);
+}
+
+.rack__label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--unit);
+  margin: 0 0 var(--unit);
+  font-family: var(--display);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+
+/* The half-sentence that stops a group needing to be clicked to be understood. */
+.rack__note {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--body);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--dim);
+}
+
+.rack__keys {
+  display: flex;
+  gap: var(--unit);
+  flex-wrap: wrap;
+}
+
+/* Keys share a row evenly, but a group holding only one of them should not
+   stretch it the full width of the deck — a button that wide reads as the
+   most important thing on the page, and "Controls" is not. */
+.rack__keys > .key:only-child {
+  flex: 0 1 auto;
+  min-width: 168px;
+}
+
+.rack__keys--dials {
+  gap: calc(var(--unit) * 2);
+}
+
+.rack__toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--unit) calc(var(--unit) * 2);
+  margin-top: var(--unit);
+}
+
+/* The shortcut printed on the key that also does the thing. Dim and small:
+   it is a reminder, not a label, and it must not compete with the verb. */
+.key__hint {
+  margin-left: 6px;
+  padding: 1px 4px;
+  font-family: var(--body);
+  font-size: 10px;
+  color: var(--dim);
+  background: rgba(6, 9, 15, 0.6);
+  border: 1px solid var(--rule);
+}
+
+.key:hover:not(:disabled) .key__hint {
+  color: var(--ink);
+}
+
+/* "pad" on the Controls key, so a connected controller is visible without
+   opening anything. */
+.key__badge {
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 10px;
+  color: var(--void);
+  background: var(--teal);
+}
+
+/* Controls sheet ---------------------------------------------------------
+
+   A dialog rather than another rail panel: rebinding needs the whole keyboard
+   to itself while it listens, and a panel you can tab around is a panel that
+   captures Tab as a binding. */
+
+.sheet {
+  width: min(560px, calc(100vw - var(--gutter) * 2));
+  max-height: calc(100vh - var(--gutter) * 2);
+  padding: 0;
+  background: var(--shell);
+  color: var(--ink);
+  border: var(--edge);
+  border-top: 3px solid var(--amber);
+  font-family: var(--body);
+  font-size: 13px;
+}
+
+.sheet::backdrop {
+  background: rgba(6, 9, 15, 0.82);
+}
+
+.sheet__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--unit);
+  padding: calc(var(--unit) * 2);
+  border-bottom: var(--edge);
+}
+
+.sheet__head .panel__eyebrow {
+  margin: 0;
+}
+
+.sheet__lead {
+  margin: 0;
+  padding: var(--unit) calc(var(--unit) * 2);
+  font-size: 11px;
+  color: var(--dim);
+  border-bottom: var(--edge);
+}
+
+/* Whether a controller is there at all, which is the first question anyone
+   opening this panel to set one up actually has. */
+.sheet__pad {
+  display: block;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.sheet[data-pad="on"] .sheet__pad {
+  color: var(--teal);
+}
+
+.sheet__body {
+  max-height: 52vh;
+  overflow-y: auto;
+  padding: calc(var(--unit) * 2);
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule) transparent;
+}
+
+.sheet__foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: calc(var(--unit) * 1.5) calc(var(--unit) * 2);
+  border-top: var(--edge);
+}
+
+/* While the panel is listening for an input, say so loudly — the page is
+   swallowing every key and that has to be visibly deliberate. */
+.sheet[data-capturing="on"] .sheet__lead {
+  color: var(--void);
+  background: var(--amber);
+}
+
+.binds + .binds {
+  margin-top: calc(var(--unit) * 2);
+}
+
+.binds__label {
+  margin-bottom: var(--unit);
+  font-family: var(--display);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+
+.bind {
+  display: flex;
+  align-items: center;
+  gap: var(--unit);
+  padding: 5px 0;
+  border-top: 1px solid rgba(36, 48, 74, 0.6);
+}
+
+.bind__label {
+  flex: 0 0 108px;
+  color: var(--dim);
+}
+
+.bind__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.bind__none {
+  font-size: 11px;
+  color: #4a566c;
+}
+
+/* A bound input: the label rebinds it, the × removes it. Two targets in one
+   chip, so neither needs a row of its own. */
+.chip--bind {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+}
+
+.chip__swap,
+.chip__drop {
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+
+.chip__swap:hover {
+  color: var(--amber);
+}
+
+.chip__drop {
+  padding-left: 4px;
+  color: var(--dim);
+  border-left: 1px solid var(--rule);
+}
+
+.chip__drop:hover {
+  color: var(--bad);
+}
+
+.chip--bind[data-kind="pad"] {
+  border-color: rgba(46, 196, 182, 0.5);
+  color: var(--teal);
+}
+
+.chip--add {
+  padding: 2px 8px;
+  background: none;
+  border: 1px dashed var(--rule);
+  color: var(--dim);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.chip--add:hover {
+  border-style: solid;
+  border-color: var(--teal);
+  color: var(--teal);
+}
+
+/* Read-out -------------------------------------------------------------- */
+
+.readout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gutter);
+  min-width: 0;
+}
+
+/* The cartridge, as a strip.
+
+   This was a tall panel with the game code set at 34px — the one piece of
+   typography on the page allowed to be loud. It was also, by then, the third
+   place the same cartridge was named: the header bar carries the ROM filename
+   and the read-out rail is headed by the addon that claimed it. Loud is only
+   worth a column when it is saying something new.
+
+   What survives is the part nothing else says: the code the addon registry
+   matches on, split at exactly the boundary it matches at — three characters
+   for the game, the fourth for the region. Still the accent, still split, on
+   one line instead of six. */
+.cartstrip {
+  display: flex;
+  align-items: baseline;
+  gap: var(--unit);
+  padding: 6px var(--unit);
+  background: var(--shell);
+  border: var(--edge);
+  border-left: 3px solid var(--amber);
+  font-size: 11px;
+}
+
+.cartstrip__code {
+  font-family: var(--display);
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+}
+
+/* The region letter, the character the registry keys off. */
+.cartstrip__region {
+  color: var(--amber);
+}
+
+.cartstrip__facts {
+  display: flex;
+  gap: 6px;
+  color: var(--dim);
+}
+
+.cartstrip__addon {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  color: var(--teal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.panel__eyebrow {
+  margin: 0 0 var(--unit);
+  font-family: var(--display);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--amber);
+}
+
+.panel {
+  padding: calc(var(--unit) * 2);
+  background: var(--shell);
+  border: var(--edge);
+}
+
+.panel__note {
+  float: right;
+  color: var(--dim);
+  font-family: var(--body);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.panel__body {
+  font-size: 12px;
+}
+
+/* Rail tabs --------------------------------------------------------------
+
+   Saves, lobby and library used to be three panels stacked down the column,
+   permanently on screen for three things you touch occasionally — and the
+   saves list, the one with pictures in it, got whatever height was left over.
+
+   Tabbed, whichever you are looking at gets the whole column. The counts stay
+   on the tabs so the two you are not looking at can still tell you something:
+   being in a room matters while you are reading your saves. */
+
+.deckpanel {
+  padding: 0;
+}
+
+/* The addon name and its capabilities, above the tab strip. */
+.rail__head {
+  padding: var(--unit) calc(var(--unit) * 2) 0;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  border-bottom: var(--edge);
+}
+
+.tabs__tab {
+  /* Grow to share the row, but never below the width of a short word: a rail
+     holding six sections should wrap onto a second row rather than shrink
+     "Encounters" to nothing. */
+  flex: 1 1 auto;
+  min-width: 72px;
+  padding: var(--unit) 6px;
+  background: #0d1420;
+  border: 0;
+  border-right: var(--edge);
+  color: var(--dim);
+  font-family: var(--display);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.tabs__tab:last-child {
+  border-right: 0;
+}
+
+.tabs__tab:hover {
+  color: var(--ink);
+}
+
+/* The selected tab is the top of the panel below it, so it loses its own
+   floor and takes the panel's fill. */
+.tabs__tab[aria-selected="true"] {
+  background: var(--shell);
+  color: var(--amber);
+  box-shadow: inset 0 2px 0 var(--amber);
+}
+
+.tabs__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabs__count {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--body);
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tabs__tab[aria-selected="true"] .tabs__count {
+  color: var(--teal);
+}
+
+/* The addon's own flag on a tab. Louder than the saves count under it, because
+   the count is a fact and this is the addon saying "look at this now" — it is
+   the only thing on the rail allowed to interrupt what you were reading. */
+.tabs__flag {
+  display: block;
+  margin-top: 2px;
+  padding: 0 3px;
+  font-family: var(--body);
+  font-size: 9px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--void);
+  background: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tabs__flag[data-tone="good"] {
+  background: var(--teal);
+}
+
+.tabs__flag[data-tone="warn"] {
+  background: var(--amber);
+}
+
+.tabs__flag[data-tone="bad"] {
+  background: var(--bad);
+}
+
+.tabs__pane {
+  /* Padding belongs to the slots inside, since a split column has two of them
+     and the divider between should reach both edges. */
+  min-height: 300px;
+}
+
+/* Except the saves pane, which is a leaf rather than a slot host. */
+#pane-saves {
+  padding: 0;
+}
+
+/* Live game data, rendered from the addon snapshot. */
+.stat {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--unit);
+  padding: 3px 0;
+  border-top: 1px solid rgba(36, 48, 74, 0.6);
+}
+
+.stat:first-child {
+  border-top: 0;
+}
+
+.stat__label {
+  color: var(--dim);
+}
+
+.stat__value {
+  color: var(--teal);
+  text-align: right;
+}
+
+.rows {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.rows th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--dim);
+  padding: 2px 6px 4px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.rows td {
+  padding: 3px 6px 3px 0;
+  border-bottom: 1px solid rgba(36, 48, 74, 0.45);
+  color: var(--ink);
+}
+
+.rows td:not(:first-child) {
+  color: var(--teal);
+}
+
+/* Meters, cards, tabs ----------------------------------------------------
+
+   The addon schema grew from three flat section kinds to four, and fields can
+   now carry a bar and a tone. Everything below draws that vocabulary, and
+   nothing below knows what game it came from — a new addon inherits all of it.
+
+   Tones reuse the palette rather than extending it. The page already has
+   exactly three signal colours and a status read-out needs exactly three:
+   teal is the live-data colour and so reads as "fine", amber already means
+   "look here", and red already means "wrong". Adding a fourth hue for warn
+   would have bought a distinction nobody was missing.
+
+   The bars matter more than they look. A party of six at "23/48" each is six
+   fractions to divide in your head; the same six as bars is one glance. */
+
+/* Slots ------------------------------------------------------------------
+
+   A column shows one pane, or two stacked when it is split. Two columns at two
+   panes each is four sections on screen at once, which is as many as a rail
+   this wide can hold without every one of them becoming a letterbox.
+
+   Each slot carries its own tab strip. One strip shared by both halves would
+   have to say which half a click is aimed at, and there is no way to show that
+   which is cheaper than drawing the strip where the answer is obvious. */
+
+.slot + .slot {
+  margin-top: var(--unit);
+  border-top: 2px solid var(--rule);
+}
+
+/* Every pane scrolls inside itself rather than stretching the rail.
+
+   A section has no upper bound on how much it reports — an area with grass,
+   surf and three rods on it is twenty-odd species — and a pane that grows to
+   fit pushes the deck, the screen and everything else down the page. Capped,
+   the long ones scroll and the short ones are unaffected. */
+.slot__body {
+  padding: 0 calc(var(--unit) * 2) calc(var(--unit) * 2);
+  max-height: 58vh;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule) transparent;
+}
+
+/* Split, each half takes about a third: two of them plus their headers is the
+   whole column, and the point of splitting is seeing both at once. */
+.slot:not(:only-child) .slot__body {
+  max-height: 34vh;
+}
+
+/* A tab the lower pane is already showing. Still clickable — clicking it swaps
+   the two — but marked, so picking it is a decision rather than a surprise. */
+.tabs__tab[data-elsewhere="on"] .tabs__name {
+  color: var(--teal);
+}
+
+/* The lower pane's chooser. A select rather than a second tab strip: the strip
+   costs rows this column does not have, and two identical strips give no clue
+   which one a click answers. */
+.pane__pick {
+  flex: none;
+  max-width: 45%;
+  padding: 1px 4px;
+  background: #0d1420;
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  color: var(--amber);
+  font-family: var(--display);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.pane__pick:hover {
+  border-color: var(--teal);
+}
+
+/* The strip above a pane: what the section is reading, and the buttons that
+   move it across or split the column under it. */
+.pane__head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px calc(var(--unit) * 2);
+  margin-bottom: var(--unit);
+  border-bottom: 1px solid var(--rule);
+}
+
+.pane__note {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pane__move {
+  flex: none;
+  padding: 1px 6px;
+  background: none;
+  border: 1px solid var(--rule);
+  color: var(--dim);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.pane__move:hover {
+  border-color: var(--teal);
+  color: var(--teal);
+}
+
+/* Tone on a row colours the value, never the label: the label is the question
+   and stays quiet, the value is the answer and is what changed. */
+.stat[data-tone="good"] .stat__value {
+  color: var(--teal);
+}
+
+.stat[data-tone="warn"] .stat__value {
+  color: var(--amber);
+}
+
+.stat[data-tone="bad"] .stat__value {
+  color: var(--bad);
+}
+
+.stat--muted {
+  color: var(--dim);
+}
+
+/* A hinted label is the one affordance on the page that is not a control, so
+   it gets the dotted underline that has meant "there is more here" since long
+   before this app. */
+.stat__label[data-hinted="on"] {
+  border-bottom: 1px dotted var(--rule);
+  cursor: help;
+}
+
+/* A row carrying a bar or a hint stops being a two-column row. */
+.stat:has(.meter),
+.stat:has(.stat__hint) {
+  flex-wrap: wrap;
+}
+
+.stat__hint {
+  flex-basis: 100%;
+  font-size: 10px;
+  color: var(--dim);
+}
+
+/* Beside the value rather than under it: an inline span inside the value cell,
+   so the two right-align together as one phrase — "Leer 30/30 PP". */
+.stat__hint--inline {
+  display: inline;
+  flex-basis: auto;
+  margin-left: 6px;
+}
+
+.meter {
+  flex-basis: 100%;
+  height: 3px;
+  margin-top: 3px;
+  background: rgba(36, 48, 74, 0.9);
+}
+
+.meter__fill {
+  height: 100%;
+  background: var(--teal);
+  /* Hit points move in steps, not sweeps, and a transition on a value the
+     emulator updates four times a second lags behind the game. */
+}
+
+.meter[data-tone="warn"] .meter__fill {
+  background: var(--amber);
+}
+
+.meter[data-tone="bad"] .meter__fill {
+  background: var(--bad);
+}
+
+/* Cards ------------------------------------------------------------------
+
+   One per party member, clan unit, or opponent. Collapsed, a card is a name,
+   a level, and a bar — which is the whole question most of the time. Expanded,
+   it is everything the addon recovered from the slot. Six cards at ten rows
+   each would bury the rest of the rail, so detail is opt-in. */
+
+.card {
+  margin-top: var(--unit);
+  padding: 6px var(--unit);
+  background: rgba(23, 32, 49, 0.6);
+  border-left: 2px solid var(--rule);
+}
+
+/* The left edge carries the card's headline tone, so scanning the stripe finds
+   the hurt member without reading a single number. */
+.card[data-tone="good"] {
+  border-left-color: var(--teal);
+}
+
+.card[data-tone="warn"] {
+  border-left-color: var(--amber);
+}
+
+.card[data-tone="bad"] {
+  border-left-color: var(--bad);
+}
+
+.card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--unit);
+  width: 100%;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+/* The picture.
+
+   Fixed size and always present, so the column of cards keeps one left edge
+   whether or not the sprites have arrived — a rail that reflows as six images
+   load is worse than one with six gaps in it.
+
+   `pixelated` is the whole point: these are 64x64 pixel sprites, and letting
+   the browser smooth them would make the one part of the page that is literally
+   made of pixels the only part that looks like it is not. */
+.card__portrait {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 64, which is the sprites' own size. Anything under it was shrinking the
+     one thing on the page actually made of pixels; anything over it would be
+     scaling art that has no more detail to give. */
+  width: 64px;
+  height: 64px;
+  background: rgba(6, 9, 15, 0.5);
+  border: 1px solid var(--rule);
+}
+
+.card__sprite {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+button.card__head {
+  cursor: pointer;
+}
+
+button.card__head:hover .card__title {
+  color: var(--amber);
+}
+
+.card__id {
+  flex: 1;
+  min-width: 0;
+}
+
+.card__title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.card__subtitle {
+  font-size: 10px;
+  color: var(--dim);
+}
+
+.card__lead {
+  flex: none;
+  width: 76px;
+  text-align: right;
+}
+
+.card__lead-value {
+  font-size: 12px;
+  color: var(--teal);
+}
+
+.card[data-tone="warn"] .card__lead-value {
+  color: var(--amber);
+}
+
+.card[data-tone="bad"] .card__lead-value {
+  color: var(--bad);
+}
+
+.card__detail {
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(36, 48, 74, 0.6);
+  font-size: 11px;
+}
+
+.card[data-open="off"] .card__detail {
+  display: none;
+}
+
+/* A row rather than a card.
+
+   Used for anything with no detail behind it — an encounter list, where every
+   entry is a species, a level range, and how often it comes up. There is
+   nothing to click, so there is no reason to leave room for what a click would
+   have opened, and the chips ride beside the name instead of under the card. */
+.card[data-dense="on"] {
+  margin-top: 2px;
+  padding: 3px var(--unit);
+}
+
+.card[data-dense="on"] .card__portrait {
+  width: 36px;
+  height: 36px;
+}
+
+.card[data-dense="on"] .card__head {
+  gap: 6px;
+}
+
+.card[data-dense="on"] .card__title {
+  display: inline;
+  font-size: 11px;
+}
+
+.card[data-dense="on"] .card__subtitle {
+  display: inline;
+  margin-left: 6px;
+}
+
+.card[data-dense="on"] .chips {
+  display: inline-flex;
+  margin: 0 0 0 6px;
+  vertical-align: baseline;
+}
+
+.card[data-dense="on"] .card__lead {
+  width: 62px;
+}
+
+.card[data-dense="on"] .card__lead-value {
+  font-size: 11px;
+}
+
+/* A section holding one card is about that card. It gets the sprite at double
+   size and the name set larger — the difference between a row in a list and
+   the thing you are looking at. */
+.card[data-featured="on"] {
+  padding: var(--unit);
+}
+
+.card[data-featured="on"] .card__portrait {
+  width: 96px;
+  height: 96px;
+}
+
+.card[data-featured="on"] .card__title {
+  font-size: 15px;
+}
+
+.card[data-featured="on"] .card__lead-value {
+  font-size: 14px;
+}
+
+/* Chips ------------------------------------------------------------------
+   Flags rather than measurements: fainted, poisoned, holding an item. They are
+   short and there are several, so they wrap as a row instead of taking a
+   labelled line each. */
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.chip {
+  padding: 1px 5px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--dim);
+  border: 1px solid var(--rule);
+}
+
+.chip[data-tone="good"] {
+  color: var(--teal);
+  border-color: rgba(46, 196, 182, 0.5);
+}
+
+.chip[data-tone="warn"] {
+  color: var(--amber);
+  border-color: rgba(255, 159, 28, 0.5);
+}
+
+.chip[data-tone="bad"] {
+  color: var(--bad);
+  border-color: rgba(229, 90, 90, 0.5);
+}
+
+/* The library, on the empty screen.
+
+   It used to be a permanent tab in the rail listing ROMs — a list you need
+   exactly once, when there is no cartridge in, and which is empty on most
+   setups because the ROM has to come off your own disk anyway. Here it is the
+   thing you came to do, and once a game is running it is gone with the rest of
+   the empty state. */
+.screen__empty .vault__list {
+  width: min(420px, 100%);
+  margin: var(--gutter) 0 var(--unit);
+  max-height: 40vh;
+}
+
+#vault-load {
+  flex: none;
+}
+
+/* Vault ----------------------------------------------------------------- */
+
+.vault__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.vault__item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--unit);
+  width: 100%;
+  padding: 7px 0;
+  background: none;
+  border: 0;
+  border-top: 1px solid rgba(36, 48, 74, 0.6);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.vault__item:first-child {
+  border-top: 0;
+}
+
+.vault__item:hover .vault__name {
+  color: var(--amber);
+}
+
+.vault__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vault__size {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Where a ROM came from. Worth showing: one is on a CDN and one is on this
+   machine, and that changes whether a link is shareable. */
+.vault__tag {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--void);
+  background: var(--rule);
+  padding: 1px 4px;
+}
+
+.vault__item[data-source="vault"] .vault__tag {
+  background: var(--teal);
+}
+
+.vault__item[data-source="local"] .vault__tag {
+  background: #46536e;
+  color: var(--ink);
+}
+
+.vault__item[aria-current="true"] .vault__name {
+  color: var(--amber);
+  font-weight: 600;
+}
+
+.vault__empty {
+  padding: 7px 0;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.vault__empty code {
+  color: var(--amber);
+}
+
+/* Drop target ----------------------------------------------------------- */
+
+.drop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  background: rgba(6, 9, 15, 0.92);
+  border: 2px dashed var(--amber);
+  z-index: 10;
+}
+
+.drop p {
+  font-family: var(--display);
+  font-size: 22px;
+  color: var(--amber);
+}
+
+/* Responsive ------------------------------------------------------------ */
+
+/* One rail short of three columns: keep the game beside the cartridge and
+   storage, and let the addon rail run full width underneath. */
+@media (max-width: 1180px) {
+  .deck {
+    grid-template-columns: minmax(0, 1fr) 316px;
+    grid-template-areas:
+      "screen info"
+      "addons addons";
+  }
+
+  /* Full width is the wrong measure for a label-and-value list: the eye loses
+     the row crossing that much empty space. Cap it and leave the rest blank. */
+  .readout--addons > * {
+    max-width: 720px;
+  }
+
+  /* Stacked below the screen, the rail is no longer a column beside anything,
+     so it stops sticking and scrolling inside itself and just runs down the
+     page with everything else. */
+  .readout--addons {
+    position: static;
+    max-height: none;
+    overflow-y: visible;
+  }
+
+}
+
+@media (max-width: 900px) {
+  .deck {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "screen"
+      "info"
+      "addons";
+  }
+
+  .vault__list {
+    max-height: none;
+  }
+}
+
+@media (max-width: 560px) {
+  :root {
+    --gutter: calc(var(--unit) * 2);
+  }
+
+  .bar {
+    flex-wrap: wrap;
+    gap: var(--unit);
+  }
+
+  .bar__nav {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .account__menu {
+    width: min(260px, calc(100vw - var(--gutter) * 2));
+  }
+
+  .key {
+    min-width: 0;
+    flex-basis: calc(50% - var(--unit));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen.is-booting .screen__boot,
+  .bar__state[data-state="live"] .dot {
+    animation: none;
+  }
+
+  * {
+    transition-duration: 0ms !important;
+  }
+}
+
+/* Home page ------------------------------------------------------------- */
+
+.hero {
+  padding: calc(var(--unit) * 5) 0 calc(var(--unit) * 4);
+  border-bottom: var(--edge);
+}
+
+/* The one place the bitmap face is allowed to be large. Silkscreen has no
+   lowercase depth to speak of, so it needs generous line-height and a hard
+   size cap to stay readable. */
+.hero__title {
+  margin: 0 0 calc(var(--unit) * 2);
+  font-family: var(--display);
+  font-size: clamp(22px, 4.4vw, 40px);
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.hero__lede {
+  margin: 0 0 calc(var(--unit) * 3);
+  max-width: 62ch;
+  color: var(--dim);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--unit);
+  margin: 0;
+}
+
+.hero__actions .key {
+  flex: 0 0 auto;
+  min-width: 200px;
+  text-decoration: none;
+  line-height: 1.4;
+}
+
+.key--lead {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: #10141f;
+  font-weight: 600;
+}
+
+.key--lead:hover {
+  background: #ffb347;
+  border-color: #ffb347;
+}
+
+.spec {
+  padding: calc(var(--unit) * 3) 0;
+}
+
+.spec__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.spec__table caption {
+  text-align: left;
+}
+
+.spec__table th,
+.spec__table td {
+  text-align: left;
+  padding: 8px 12px 8px 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+.spec__table thead th {
+  color: var(--dim);
+  font-weight: 500;
+  border-bottom-color: var(--amber);
+}
+
+.spec__table tbody th {
+  color: var(--ink);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.spec__table tbody td:first-of-type {
+  color: var(--teal);
+  white-space: nowrap;
+}
+
+.spec__table td {
+  color: var(--dim);
+}
+
+.split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--gutter);
+  margin-bottom: var(--gutter);
+}
+
+.panel__lead {
+  margin: 0 0 calc(var(--unit) * 2);
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.panel__foot {
+  margin: calc(var(--unit) * 2) 0 0;
+  padding-top: var(--unit);
+  border-top: 1px solid rgba(36, 48, 74, 0.6);
+  color: #5f6c84;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.code {
+  margin: 0;
+  padding: calc(var(--unit) * 1.5);
+  background: #0a0f18;
+  border: 1px solid var(--rule);
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--dim);
+}
+
+.code code {
+  color: inherit;
+}
+
+/* Embedded overlay ------------------------------------------------------ */
+
+/* The overlay is the real OBS page in an iframe, so it brings its own
+   stylesheet. Everything here is the frame around it, never its insides. */
+.stage {
+  border: var(--edge);
+  background: var(--shell);
+}
+
+.stage__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--gutter);
+  padding: calc(var(--unit) * 1.5) calc(var(--unit) * 2);
+  border-bottom: var(--edge);
+}
+
+.stage__bar .panel__eyebrow {
+  margin: 0;
+}
+
+.stage__actions {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--unit) * 2);
+  margin-left: auto;
+}
+
+.key--slim {
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: 5px 10px;
+  font-size: 11px;
+  text-decoration: none;
+}
+
+.stage__frame {
+  display: block;
+  width: 100%;
+  /* Starting height only; the page grows it to the overlay's real height so
+     the party cards below the area panel are not clipped. */
+  height: 320px;
+  border: 0;
+  transition: height 140ms linear;
+  /* The overlay page is transparent, so the console ground shows through and
+     the two read as one surface. */
+  background: transparent;
+}
+
+@media (max-width: 700px) {
+  .stage__bar {
+    flex-wrap: wrap;
+    gap: var(--unit);
+  }
+
+  .stage__actions {
+    margin-left: 0;
+  }
+}
+
+/* Cloud saves ----------------------------------------------------------- */
+
+/* Dials ------------------------------------------------------------------ */
+
+.deckplate__row--dials {
+  display: flex;
+  gap: var(--gutter);
+}
+
+.dial {
+  display: flex;
+  align-items: center;
+  gap: var(--unit);
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.dial__label {
+  white-space: nowrap;
+}
+
+.dial select {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 4px;
+  background: var(--void);
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 11px;
+}
+
+/* A slider drawn as a track with a square grip, because a rounded thumb is
+   the one rounded corner on the page. */
+.dial input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  height: 14px;
+  appearance: none;
+  background: none;
+  cursor: pointer;
+}
+
+.dial input[type="range"]::-webkit-slider-runnable-track {
+  height: 2px;
+  background: var(--rule);
+}
+
+.dial input[type="range"]::-moz-range-track {
+  height: 2px;
+  background: var(--rule);
+}
+
+.dial input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 8px;
+  height: 12px;
+  margin-top: -5px;
+  background: var(--amber);
+  border: 0;
+}
+
+.dial input[type="range"]::-moz-range-thumb {
+  width: 8px;
+  height: 12px;
+  background: var(--amber);
+  border: 0;
+  border-radius: 0;
+}
+
+/* Lobby ------------------------------------------------------------------ */
+
+.lobby__row {
+  display: flex;
+  gap: var(--unit);
+  margin-bottom: var(--unit);
+}
+
+.lobby__row input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  background: var(--void);
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 12px;
+  /* A code that gets read out; spaced caps make it easy to say. */
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.lobby__row input:focus-visible {
+  border-color: var(--amber);
+}
+
+.lobby__hint {
+  margin-top: var(--unit);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dim);
+}
+
+.lobby__hint[data-tone="bad"] {
+  color: var(--bad);
+}
+
+/* The code is the one thing in this panel someone reads aloud. */
+.lobby__code {
+  display: flex;
+  align-items: center;
+  gap: var(--unit);
+  margin-bottom: var(--unit);
+  font-family: var(--display);
+  font-size: 15px;
+  color: var(--amber);
+  letter-spacing: 0.1em;
+}
+
+.lobby__code #lobby-room {
+  flex: 1;
+}
+
+.lobby__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.lobby__member {
+  display: flex;
+  align-items: baseline;
+  gap: var(--unit);
+  padding: 5px 0;
+  border-top: 1px solid rgba(36, 48, 74, 0.6);
+  font-size: 12px;
+}
+
+.lobby__member:first-child {
+  border-top: 0;
+}
+
+.lobby__name {
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.lobby__member.is-you .lobby__name {
+  color: var(--teal);
+}
+
+.lobby__share {
+  margin-bottom: var(--unit);
+}
+
+/* A member who is sharing can be watched, so their row is a target. */
+.lobby__member.is-live {
+  cursor: pointer;
+}
+
+.lobby__member.is-live:hover .lobby__name {
+  color: var(--amber);
+}
+
+.lobby__member.is-watched {
+  outline: 1px solid var(--amber);
+  outline-offset: 1px;
+}
+
+/* A lit dot next to anyone whose screen is arriving. */
+.lobby__live {
+  width: 5px;
+  height: 5px;
+  background: var(--amber);
+  flex: 0 0 auto;
+}
+
+.lobby__watch {
+  margin: var(--unit) 0 0;
+}
+
+/* Someone else's screen, at whole-pixel scale like our own. */
+.lobby__screen {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #000;
+  border: 1px solid var(--rule);
+  image-rendering: pixelated;
+}
+
+.lobby__caption {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+/* Who opened the room. Small, because it matters once and then never. */
+.lobby__host {
+  font-size: 10px;
+  color: var(--amber);
+  letter-spacing: 0.04em;
+}
+
+.lobby__playing {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+  font-size: 11px;
+  text-align: right;
+}
+
+/* Account ---------------------------------------------------------------- */
+
+/* A menu hung off the header. The bar says only whether you are signed in;
+   the address itself stays inside, where a stream capture will not find it. */
+.account {
+  position: relative;
+}
+
+.account__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--unit);
+  padding: 3px 8px;
+  background: none;
+  border: 1px solid var(--rule);
+  color: var(--dim);
+  font-family: var(--body);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.account__toggle:hover,
+.account__toggle[aria-expanded="true"] {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+/* Hollow when signed out, lit when signed in: the whole status in 6 pixels. */
+.account__dot {
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--dim);
+}
+
+.account.is-signed-in .account__dot {
+  background: var(--teal);
+  border-color: var(--teal);
+}
+
+.account__menu {
+  position: absolute;
+  top: calc(100% + var(--unit));
+  right: 0;
+  z-index: 20;
+  width: 260px;
+  padding: var(--gutter);
+  background: var(--shell);
+  border: var(--edge);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+.account__who {
+  font-size: 12px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-bottom: var(--unit);
+}
+
+/* Only on the create form: a username to be known by, and the repeat that
+   catches a typo before it becomes an account nobody can sign into. */
+.account__form[data-mode="signin"] .account__field--new {
+  display: none;
+}
+
+.account__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--unit);
+}
+
+.account__field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.account__field input {
+  padding: 5px 6px;
+  background: var(--void);
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 12px;
+}
+
+.account__field input:focus-visible {
+  border-color: var(--amber);
+}
+
+.account__row {
+  display: flex;
+  gap: var(--unit);
+}
+
+.account__row .key {
+  flex: 1;
+}
+
+.account__hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dim);
+}
+
+.account__hint[data-tone="bad"] {
+  color: var(--bad);
+}
+
+.account__hint[data-tone="good"] {
+  color: var(--teal);
+}
+
+.saves__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Two lines against the screenshot: what the save is, then what you can do to
+   it. Three actions plus a timestamp will not fit on one line at this width,
+   and wrapping them put the buttons under the thumbnail where they read as
+   belonging to the next row. */
+.saves__item {
+  display: grid;
+  grid-template-columns: 60px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "shot when size"
+    "shot acts acts";
+  align-items: center;
+  gap: 4px var(--unit);
+  padding: 8px 0;
+  border-top: 1px solid rgba(36, 48, 74, 0.6);
+  font-size: 12px;
+}
+
+.saves__item:first-child {
+  border-top: 0;
+}
+
+/* The whole row loads the save; the delete button is a separate target so a
+   misclick cannot destroy progress. */
+/* The screenshot is what makes a slot recognisable; the timestamp alone tells
+   you nothing about where you were. Reserve its box up front so rows do not
+   jump as thumbnails arrive. */
+.saves__shot {
+  grid-area: shot;
+  align-self: start;
+  width: 60px;
+  height: 40px;
+  background: #0a0f18;
+  border: 1px solid var(--rule);
+  object-fit: cover;
+  image-rendering: pixelated;
+  /* Hidden until decoded, so a broken-image glyph never shows. */
+  visibility: hidden;
+}
+
+.saves__shot.is-loaded {
+  visibility: visible;
+}
+
+.saves__load {
+  grid-area: when;
+  min-width: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saves__load:hover {
+  color: var(--amber);
+}
+
+.saves__when {
+  color: var(--teal);
+}
+
+.saves__size {
+  grid-area: size;
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.saves__actions {
+  grid-area: acts;
+  display: flex;
+  gap: 4px;
+  /* The rail is sized to hold all three on one line; wrapping is the fallback
+     for a larger text size, not the normal case. */
+  flex-wrap: wrap;
+}
+
+.saves__act {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  background: none;
+  border: 1px solid var(--rule);
+  color: var(--dim);
+  font-family: var(--body);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.saves__act:hover {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+.saves__act:disabled {
+  opacity: 0.45;
+  cursor: default;
+  border-color: var(--rule);
+  color: var(--dim);
+}
+
+/* Overwrite and delete both destroy a save, so both arm before they act and
+   both wear the warning colour while armed. */
+.saves__act--danger:hover {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.saves__act[data-confirm="true"] {
+  border-color: var(--bad);
+  color: var(--void);
+  background: var(--bad);
+}
+
+.saves__empty {
+  padding: 6px 0;
+  color: var(--dim);
+  font-size: 12px;
+}

@@ -147,6 +147,44 @@ impl Framebuffer {
         }
     }
 
+    /// Drop the rendered pixels, keeping the shape of the buffers.
+    ///
+    /// Everything in here is the output of drawing a frame rather than state
+    /// of the machine, and it is by far the largest thing in a savestate: over
+    /// a megabyte of pixels against about half that for all of the console's
+    /// actual memory. A restored state runs a frame straight away, which fills
+    /// all of it again from VRAM, so writing it down is pure weight.
+    ///
+    /// The fields stay where they are rather than being skipped, because a
+    /// length-prefixed empty vector still reads back as one: savestates
+    /// written before this keep loading, pixels and all.
+    pub fn forget_pixels(&mut self) {
+        self.front_buffer = Vec::new();
+        self.back_buffer = Vec::new();
+        self.window_masks = Vec::new();
+        self.line_buffers = Vec::new();
+    }
+
+    /// Put the buffers back to their proper size if they arrived empty.
+    ///
+    /// The counterpart to [`Framebuffer::forget_pixels`]: rendering indexes
+    /// straight into these, so they have to be the right length before the
+    /// next frame rather than after it.
+    pub fn ensure_sized(&mut self) {
+        if self.front_buffer.len() != PIXEL_COUNT {
+            self.front_buffer = vec![Pixel::default(); PIXEL_COUNT];
+        }
+        if self.back_buffer.len() != PIXEL_COUNT {
+            self.back_buffer = vec![Pixel::default(); PIXEL_COUNT];
+        }
+        if self.window_masks.len() != PIXEL_COUNT {
+            self.window_masks = vec![WINDOW_MASK_ALL_LAYERS; PIXEL_COUNT];
+        }
+        if self.line_buffers.len() != 4 {
+            self.line_buffers = vec![Vec::with_capacity(SCREEN_WIDTH); 4];
+        }
+    }
+
     /// Clear the back buffer
     pub fn clear(&mut self) {
         for pixel in &mut self.back_buffer {

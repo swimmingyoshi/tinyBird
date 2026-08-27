@@ -138,6 +138,9 @@ pub enum InstructionCategory {
     Strb,
     Ldrh,
     Strh,
+    // Atomic swap
+    Swp,
+    Swpb,
     Ldrsb,
     Ldrsh,
     Ldm,

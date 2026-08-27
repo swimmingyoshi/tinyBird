@@ -5,6 +5,7 @@
 
 use crate::bios::Bios;
 use crate::bus::Bus;
+use crate::cpu::pipeline::ARM_INSTRUCTION_SIZE;
 use crate::cpu::pipeline::{
     decode_utils::{apply_shift, bit, bits, sign_extend},
     DecodedInstruction, Instruction, InstructionCategory, Pipeline, ShiftInfo, ShiftType,
@@ -43,6 +44,18 @@ fn decode_arm_instruction(opcode: u32) -> Option<DecodedInstruction> {
 
     // Bits [27:26] = 0b00: data processing, multiply, halfword transfer, MSR/MRS, BX
     if bits(opcode, 27, 26) == 0b00 {
+        // SWP / SWPB, which shares the 1001 pattern with multiply but sits in
+        // bits[27:23] = 00010. Without this it falls through to data
+        // processing and is decoded as something else entirely.
+        if !i_flag
+            && bits(opcode, 27, 23) == 0b00010
+            && !bit(opcode, 21)
+            && !bit(opcode, 20)
+            && bits(opcode, 11, 4) == 0b0000_1001
+        {
+            return decode_swap(opcode);
+        }
+
         // Check for multiply: bits[7:4] = 1001 and bits[27:24] = 0000 (covers MUL/MLA and long)
         if bits(opcode, 7, 4) == 0b1001 && bits(opcode, 27, 24) == 0 && !i_flag {
             return decode_multiply(opcode);
@@ -170,7 +183,11 @@ fn decode_data_processing(opcode: u32) -> Option<DecodedInstruction> {
             0b01 => ShiftType::Lsr,
             0b10 => ShiftType::Asr,
             0b11 => {
-                if bit(opcode, 4) {
+                // RRX is what an *immediate* rotate of zero encodes. Bit 4
+                // selects a register-specified amount, which is always a plain
+                // rotate — reading it the other way round turned every
+                // `ROR Rd, Rs` into a rotate-right-through-carry by one.
+                if !bit(opcode, 4) && shift_imm == 0 {
                     ShiftType::Rrx
                 } else {
                     ShiftType::Ror
@@ -199,6 +216,10 @@ fn decode_data_processing(opcode: u32) -> Option<DecodedInstruction> {
         (Some(rm_val), shift_info, None)
     };
 
+    // A compare has no destination, with one exception: `Rd = 15` with the S
+    // bit is the old ARMv2 "P" form, which returns from an exception instead of
+    // comparing. That has to survive decoding, so the field is kept when it
+    // names PC and dropped otherwise.
     let rd_opt = if matches!(
         category,
         InstructionCategory::Tst
@@ -206,7 +227,7 @@ fn decode_data_processing(opcode: u32) -> Option<DecodedInstruction> {
             | InstructionCategory::Cmp
             | InstructionCategory::Cmn
     ) {
-        None
+        (rd == 15).then_some(rd)
     } else {
         Some(rd)
     };
@@ -339,6 +360,26 @@ fn decode_ldm_stm(opcode: u32) -> Option<DecodedInstruction> {
         immediate: Some(rlist),
         branch_target: Some(flags),
         writes_back: writeback,
+    })
+}
+
+/// `SWP` and `SWPB`: read a word or byte and write one back in its place.
+fn decode_swap(opcode: u32) -> Option<DecodedInstruction> {
+    let is_byte = bit(opcode, 22);
+    Some(DecodedInstruction {
+        category: if is_byte {
+            InstructionCategory::Swpb
+        } else {
+            InstructionCategory::Swp
+        },
+        condition: bits(opcode, 31, 28) as u8,
+        rd: Some(bits(opcode, 15, 12) as u8),
+        rn: Some(bits(opcode, 19, 16) as u8),
+        rm: Some(bits(opcode, 3, 0) as u8),
+        immediate: None,
+        shift: None,
+        branch_target: None,
+        writes_back: false,
     })
 }
 
@@ -561,10 +602,10 @@ pub fn execute_arm<B: Bus>(
         InstructionCategory::Adc => exec_adc(bus, regs, pipeline, decoded),
         InstructionCategory::Sbc => exec_sbc(bus, regs, pipeline, decoded),
         InstructionCategory::Rsc => exec_rsc(bus, regs, pipeline, decoded),
-        InstructionCategory::Tst => exec_test(bus, regs, decoded, opcode, |a, b| a & b),
-        InstructionCategory::Teq => exec_test(bus, regs, decoded, opcode, |a, b| a ^ b),
-        InstructionCategory::Cmp => exec_compare(bus, regs, decoded, sub_with_flags),
-        InstructionCategory::Cmn => exec_compare(bus, regs, decoded, add_with_flags),
+        InstructionCategory::Tst => exec_test(bus, regs, pipeline, decoded, opcode, |a, b| a & b),
+        InstructionCategory::Teq => exec_test(bus, regs, pipeline, decoded, opcode, |a, b| a ^ b),
+        InstructionCategory::Cmp => exec_compare(bus, regs, pipeline, decoded, sub_with_flags),
+        InstructionCategory::Cmn => exec_compare(bus, regs, pipeline, decoded, add_with_flags),
         InstructionCategory::Orr => {
             exec_data_proc(bus, regs, pipeline, decoded, opcode, |a, b| a | b)
         }
@@ -579,6 +620,8 @@ pub fn execute_arm<B: Bus>(
         InstructionCategory::Str => exec_str(bus, regs, decoded, false),
         InstructionCategory::Ldrb => exec_ldr(bus, regs, pipeline, decoded, true),
         InstructionCategory::Strb => exec_str(bus, regs, decoded, true),
+        InstructionCategory::Swp => exec_swap(bus, regs, decoded, false),
+        InstructionCategory::Swpb => exec_swap(bus, regs, decoded, true),
         InstructionCategory::Ldrh => exec_ldr_half(bus, regs, pipeline, decoded, false, false),
         InstructionCategory::Strh => exec_str_half(bus, regs, decoded),
         InstructionCategory::Ldrsb => exec_ldr_half(bus, regs, pipeline, decoded, true, true),
@@ -596,7 +639,7 @@ pub fn execute_arm<B: Bus>(
         InstructionCategory::Smlal => exec_smlal(regs, decoded),
         InstructionCategory::Ldm => exec_ldm(bus, regs, pipeline, decoded),
         InstructionCategory::Stm => exec_stm(bus, regs, decoded),
-        InstructionCategory::Msr => exec_msr(regs, decoded),
+        InstructionCategory::Msr => exec_msr(regs, pipeline, decoded),
         InstructionCategory::Mrs => exec_mrs(regs, decoded),
         _ => {}
     }
@@ -627,7 +670,11 @@ fn exec_data_proc<B: Bus, F>(
 ) where
     F: Fn(u32, u32) -> u32,
 {
-    let rn_val = decoded.rn.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
+    let register_shift = uses_register_shift(decoded);
+    let rn_val = decoded
+        .rn
+        .map(|r| read_operand_reg(regs, r, register_shift))
+        .unwrap_or(0);
     let (op2_val, shifter_carry) = get_operand2_and_carry(regs, decoded, opcode);
     let result = op(rn_val, op2_val);
 
@@ -665,7 +712,10 @@ fn exec_data_proc_with_flags<B: Bus, F>(
 ) where
     F: Fn(u32, u32) -> (u32, bool, bool),
 {
-    let rn_val = decoded.rn.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
+    let rn_val = decoded
+        .rn
+        .map(|r| read_operand_reg(regs, r, uses_register_shift(decoded)))
+        .unwrap_or(0);
     let op2_val = get_operand2(regs, decoded);
     let (result, carry, overflow) = op(rn_val, op2_val);
     let n = (result as i32) < 0;
@@ -696,7 +746,10 @@ fn exec_adc<B: Bus>(
     _pipeline: &mut Pipeline,
     decoded: &DecodedInstruction,
 ) {
-    let rn_val = decoded.rn.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
+    let rn_val = decoded
+        .rn
+        .map(|r| read_operand_reg(regs, r, uses_register_shift(decoded)))
+        .unwrap_or(0);
     let op2_val = get_operand2(regs, decoded);
     let carry_in = if regs.flag_c() { 1 } else { 0 };
 
@@ -767,15 +820,27 @@ fn exec_rsc<B: Bus>(
     }
 }
 
+/// `TST` and `TEQ`, which share `CMP`'s `Rd = 15` exception-return form.
 fn exec_test<B: Bus, F>(
     _bus: &mut B,
     regs: &mut Registers,
+    pipeline: &mut Pipeline,
     decoded: &DecodedInstruction,
     opcode: u32,
     op: F,
 ) where
     F: Fn(u32, u32) -> u32,
 {
+    if decoded.rd == Some(15) {
+        let was_thumb = pipeline.is_thumb_mode();
+        regs.return_from_exception();
+        if regs.is_thumb_mode() != was_thumb {
+            let next = pipeline.pc().wrapping_sub(ARM_INSTRUCTION_SIZE);
+            pipeline.branch_with_mode(next, regs.is_thumb_mode());
+        }
+        return;
+    }
+
     let rn_val = decoded.rn.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
     let (op2_val, shifter_carry) = get_operand2_and_carry(regs, decoded, opcode);
     let result = op(rn_val, op2_val);
@@ -787,10 +852,33 @@ fn exec_test<B: Bus, F>(
     );
 }
 
-fn exec_compare<B: Bus, F>(_bus: &mut B, regs: &mut Registers, decoded: &DecodedInstruction, op: F)
-where
+/// `CMP`, `CMN`, `TST`, `TEQ`.
+///
+/// With `Rd = 15` these are not comparisons at all but the ARMv2 exception
+/// return: CPSR is restored from SPSR, which can change processor mode and so
+/// swap out the banked registers. The flags come from SPSR rather than from the
+/// operation, so nothing is compared.
+fn exec_compare<B: Bus, F>(
+    _bus: &mut B,
+    regs: &mut Registers,
+    pipeline: &mut Pipeline,
+    decoded: &DecodedInstruction,
+    op: F,
+) where
     F: Fn(u32, u32) -> (u32, bool, bool),
 {
+    if decoded.rd == Some(15) {
+        let was_thumb = pipeline.is_thumb_mode();
+        regs.return_from_exception();
+        if regs.is_thumb_mode() != was_thumb {
+            // The restored CPSR can change instruction set, and the pipeline
+            // fetches in its own copy of that state.
+            let next = pipeline.pc().wrapping_sub(ARM_INSTRUCTION_SIZE);
+            pipeline.branch_with_mode(next, regs.is_thumb_mode());
+        }
+        return;
+    }
+
     let rn_val = decoded.rn.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
     let op2_val = get_operand2(regs, decoded);
     let (result, carry, overflow) = op(rn_val, op2_val);
@@ -862,16 +950,19 @@ fn exec_ldr<B: Bus>(
     } else {
         armv4_load_word(bus, addr)
     };
+    // Write the base back first, so that when the base and the destination are
+    // the same register the loaded value is what survives. On ARM7TDMI the load
+    // wins; doing it the other way round leaves the address in the register
+    // instead of the data that was just fetched.
+    if let (Some(rn), Some(wb)) = (decoded.rn, wb_addr) {
+        regs.set_reg(rn as usize, wb);
+    }
     if let Some(rd) = decoded.rd {
         if rd == 15 {
             pipeline.branch_with_mode(value & !3, false);
         } else {
             regs.set_reg(rd as usize, value);
         }
-    }
-    // Writeback to base register
-    if let (Some(rn), Some(wb)) = (decoded.rn, wb_addr) {
-        regs.set_reg(rn as usize, wb);
     }
 }
 
@@ -883,7 +974,20 @@ fn exec_str<B: Bus>(
 ) {
     let (addr, wb_addr) = arm_ldr_str_addr(regs, decoded);
 
-    let value = decoded.rd.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
+    let value = decoded
+        .rd
+        .map(|r| {
+            let value = regs.get_reg(r as usize);
+            // Storing PC stores the instruction's address plus twelve, four
+            // beyond what reading PC gives, because the store happens a cycle
+            // later than a data-processing read would.
+            if r == 15 {
+                value.wrapping_add(4)
+            } else {
+                value
+            }
+        })
+        .unwrap_or(0);
     if is_byte {
         bus.write_u8(addr, value as u8);
     } else {
@@ -932,7 +1036,7 @@ fn exec_swi<B: Bus>(bus: &mut B, regs: &mut Registers, pipeline: &mut Pipeline, 
 
     // If a real BIOS is present, dispatch SWI via exception vector.
     // The built-in HLE stub starts with BX LR at 0x00000000.
-    let has_real_bios = bus.read_u32(0x0000_0000) != 0xE12F_FF1E;
+    let has_real_bios = bus.has_real_bios();
     if has_real_bios && !Bios::should_hle_with_real_bios(swi_comment) {
         let lr_offset = if regs.is_thumb_mode() { 2 } else { 4 };
         regs.enter_exception(CpuMode::Supervisor, lr_offset);
@@ -1168,6 +1272,32 @@ fn exec_stm<B: Bus>(bus: &mut B, regs: &mut Registers, decoded: &DecodedInstruct
     }
 }
 
+/// `SWP` / `SWPB`: exchange a register with memory in one go.
+///
+/// The read happens before the write, which is what makes `SWP Rd, Rd, [Rn]`
+/// meaningful — the destination and the source can be the same register.
+fn exec_swap<B: Bus>(bus: &mut B, regs: &mut Registers, decoded: &DecodedInstruction, is_byte: bool) {
+    let addr = decoded.rn.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
+    let source = decoded.rm.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
+
+    let loaded = if is_byte {
+        bus.read_u8(addr) as u32
+    } else {
+        armv4_load_word(bus, addr)
+    };
+
+    if is_byte {
+        bus.write_u8(addr, source as u8);
+    } else {
+        // The stored word goes to the aligned address, like any other store.
+        bus.write_u32(addr, source);
+    }
+
+    if let Some(rd) = decoded.rd {
+        regs.set_reg(rd as usize, loaded);
+    }
+}
+
 fn exec_ldr_half<B: Bus>(
     bus: &mut B,
     regs: &mut Registers,
@@ -1186,18 +1316,20 @@ fn exec_ldr_half<B: Bus>(
         armv4_load_signed_halfword(bus, addr)
     } else {
         // LDRH
-        armv4_load_halfword(bus, addr) as u32
+        armv4_load_halfword(bus, addr)
     };
 
+    // Base first, so a load into the base register keeps the loaded value
+    // rather than the address, exactly as in `exec_ldr`.
+    if let (Some(rn), Some(wb)) = (decoded.rn, wb_addr) {
+        regs.set_reg(rn as usize, wb);
+    }
     if let Some(rd) = decoded.rd {
         if rd == 15 {
             pipeline.branch_with_mode(value & !3, false);
         } else {
             regs.set_reg(rd as usize, value);
         }
-    }
-    if let (Some(rn), Some(wb)) = (decoded.rn, wb_addr) {
-        regs.set_reg(rn as usize, wb);
     }
 }
 
@@ -1210,7 +1342,15 @@ fn exec_str_half<B: Bus>(bus: &mut B, regs: &mut Registers, decoded: &DecodedIns
     }
 }
 
-fn exec_msr(regs: &mut Registers, decoded: &DecodedInstruction) {
+/// `MSR` — write the program status register.
+///
+/// Writing the T bit through `MSR` is called UNPREDICTABLE by the architecture
+/// reference, but ARM7TDMI silicon honours it, and self-extracting packers use
+/// it to enter the Thumb code they have just written: set T, pad with two
+/// halfwords, then `BX`. Updating only the register file leaves the pipeline
+/// fetching ARM, so the padding decodes as ARM and execution runs on past the
+/// `BX` into whatever follows. The pipeline has to be resteered as well.
+fn exec_msr(regs: &mut Registers, pipeline: &mut Pipeline, decoded: &DecodedInstruction) {
     let flags = decoded.branch_target.unwrap_or(0);
     let field_mask = flags & 0xF;
     let use_spsr = (flags & 0x10) != 0;
@@ -1246,6 +1386,14 @@ fn exec_msr(regs: &mut Registers, decoded: &DecodedInstruction) {
         let new_cpsr = (current & !mask) | (value & mask);
         // update_flags = true since we're writing the full value
         regs.set_cpsr(new_cpsr, true);
+
+        if regs.is_thumb_mode() != pipeline.is_thumb_mode() {
+            // Continue from the instruction after this one, in the new state.
+            // The two instructions already in the pipeline were fetched as
+            // ARM and must be dropped rather than executed.
+            let next = pipeline.pc().wrapping_sub(ARM_INSTRUCTION_SIZE);
+            pipeline.branch_with_mode(next, regs.is_thumb_mode());
+        }
     }
 }
 
@@ -1266,11 +1414,12 @@ fn get_operand2(regs: &Registers, decoded: &DecodedInstruction) -> u32 {
         return imm;
     }
     if let Some(rm) = decoded.rm {
-        let mut value = regs.get_reg(rm as usize);
+        let register_shift = uses_register_shift(decoded);
+        let mut value = read_operand_reg(regs, rm, register_shift);
         if let Some(shift) = decoded.shift {
             let is_reg_shift = shift.shift_reg.is_some();
             let shift_amount = if let Some(rs) = shift.shift_reg {
-                regs.get_reg(rs as usize) & 0xFF
+                read_operand_reg(regs, rs, register_shift) & 0xFF
             } else {
                 shift.amount as u32
             };
@@ -1293,6 +1442,30 @@ fn get_operand2(regs: &Registers, decoded: &DecodedInstruction) -> u32 {
     0
 }
 
+/// Whether this instruction takes its shift amount from a register.
+fn uses_register_shift(decoded: &DecodedInstruction) -> bool {
+    decoded
+        .shift
+        .as_ref()
+        .map(|shift| shift.shift_reg.is_some())
+        .unwrap_or(false)
+}
+
+/// Read a register as a data-processing instruction sees it.
+///
+/// A register-specified shift costs the core an extra cycle, and the prefetch
+/// runs on during it, so PC reads as the instruction's address plus twelve
+/// rather than the usual plus eight. Every register read in such an instruction
+/// sees the later value, not only the shifted one.
+fn read_operand_reg(regs: &Registers, index: u8, register_shift: bool) -> u32 {
+    let value = regs.get_reg(index as usize);
+    if index == 15 && register_shift {
+        value.wrapping_add(4)
+    } else {
+        value
+    }
+}
+
 fn get_operand2_and_carry(
     regs: &Registers,
     decoded: &DecodedInstruction,
@@ -1311,11 +1484,12 @@ fn get_operand2_and_carry(
     }
 
     if let Some(rm) = decoded.rm {
-        let mut value = regs.get_reg(rm as usize);
+        let register_shift = uses_register_shift(decoded);
+        let mut value = read_operand_reg(regs, rm, register_shift);
         if let Some(shift) = decoded.shift {
             let is_reg_shift = shift.shift_reg.is_some();
             let shift_amount = if let Some(rs) = shift.shift_reg {
-                regs.get_reg(rs as usize) & 0xFF
+                read_operand_reg(regs, rs, register_shift) & 0xFF
             } else {
                 shift.amount as u32
             };
@@ -1507,6 +1681,143 @@ mod tests {
         assert!(regs.flag_c());
     }
 
+    /// `MSR` writing the T bit must move the pipeline into Thumb as well.
+    ///
+    /// Self-extracting packers use this to enter code they have just written:
+    /// set T through `MSR`, pad, then `BX`. Updating only the register file
+    /// left the pipeline fetching ARM, so the padding decoded as ARM and
+    /// execution ran straight past the `BX` into whatever followed. Pokemon
+    /// Pinball: Ruby & Sapphire unpacks itself exactly this way and hung on a
+    /// white screen because of it.
+    #[test]
+    fn msr_switching_to_thumb_resteers_the_pipeline() {
+        // MSR CPSR_fc, r2 with r2 = mode bits plus T.
+        let mut regs = Registers::new();
+        regs.set_reg(2, 0x0000_003F);
+        let mut bus = SimpleBus::new(None);
+        let mut pipeline = Pipeline::new();
+        pipeline.set_fetch_addr(0x0800_0100);
+        assert!(!pipeline.is_thumb_mode());
+
+        run_arm_with_bus(0xE129_F002, &mut regs, &mut bus, &mut pipeline);
+
+        assert!(regs.is_thumb_mode(), "the register file should be in Thumb");
+        assert!(pipeline.is_thumb_mode(), "so should the pipeline");
+    }
+
+    /// The mirror case: leaving Thumb has to resteer too.
+    #[test]
+    fn msr_leaving_thumb_resteers_the_pipeline() {
+        let mut regs = Registers::new();
+        regs.set_cpsr(regs.cpsr() | (1 << 5), true); // set T
+        regs.set_reg(2, 0x0000_001F);
+        let mut bus = SimpleBus::new(None);
+        let mut pipeline = Pipeline::new();
+        pipeline.set_fetch_addr(0x0800_0100);
+        pipeline.set_thumb_mode(true);
+
+        run_arm_with_bus(0xE129_F002, &mut regs, &mut bus, &mut pipeline);
+
+        assert!(!regs.is_thumb_mode());
+        assert!(!pipeline.is_thumb_mode());
+    }
+
+    /// An `MSR` that does not touch T must leave the pipeline alone.
+    #[test]
+    fn msr_that_only_writes_flags_does_not_resteer() {
+        let mut regs = Registers::new();
+        regs.set_reg(2, 0xF000_0000);
+        let mut bus = SimpleBus::new(None);
+        let mut pipeline = Pipeline::new();
+        pipeline.set_fetch_addr(0x0800_0100);
+
+        // MSR CPSR_f, r2 -- flags field only.
+        run_arm_with_bus(0xE128_F002, &mut regs, &mut bus, &mut pipeline);
+
+        assert!(!pipeline.is_thumb_mode());
+    }
+
+    /// `ROR` by exactly 32, from a register.
+    ///
+    /// ARM treats a register-specified rotate of 32 as "leave the value alone,
+    /// but set carry from bit 31" — distinct both from a rotate of 0, which
+    /// leaves carry alone, and from RRX, which is what an *immediate* rotate of
+    /// 0 encodes. jsmolka's arm.gba checks this as test 164.
+    #[test]
+    fn ror_by_thirty_two_from_a_register_keeps_the_value_and_sets_carry() {
+        let mut regs = Registers::new();
+        regs.set_reg(0, 0x8000_0000);
+        regs.set_reg(1, 32);
+        regs.set_flags(false, false, false, false);
+
+        // MOVS r0, r0, ROR r1
+        run_arm(0xE1B0_0170, &mut regs);
+
+        assert_eq!(regs.get_reg(0), 0x8000_0000, "the value must be unchanged");
+        assert!(regs.flag_c(), "carry must come from bit 31");
+    }
+
+    /// PC reads as instruction+12 when the shift amount comes from a register.
+    ///
+    /// The register-specified shift costs an extra cycle and the prefetch runs
+    /// on during it. Reading the usual +8 puts every such instruction four
+    /// bytes out. jsmolka's arm.gba checks this as test 224.
+    #[test]
+    fn a_register_shift_reads_pc_as_instruction_plus_twelve() {
+        let mut regs = Registers::new();
+        let mut bus = SimpleBus::new(None);
+        let mut pipeline = Pipeline::new();
+        pipeline.set_fetch_addr(0x0800_0100);
+        // The core stages R15 as instruction + 8 before executing.
+        regs.set_pc(0x0800_0108);
+        regs.set_reg(0, 0);
+
+        // MOV r0, pc, LSL r0 -- a register-specified shift of zero, so the
+        // only thing under test is which PC the instruction sees.
+        run_arm_with_bus(0xE1A0_001F, &mut regs, &mut bus, &mut pipeline);
+
+        assert_eq!(
+            regs.get_reg(0),
+            0x0800_010C,
+            "a register-shifted operand must see PC as instruction + 12"
+        );
+    }
+
+    /// An immediate shift keeps the ordinary +8.
+    #[test]
+    fn an_immediate_shift_reads_pc_as_instruction_plus_eight() {
+        let mut regs = Registers::new();
+        let mut bus = SimpleBus::new(None);
+        let mut pipeline = Pipeline::new();
+        pipeline.set_fetch_addr(0x0800_0100);
+        regs.set_pc(0x0800_0108);
+
+        // MOV r0, pc  -- no shift register involved.
+        run_arm_with_bus(0xE1A0_000F, &mut regs, &mut bus, &mut pipeline);
+
+        assert_eq!(regs.get_reg(0), 0x0800_0108);
+    }
+
+    /// The neighbouring cases, so a fix for one cannot break the others.
+    #[test]
+    fn ror_by_a_register_covers_zero_and_more_than_thirty_two() {
+        // ROR by 0 leaves both the value and the carry alone.
+        let mut regs = Registers::new();
+        regs.set_reg(0, 0x8000_0000);
+        regs.set_reg(1, 0);
+        regs.set_flags(false, false, false, false);
+        run_arm(0xE1B0_0170, &mut regs);
+        assert_eq!(regs.get_reg(0), 0x8000_0000);
+        assert!(!regs.flag_c(), "a rotate of zero must not touch carry");
+
+        // ROR by 33 is ROR by 1.
+        let mut regs = Registers::new();
+        regs.set_reg(0, 2);
+        regs.set_reg(1, 33);
+        run_arm(0xE1B0_0170, &mut regs);
+        assert_eq!(regs.get_reg(0), 1, "33 should rotate by one");
+    }
+
     #[test]
     fn test_ands_immediate_sets_c_from_shifter_carry() {
         // ANDS R3, R1, #0x80000000 (imm8=0x02, rotate=2)
@@ -1642,7 +1953,10 @@ mod tests {
 
         run_arm_with_bus(0xE1D1_00B0, &mut regs, &mut bus, &mut pipeline);
 
-        assert_eq!(regs.get_reg(0), 0x3412);
+        // The rotate is of the 32-bit register value, not of the halfword.
+        // This asserted 0x3412 while the emulator rotated the narrow value,
+        // which left the bytes in the wrong half of the register.
+        assert_eq!(regs.get_reg(0), 0x3400_0012);
     }
 
     #[test]

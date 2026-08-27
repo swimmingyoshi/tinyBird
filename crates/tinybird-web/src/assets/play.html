@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tinyBird — Play</title>
+    <meta name="color-scheme" content="dark" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/console.css" />
+  </head>
+  <body>
+    <!-- `data-focus` is the whole of focus mode: the header and the control
+         deck are hidden by CSS, the screen takes the room they left, and the
+         read-out rails stay because they are what you are reading while you
+         play. Tab switches it. -->
+    <div class="rig" id="rig" data-focus="off">
+      <!-- Chrome ------------------------------------------------------- -->
+      <header class="bar">
+        <a class="bar__mark" href="/">
+          <span class="bar__glyph" aria-hidden="true"></span>
+          tinyBird
+        </a>
+        <nav class="bar__nav">
+          <a href="/">Home</a>
+          <a class="is-current" href="/play" aria-current="page">Play</a>
+        </nav>
+        <p class="bar__state" id="link-state" data-state="idle">
+          <span class="dot" aria-hidden="true"></span><span id="link-label">no cartridge</span>
+        </p>
+
+        <!-- Account. In the bar rather than the rail: it is checked rarely and
+             read never, so it should cost no vertical space and should not
+             leave an email address on screen while someone is streaming. -->
+        <div class="account" id="account" hidden>
+          <button
+            class="account__toggle"
+            id="account-toggle"
+            type="button"
+            aria-expanded="false"
+            aria-controls="account-menu"
+          >
+            <span class="account__dot" aria-hidden="true"></span>
+            <span id="account-label">Sign in</span>
+          </button>
+
+          <div class="account__menu" id="account-menu" hidden>
+            <div id="account-in" hidden>
+              <p class="account__who" id="account-who">—</p>
+              <div class="account__row">
+                <button class="key key--slim" id="btn-signout" type="button">Sign out</button>
+                <button class="key key--slim" id="btn-claim" type="button" hidden>
+                  Claim old saves
+                </button>
+              </div>
+            </div>
+
+            <!-- One form, two modes. Signing in wants two fields; creating an
+                 account wants four, and showing all four to someone who just
+                 wants to sign in is how a login form starts feeling like
+                 paperwork. `data-mode` decides which are on screen. -->
+            <form id="account-form" class="account__form" data-mode="signin">
+              <label class="account__field account__field--new">
+                <span>Username</span>
+                <input
+                  type="text"
+                  id="account-username"
+                  autocomplete="nickname"
+                  maxlength="32"
+                  spellcheck="false"
+                />
+              </label>
+              <label class="account__field">
+                <span>Email</span>
+                <input type="email" id="account-email" autocomplete="username" required />
+              </label>
+              <label class="account__field">
+                <span>Password</span>
+                <input
+                  type="password"
+                  id="account-password"
+                  autocomplete="current-password"
+                  minlength="12"
+                  required
+                />
+              </label>
+              <label class="account__field account__field--new">
+                <span>Repeat password</span>
+                <input
+                  type="password"
+                  id="account-password2"
+                  autocomplete="new-password"
+                  minlength="12"
+                />
+              </label>
+              <div class="account__row">
+                <button class="key key--slim" id="btn-signin" type="submit">Sign in</button>
+                <button class="key key--slim" id="btn-signup" type="button">
+                  Create account
+                </button>
+                <button class="key key--slim" id="btn-signup-back" type="button" hidden>
+                  Back
+                </button>
+              </div>
+              <p class="account__hint" id="account-hint">
+                Saves are kept per account. 12 characters or more.
+              </p>
+            </form>
+          </div>
+        </div>
+      </header>
+
+      <!-- Frame rate and the last thing that happened. Above the deck rather
+           than under it: this is the line you check while playing, and at the
+           bottom of a tall page it was usually scrolled out of view. -->
+      <div class="status">
+        <span class="status__perf" id="foot-perf">—</span>
+        <span class="status__msg" id="foot-msg" role="status" aria-live="polite"></span>
+      </div>
+
+      <!-- Three columns: what the addon knows on the left, the game in the
+           middle, what the cartridge is and what is stored on the right. The
+           screen is the centre of attention, so it takes the centre column and
+           whatever width the two rails leave over. -->
+      <main class="deck">
+        <!-- Screen ----------------------------------------------------- -->
+        <section class="screen-col">
+          <div class="screen" id="screen" data-mode="empty" data-grid="off">
+            <!-- Sized by script to a whole multiple of 240x160 so the picture
+                 lands on exact pixel boundaries, the way the desktop scales. -->
+            <div class="screen__panel" id="screen-panel">
+              <canvas id="canvas" width="240" height="160" aria-label="Game screen"></canvas>
+              <div class="screen__grid" aria-hidden="true"></div>
+              <div class="screen__boot" id="boot" aria-hidden="true"></div>
+            </div>
+
+            <!-- The library lives here rather than in the rail.
+
+                 It was a permanent tab listing ROMs, which is a list you need
+                 exactly once — when there is no cartridge in — and which is
+                 empty on most setups because the ROM has to come off your own
+                 disk anyway. On the empty screen it is the thing you came to
+                 do; once a game is running it is gone. -->
+            <div class="screen__empty" id="empty-state">
+              <p class="screen__empty-title">No cartridge</p>
+              <p class="screen__empty-body">
+                Drop a <code>.gba</code> file anywhere on this page, or pick one
+                below.
+              </p>
+              <ul class="vault__list" id="vault-list">
+                <li class="vault__empty" id="vault-empty">Looking for ROMs…</li>
+              </ul>
+              <label class="key key--file" id="vault-load">
+                Load a local ROM<span class="panel__note" id="vault-note"></span>
+                <input type="file" id="file-rom" accept=".gba,.bin,.agb" hidden />
+              </label>
+            </div>
+          </div>
+
+          <!-- The control deck.
+
+               Grouped and labelled rather than run together in rows. The old
+               deck put "Save state", "Save to vault" and "Screenshot to vault"
+               next to each other with nothing saying that the first is a
+               photograph of the machine kept in this browser and the second is
+               the same thing pushed to an account. Each group now says what it
+               is for, and every key carries the shortcut that also does it, so
+               the deck teaches the keyboard instead of competing with it. -->
+          <div class="deckplate">
+            <section class="rack">
+              <p class="rack__label">Game</p>
+              <div class="rack__keys">
+                <button
+                  class="key"
+                  id="btn-play"
+                  type="button"
+                  data-key="play"
+                  disabled
+                  title="Pause or resume emulation"
+                >
+                  Resume
+                </button>
+                <button
+                  class="key"
+                  id="btn-reset"
+                  type="button"
+                  disabled
+                  title="Restart the cartridge from its boot screen"
+                >
+                  Reset
+                </button>
+                <button
+                  class="key"
+                  id="btn-ff"
+                  type="button"
+                  disabled
+                  aria-pressed="false"
+                  title="Run the game faster while held or toggled"
+                >
+                  Fast forward<kbd class="key__hint" data-shortcut="FAST_FORWARD"></kbd>
+                </button>
+                <button
+                  class="key"
+                  id="btn-full"
+                  type="button"
+                  aria-pressed="false"
+                  title="Fill the display with the game screen"
+                >
+                  Full screen
+                </button>
+              </div>
+            </section>
+
+            <section class="rack">
+              <p class="rack__label">
+                Save states<span class="rack__note">a snapshot of the whole machine</span>
+              </p>
+              <div class="rack__keys">
+                <button
+                  class="key"
+                  id="btn-save"
+                  type="button"
+                  disabled
+                  title="Download a save state to this computer"
+                >
+                  Save to file
+                </button>
+                <label class="key key--file" title="Open a save state from this computer">
+                  Load from file
+                  <input type="file" id="file-state" accept=".state,.bin" hidden />
+                </label>
+                <button
+                  class="key"
+                  id="btn-cloud"
+                  type="button"
+                  disabled
+                  title="Keep a save state in your account, reachable from any browser"
+                >
+                  Save to vault
+                </button>
+                <button
+                  class="key"
+                  id="btn-store"
+                  type="button"
+                  disabled
+                  title="Keep a picture of the screen in your account"
+                >
+                  Screenshot
+                </button>
+              </div>
+            </section>
+
+            <section class="rack">
+              <p class="rack__label">Sound and picture</p>
+              <div class="rack__keys rack__keys--dials">
+                <label class="dial">
+                  <span class="dial__label">Fast forward speed</span>
+                  <select id="opt-speed">
+                    <option value="2">2&times;</option>
+                    <option value="4" selected>4&times;</option>
+                    <option value="8">8&times;</option>
+                    <option value="0">Unlimited</option>
+                  </select>
+                </label>
+                <label class="dial">
+                  <span class="dial__label">Volume</span>
+                  <input type="range" id="opt-volume" min="0" max="100" value="70" />
+                </label>
+              </div>
+              <div class="rack__toggles">
+                <label class="toggle" title="Turn game audio on">
+                  <input type="checkbox" id="opt-audio" />
+                  <span>Sound</span>
+                </label>
+                <label class="toggle" title="Warm the palette the way a real GBA screen did">
+                  <input type="checkbox" id="opt-lcd" />
+                  <span>LCD colour</span>
+                </label>
+                <label class="toggle" title="Draw the gaps between rows of pixels">
+                  <input type="checkbox" id="opt-scan" />
+                  <span>Scanlines</span>
+                </label>
+              </div>
+            </section>
+
+            <section class="rack">
+              <p class="rack__label">Setup</p>
+              <div class="rack__keys">
+                <button
+                  class="key"
+                  id="btn-controls"
+                  type="button"
+                  title="Change the keyboard and controller bindings"
+                >
+                  Controls<span class="key__badge" id="pad-badge" hidden>pad</span>
+                </button>
+                <button
+                  class="key"
+                  id="btn-lobby"
+                  type="button"
+                  title="Host or join a room and play alongside other people"
+                >
+                  Lobby<span class="key__badge" id="lobby-badge" hidden>in</span>
+                </button>
+              </div>
+              <!-- The stream overlay is switched off while it is reworked: it
+                   reads the desktop app's export rather than the emulator in
+                   this page, so on a server run by itself it shows a snapshot
+                   that never changes. The control stays in the markup, hidden,
+                   rather than being deleted — everything it drives still works
+                   and comes back with one attribute. `/overlay` says the same
+                   thing server-side, and TINYBIRD_WEB_OVERLAY=1 re-enables. -->
+              <div class="rack__toggles" hidden>
+                <label class="toggle" title="Show the OBS stream overlay under the deck">
+                  <input type="checkbox" id="opt-overlay" />
+                  <span>Stream overlay</span>
+                </label>
+              </div>
+            </section>
+          </div>
+
+          <!-- Someone else's screen, when you are watching one. Left on the
+               page rather than moved into the lobby dialog: watching is the
+               part of a room that lasts, and it belongs next to your own
+               screen rather than behind a button. -->
+          <figure class="lobby__watch" id="lobby-watch" hidden>
+            <img class="lobby__screen" id="lobby-screen" alt="" width="240" height="160" />
+            <figcaption class="lobby__caption" id="lobby-caption">—</figcaption>
+          </figure>
+
+          <!-- Filled in from the live bindings, so it cannot contradict them. -->
+          <p class="hint" id="deck-hint"></p>
+        </section>
+
+        <!-- Addons.
+
+             Both rails are addon columns, and which sections go in which is
+             the player's call — the "move" button on a pane sends it across.
+             Tabs rather than a stack because a party of six is taller than the
+             screen it describes, and spreading the sections over two rails is
+             how you get to see two of them at once. -->
+        <aside class="readout readout--addons">
+          <section class="panel deckpanel" id="live-panel" hidden>
+            <p class="panel__eyebrow rail__head">
+              <span id="live-title">Live</span
+              ><span class="panel__note" id="live-note"></span>
+            </p>
+            <div class="tabs__pane" id="left-pane"></div>
+          </section>
+
+          <!-- Only ever seen with no cartridge in: once a ROM loads, the
+               cartridge addon claims whatever no other addon does, so the
+               panel above always has something to say. -->
+          <p class="rail-note" id="addon-empty">
+            Addons read the running game's memory as it plays and report what
+            is inside it — your party and its health, where you are standing,
+            what you are fighting.
+            <br /><br />
+            FireRed and LeafGreen are covered in full, Final Fantasy Tactics
+            Advance in part, and every other cartridge falls back to its header
+            and save type. Load one and it appears here.
+          </p>
+        </aside>
+
+        <!-- Cartridge, saves, library ----------------------------------- -->
+        <aside class="readout readout--info">
+          <!-- The cartridge, as a strip rather than a panel.
+
+               It used to be a tall box: the ROM title, the game code set huge,
+               then region, maker, revision and addon as four labelled rows. But
+               the title is already in the header bar and the addon name is
+               already the heading of the read-out rail, so most of that box was
+               the same facts a second time. What is left is the part nothing
+               else says — the code the addon registry actually matches on, its
+               region letter, and the revision — on one line, with the maker in
+               the tooltip. The rest of the column went to the panel below. -->
+          <div class="cartstrip" id="cart" hidden>
+            <span class="cartstrip__code" id="cart-code" aria-label="Game code">
+              <span class="cartstrip__prefix" id="cart-prefix">···</span
+              ><span class="cartstrip__region" id="cart-region">·</span>
+            </span>
+            <span class="cartstrip__facts">
+              <span id="cart-region-name">—</span>
+              <span class="cartstrip__rev">rev <span id="cart-rev">—</span></span>
+            </span>
+            <span class="cartstrip__addon" id="cart-addon">—</span>
+          </div>
+
+          <!-- The right rail is the same thing as the left one, plus saves.
+
+               Saves is placeable like any addon section: it is a tab here by
+               default because that is where it is useful, but "move" sends it
+               across like everything else. The lobby left this column entirely
+               — it is a thing you set up once and then forget, which is what a
+               dialog is for, not a permanent third of a rail. -->
+          <section class="panel deckpanel" id="info-panel">
+            <div class="tabs__pane" id="right-pane"></div>
+
+            <div class="tabs__pane" id="pane-saves" hidden>
+              <div id="saves-panel" hidden>
+                <ul class="saves__list" id="saves-list"></ul>
+              </div>
+              <p class="rail-note" id="saves-off">
+                Load a cartridge and the save states kept for it appear here.
+              </p>
+            </div>
+          </section>
+
+          <!-- Where the saves pane waits while a rail is showing something
+               else. It is one node moved between the two columns rather than
+               two copies kept in step, so it needs somewhere to be that is
+               still in the document: a detached node is invisible to anything
+               that looks the page up by id, including us. -->
+          <div id="pane-park" hidden></div>
+        </aside>
+      </main>
+
+      <!-- Lobby.
+
+           Out of the rail and into a dialog. Hosting or joining is a thing you
+           do once at the start of a session; watching someone else's screen is
+           the part that stays, and it does not need the room code, the join
+           field and the member list sitting under it for the rest of the
+           evening. -->
+      <dialog class="sheet" id="lobby-sheet">
+        <form method="dialog" class="sheet__head">
+          <p class="panel__eyebrow">
+            Lobby<span class="panel__note" id="lobby-note"></span>
+          </p>
+          <button class="key key--slim" type="submit">Close</button>
+        </form>
+
+        <div class="sheet__body">
+          <div id="lobby-out">
+            <div class="lobby__row">
+              <input
+                type="text"
+                id="lobby-code"
+                placeholder="Room code"
+                maxlength="16"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <button class="key key--slim" id="btn-join" type="button">Join</button>
+            </div>
+            <button class="key key--slim key--wide" id="btn-host" type="button">
+              Start a room
+            </button>
+            <p class="lobby__hint" id="lobby-hint">
+              Share the code and play together. Each player runs their own copy;
+              only the read-out is shared.
+            </p>
+          </div>
+
+          <div id="lobby-in" hidden>
+            <p class="lobby__code">
+              <span id="lobby-room">—</span>
+              <button class="saves__act" id="btn-copy-code" type="button">copy</button>
+              <button class="saves__act" id="btn-lock" type="button" hidden>lock</button>
+              <button class="saves__act saves__act--danger" id="btn-leave" type="button">
+                leave
+              </button>
+            </p>
+            <label class="toggle lobby__share">
+              <input type="checkbox" id="opt-share" />
+              <span>Share my screen</span>
+            </label>
+
+            <label class="toggle lobby__share">
+              <input type="checkbox" id="opt-link" />
+              <span>Link cable</span>
+            </label>
+            <p class="lobby__hint" id="lobby-link-note">
+              Off. Games will not see each other.
+            </p>
+
+            <ul class="lobby__list" id="lobby-members"></ul>
+          </div>
+        </div>
+      </dialog>
+
+      <!-- Controls.
+
+           A dialog rather than another rail panel: rebinding is something you
+           do once and then never think about, and it needs the whole keyboard
+           to itself while it is open — a page listening for the next keypress
+           cannot also be a page you can tab around. -->
+      <dialog class="sheet" id="controls-sheet">
+        <form method="dialog" class="sheet__head">
+          <p class="panel__eyebrow">Controls</p>
+          <button class="key key--slim" id="btn-controls-close" type="submit">Close</button>
+        </form>
+
+        <p class="sheet__lead" id="pad-status" data-pad="off">
+          <span id="pad-status-text"
+            >Click a binding to change it, &times; to remove it, + to add another.</span
+          >
+          <span class="sheet__pad" id="pad-status-pad"></span>
+        </p>
+
+        <div class="sheet__body" id="controls-body"></div>
+
+        <div class="sheet__foot">
+          <button class="key key--slim" id="btn-controls-reset" type="button">
+            Reset to defaults
+          </button>
+        </div>
+      </dialog>
+
+      <p class="focus-exit" aria-hidden="true">Tab to leave focus mode</p>
+
+      <!-- The real OBS overlay, embedded and fed by the emulator in this page
+           rather than by the desktop app's JSON export. Same page, same code. -->
+      <section class="stage" id="overlay-stage" hidden>
+        <div class="stage__bar">
+          <p class="panel__eyebrow">Stream overlay</p>
+          <div class="stage__actions">
+            <label class="toggle">
+              <input type="checkbox" id="opt-overlay-row" checked />
+              <span>Row layout</span>
+            </label>
+            <a class="key key--slim" id="overlay-open" href="/overlay/full" target="_blank"
+              >Open for OBS</a
+            >
+          </div>
+        </div>
+        <iframe
+          id="overlay-frame"
+          class="stage__frame"
+          title="Live stream overlay"
+          src="about:blank"
+        ></iframe>
+      </section>
+
+   </div>
+
+    <div class="drop" id="drop" hidden><p>Drop to load</p></div>
+
+    <script type="module" src="/play.js"></script>
+  </body>
+</html>

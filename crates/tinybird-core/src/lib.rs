@@ -16,11 +16,13 @@ pub mod bus;
 pub mod cpu;
 pub mod debug;
 pub mod dma;
+pub mod eeprom;
 pub mod gba;
 pub mod input;
 pub mod memory_map;
 pub mod ppu;
 pub mod scheduler;
+pub mod sio;
 pub mod timers;
 
 // Re-exports for convenient access
