@@ -1,4 +1,4 @@
-use crate::game_addons::{AddonData, StreamSnapshot};
+use tinybird_games::{AddonData, StreamSnapshot};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -138,6 +138,9 @@ fn species_ids_from_snapshot(snapshot: &StreamSnapshot) -> Vec<u16> {
             }
             ordered
         }
+        // Sprite prefetch is a Pokemon-specific concern; other games have
+        // nothing to fetch here.
+        AddonData::Ffta(_) | AddonData::Generic => Vec::new(),
     }
 }
 

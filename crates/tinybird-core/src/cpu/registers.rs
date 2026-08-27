@@ -339,7 +339,11 @@ impl Registers {
         // Preserve mode bits if not explicitly changing mode
         let mode_bits = value & 0x1F;
         let flags = if update_flags {
-            value & 0xF000_00DF // Keep N, Z, C, V, Q, I, F, T
+            // N, Z, C, V, Q, I, F, and T. The T bit is bit 5, so the low byte
+            // has to be 0xFF: masking it out silently pinned the core in
+            // whatever state it was already in, so an `MSR` that switched to
+            // Thumb did nothing and execution carried on decoding ARM.
+            value & 0xF000_00FF
         } else {
             (self.cpsr & 0xF000_0000) | (value & 0x0000_00DF)
         };
@@ -471,8 +475,9 @@ impl Registers {
     /// Return from exception (restores full CPSR including T bit)
     pub fn return_from_exception(&mut self) {
         if let Some(spsr) = self.spsr() {
-            // Directly restore all CPSR bits from SPSR, including the T (Thumb) bit.
-            // We cannot use set_cpsr() here because its mask drops bit 5 (T).
+            // Restore every CPSR bit from SPSR, the T bit included. Assigning
+            // directly rather than going through set_cpsr keeps the mode bits
+            // exactly as the exception left them.
             self.cpsr = spsr;
             self.mode = CpuMode::from_bits(spsr as u8);
             self.thumb_mode = (spsr & CpsrFlags::T.bits()) != 0;
@@ -502,6 +507,46 @@ impl Registers {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Writing the T bit through the CPSR must actually take.
+    ///
+    /// The flag mask used to be `0xF000_00DF`, whose low byte clears bit 5 —
+    /// the T bit. The core could therefore never be switched into Thumb by
+    /// anything that went through `set_cpsr`, which is how `MSR` and every
+    /// exception return get there. Games that enter Thumb that way ran on
+    /// decoding ARM instead.
+    #[test]
+    fn the_thumb_bit_can_be_set_through_cpsr() {
+        let mut regs = Registers::new();
+        assert!(!regs.is_thumb_mode());
+
+        let cpsr = regs.cpsr() | CpsrFlags::T.bits();
+        regs.set_cpsr(cpsr, true);
+
+        assert!(regs.is_thumb_mode(), "T should have taken");
+        assert_ne!(regs.cpsr() & CpsrFlags::T.bits(), 0, "T should be in the CPSR");
+    }
+
+    #[test]
+    fn the_thumb_bit_can_be_cleared_through_cpsr() {
+        let mut regs = Registers::new();
+        regs.set_cpsr(regs.cpsr() | CpsrFlags::T.bits(), true);
+        assert!(regs.is_thumb_mode());
+
+        regs.set_cpsr(regs.cpsr() & !CpsrFlags::T.bits(), true);
+        assert!(!regs.is_thumb_mode());
+    }
+
+    /// The interrupt masks share the low byte with T and must still work.
+    #[test]
+    fn the_interrupt_masks_still_survive_a_cpsr_write() {
+        let mut regs = Registers::new();
+        regs.set_cpsr(regs.cpsr() | CpsrFlags::I.bits() | CpsrFlags::F.bits(), true);
+        assert_ne!(regs.cpsr() & CpsrFlags::I.bits(), 0);
+        assert_ne!(regs.cpsr() & CpsrFlags::F.bits(), 0);
+    }
+
     use super::*;
 
     #[test]

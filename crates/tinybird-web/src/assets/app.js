@@ -374,6 +374,15 @@ const state = {
   currentSignature: "",
   section: "full",
   showEmpty: true,
+  /**
+   * True once a host page pushes us a snapshot.
+   *
+   * The overlay normally polls the desktop app's JSON export. Embedded in the
+   * play page there is no desktop app — the emulator is right there in the
+   * parent frame — so the parent posts snapshots instead and polling would
+   * only overwrite them with stale data.
+   */
+  driven: false,
 };
 
 const overlayRoot = document.getElementById("overlay-root");
@@ -406,10 +415,44 @@ const partyCardTemplate = document.getElementById("party-card-template");
 const encounterMethodTemplate = document.getElementById("encounter-method-template");
 
 initLayout();
+listenForPushedSnapshots();
 tick();
 window.setInterval(tick, POLL_INTERVAL_MS);
 
+/**
+ * Accept snapshots pushed by a host page.
+ *
+ * Same schema as `/api/snapshot`, so both sources land in the same renderer and
+ * the OBS pages and the in-page overlay cannot drift apart.
+ */
+function listenForPushedSnapshots() {
+  if (window.parent === window) return;
+
+  window.addEventListener("message", (event) => {
+    // Same-origin only: the host is our own page, served from this server.
+    if (event.origin !== window.location.origin) return;
+    const message = event.data;
+    if (!message || message.type !== "tinybird:snapshot") return;
+
+    state.driven = true;
+    state.lastOkAt = Date.now();
+
+    const signature = JSON.stringify(message.snapshot);
+    if (signature !== state.currentSignature) {
+      state.currentSignature = signature;
+      renderSnapshot(message.snapshot);
+    }
+    setStatus("live", message.status || "live");
+  });
+
+  // Tell the host we are ready for data.
+  window.parent.postMessage({ type: "tinybird:overlay-ready" }, window.location.origin);
+}
+
 async function tick() {
+  // A host feeding us directly is authoritative; do not poll over the top.
+  if (state.driven) return;
+
   try {
     const response = await fetch(`/api/snapshot?ts=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) {
@@ -646,15 +689,33 @@ function renderGenericSection(section) {
   heading.className = "generic-heading";
   const title = document.createElement("h2");
   title.textContent = section.title || section.section_id || "Addon Section";
-  const kind = document.createElement("p");
-  kind.textContent = section.kind || "section";
-  heading.append(title, kind);
+  heading.append(title);
+  // The addon's flag, if it raised one. On a stream this is the whole point of
+  // the mechanism: a viewer who is not clicking through tabs still sees that
+  // the thing on screen is worth catching.
+  if (section.badge?.text) {
+    const flag = document.createElement("strong");
+    flag.className = "generic-flag";
+    flag.textContent = section.badge.text;
+    if (section.badge.tone) flag.dataset.tone = section.badge.tone;
+    heading.append(flag);
+  }
+  // The section note, when it has one. This used to print the schema kind as a
+  // fallback, which put the words "key_value" and "cards" on a stream overlay;
+  // a section with nothing to say is better off saying nothing.
+  if (section.note) {
+    const note = document.createElement("p");
+    note.textContent = section.note;
+    heading.append(note);
+  }
   article.appendChild(heading);
 
   if (section.kind === "key_value") {
     article.appendChild(renderGenericFields(section.payload || []));
   } else if (section.kind === "table") {
     article.appendChild(renderGenericTable(section.payload));
+  } else if (section.kind === "cards") {
+    article.appendChild(renderGenericCards(section.payload || []));
   } else if (section.kind === "list") {
     article.appendChild(renderGenericList(section.payload || []));
   } else {
@@ -672,14 +733,96 @@ function renderGenericFields(fields) {
   list.className = "generic-fields";
   for (const field of fields) {
     const item = document.createElement("div");
+    if (field.tone) item.dataset.tone = field.tone;
     const label = document.createElement("dt");
     const value = document.createElement("dd");
     label.textContent = field.label || "";
     value.textContent = field.value ?? "";
     item.append(label, value);
+    if (field.meter) item.appendChild(renderGenericMeter(field.meter, field.tone));
     list.appendChild(item);
   }
   return list;
+}
+
+/** A bar, drawn from the numbers rather than by parsing the value string. */
+function renderGenericMeter(meter, tone) {
+  const max = Number(meter?.max) || 0;
+  const value = Number(meter?.value) || 0;
+  const bar = document.createElement("div");
+  bar.className = "generic-meter";
+  if (tone) bar.dataset.tone = tone;
+  const fill = document.createElement("span");
+  fill.style.width = `${max === 0 ? 0 : Math.min(100, Math.round((value / max) * 100))}%`;
+  bar.appendChild(fill);
+  return bar;
+}
+
+/**
+ * Cards: a party, a squad, an opponent. Nothing is collapsed here — an overlay
+ * is read at a glance from across a room and has no one to click it — so a
+ * card shows its headline, its flags, and its detail all at once.
+ */
+function renderGenericCards(cards) {
+  const wrap = document.createElement("div");
+  wrap.className = "generic-cards";
+
+  for (const card of cards) {
+    const item = document.createElement("article");
+    item.className = "generic-card";
+    if (card.lead?.tone) item.dataset.tone = card.lead.tone;
+
+    const head = document.createElement("header");
+    // The picture, when the addon named one. An overlay is watched rather than
+    // read, so a species sprite carries further than its name does.
+    if (card.image?.src) {
+      const img = document.createElement("img");
+      img.className = "generic-portrait";
+      img.src = card.image.src;
+      img.alt = card.image.alt ?? "";
+      img.loading = "lazy";
+      img.addEventListener("error", () => img.remove());
+      head.appendChild(img);
+    }
+    const title = document.createElement("h3");
+    title.textContent = card.title || "";
+    head.appendChild(title);
+    if (card.subtitle) {
+      const subtitle = document.createElement("p");
+      subtitle.textContent = card.subtitle;
+      head.appendChild(subtitle);
+    }
+    if (card.lead) {
+      const lead = document.createElement("strong");
+      lead.textContent = card.lead.value ?? "";
+      head.appendChild(lead);
+    }
+    item.appendChild(head);
+
+    if (card.lead?.meter) {
+      item.appendChild(renderGenericMeter(card.lead.meter, card.lead.tone));
+    }
+
+    if (card.badges?.length) {
+      const chips = document.createElement("div");
+      chips.className = "generic-chips";
+      for (const badge of card.badges) {
+        const chip = document.createElement("span");
+        chip.textContent = badge.text ?? "";
+        if (badge.tone) chip.dataset.tone = badge.tone;
+        chips.appendChild(chip);
+      }
+      item.appendChild(chips);
+    }
+
+    if (card.fields?.length) {
+      item.appendChild(renderGenericFields(card.fields));
+    }
+
+    wrap.appendChild(item);
+  }
+
+  return wrap;
 }
 
 function renderGenericList(items) {

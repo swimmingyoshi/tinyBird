@@ -3,12 +3,13 @@
 //! The GBA bus connects the CPU to all memory regions and peripherals.
 //! It handles address decoding, wait states, and open bus behavior.
 
+use crate::eeprom::{Eeprom, LARGE_SIZE as EEPROM_LARGE_SIZE};
 use crate::debug::config as debug_config;
 use crate::memory_map::*;
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 thread_local! {
     /// Current emulator cycle (set by Gba::step for debug watchpoints)
@@ -61,6 +62,13 @@ impl DirtyRange {
         }
     }
 
+    /// Mark the whole region dirty, for when it was replaced wholesale.
+    fn mark_all(&mut self, max_len: usize) {
+        self.start = 0;
+        self.end = max_len;
+        self.dirty = max_len > 0;
+    }
+
     fn take(&mut self) -> Option<(usize, usize)> {
         if !self.dirty {
             return None;
@@ -108,6 +116,13 @@ struct AccessStamp {
 /// Trait for bus access
 pub trait Bus {
     /// Read a byte from the bus
+    /// Whether a real BIOS image is loaded rather than the built-in stubs.
+    ///
+    /// Answered directly rather than by reading address zero: the BIOS refuses
+    /// ordinary reads from outside itself and hands back its last fetched
+    /// opcode, so probing it through the bus reports whatever is latched.
+    fn has_real_bios(&self) -> bool;
+
     fn read_u8(&self, addr: u32) -> u8;
 
     /// Read a halfword (16-bit) from the bus (does not update open bus value)
@@ -172,6 +187,13 @@ enum FlashCommandState {
 }
 
 /// Simple bus implementation with ROM and RAM arrays
+/// `BX LR`, the instruction every high-level BIOS stub is made of. Finding it
+/// at address zero is how a stubbed BIOS is told from a real image.
+const HLE_STUB_OPCODE: u32 = 0xE12F_FF1E;
+
+/// A plain SRAM cartridge carries 32 KB, half the window it appears in.
+const SRAM_CHIP_SIZE: usize = 0x8000;
+
 #[derive(Clone)]
 pub struct SimpleBus {
     /// BIOS memory (32KB, read-only after boot)
@@ -202,6 +224,8 @@ pub struct SimpleBus {
     timer_control_dirty: bool,
     /// Set when any DMA register (I/O 0xB0..=0xDF) was written; cleared by take_dma_dirty.
     dma_dirty: bool,
+    /// Set when a serial register was written; cleared by `take_sio_dirty`.
+    sio_dirty: bool,
     /// Game Pak ROM (variable size, using max for simplicity)
     rom: Vec<u8>,
     /// Cartridge-backed save memory.
@@ -230,6 +254,24 @@ pub struct SimpleBus {
     cpu_timing_cycles: Cell<u32>,
     /// Last CPU-side memory access within the current instruction.
     cpu_last_access: Cell<Option<AccessStamp>>,
+    /// The last opcode fetched out of the BIOS, and whether the core is
+    /// currently executing there.
+    ///
+    /// The BIOS refuses to be read from outside itself: instead of its own
+    /// contents it hands back whatever it last fetched. A few games read the
+    /// region deliberately, as a cheap source of a value an emulator is
+    /// unlikely to reproduce.
+    ///
+    /// `Cell` because instruction fetches come through `&self`, and neither
+    /// field belongs in a savestate: both are re-established by the next fetch.
+    bios_opcode: Cell<u32>,
+    executing_in_bios: Cell<bool>,
+    /// Serial EEPROM, when the cartridge has one.
+    ///
+    /// Behind a `RefCell` because clocking a bit out changes the chip's state,
+    /// and reads come through `&self`. Its contents ride in `save_memory` when
+    /// serialized, so adding it did not change the savestate format.
+    eeprom: RefCell<Eeprom>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -288,7 +330,13 @@ impl Serialize for SimpleBus {
             audio_io_dirty: self.audio_io_dirty,
             dma_dirty: self.dma_dirty,
             rom: self.rom.clone(),
-            save_memory: self.save_memory.clone(),
+            // EEPROM keeps its data inside the chip; hand it over through the
+            // same field the other backup types use so the format is unchanged.
+            save_memory: if matches!(self.save_type, SaveType::Eeprom) {
+                self.eeprom.borrow().data().to_vec()
+            } else {
+                self.save_memory.clone()
+            },
             save_type: self.save_type,
             flash_id_mode: self.flash_id_mode,
             flash_cmd_state: self.flash_cmd_state,
@@ -309,6 +357,10 @@ impl<'de> Deserialize<'de> for SimpleBus {
         D: Deserializer<'de>,
     {
         let helper = SimpleBusSerde::deserialize(deserializer)?;
+        let mut eeprom = Eeprom::new();
+        if matches!(helper.save_type, SaveType::Eeprom) {
+            eeprom.load(&helper.save_memory);
+        }
         Ok(Self {
             bios: vec_to_boxed_array::<REGION_BIOS_SIZE, D::Error>(helper.bios, "bios")?,
             ewram: vec_to_boxed_array::<REGION_EWRAM_SIZE, D::Error>(helper.ewram, "ewram")?,
@@ -327,6 +379,9 @@ impl<'de> Deserialize<'de> for SimpleBus {
             ppu_io_dirty: DirtyRange::default(),
             timer_control_dirty: false,
             dma_dirty: helper.dma_dirty,
+            // Not carried in the savestate: a restored console has just been
+            // unplugged, and whatever the game was about to write it writes again.
+            sio_dirty: false,
             rom: helper.rom,
             save_memory: helper.save_memory,
             save_type: helper.save_type,
@@ -341,6 +396,9 @@ impl<'de> Deserialize<'de> for SimpleBus {
             cpu_timing_active: Cell::new(false),
             cpu_timing_cycles: Cell::new(0),
             cpu_last_access: Cell::new(None),
+            bios_opcode: Cell::new(0),
+            executing_in_bios: Cell::new(true),
+            eeprom: RefCell::new(eeprom),
         })
     }
 }
@@ -375,6 +433,7 @@ impl SimpleBus {
             ppu_io_dirty: DirtyRange::default(),
             timer_control_dirty: false,
             dma_dirty: false,
+            sio_dirty: false,
             rom: rom.unwrap_or_default(),
             save_memory: vec![0xFF; REGION_SRAM_SIZE],
             save_type: SaveType::None,
@@ -389,6 +448,9 @@ impl SimpleBus {
             cpu_timing_active: Cell::new(false),
             cpu_timing_cycles: Cell::new(0),
             cpu_last_access: Cell::new(None),
+            bios_opcode: Cell::new(0),
+            executing_in_bios: Cell::new(true),
+            eeprom: RefCell::new(Eeprom::new()),
         };
         bus.detect_save_type();
         bus.init_bios_stub();
@@ -425,7 +487,7 @@ impl SimpleBus {
     fn init_bios_stub(&mut self) {
         // Each instruction stored little-endian
         let stub: &[(usize, u32)] = &[
-            (0x00, 0xE12FFF1E), // BX LR  (reset/null-fn: return to caller)
+            (0x00, HLE_STUB_OPCODE), // BX LR  (reset/null-fn: return to caller)
             (0x04, 0xE12FFF1E), // BX LR  (undefined instruction stub)
             (0x08, 0xE12FFF1E), // BX LR  (SWI stub — handled by HLE, never reached)
             (0x0C, 0xE12FFF1E), // BX LR  (prefetch abort stub)
@@ -449,10 +511,111 @@ impl SimpleBus {
     }
 
     /// Load ROM data into the bus
+    /// Insert a cartridge.
+    ///
+    /// A different cartridge brings its own battery, so the backup memory is
+    /// wiped rather than carried over: leaving the previous game's save behind
+    /// hands the new one somebody else's data under its own save type.
     pub fn load_rom(&mut self, rom: Vec<u8>) {
         self.rom = rom;
         self.detect_save_type();
         self.reset_save_state();
+        self.save_memory = vec![0xFF; self.save_memory.len().max(REGION_SRAM_SIZE)];
+    }
+
+    /// Take the cartridge image out of the bus.
+    ///
+    /// Used when writing a savestate. The ROM is the largest thing in the
+    /// machine by an order of magnitude — up to 32MB against roughly 400KB of
+    /// everything else put together — and it is also the one part the player
+    /// already holds a copy of, since a state is only ever restored with the
+    /// same cartridge inserted.
+    pub fn take_rom(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.rom)
+    }
+
+    /// Put a cartridge image back, and nothing else.
+    ///
+    /// Unlike [`SimpleBus::load_rom`] this leaves the save memory and the
+    /// detected save type alone: restoring a savestate puts back the very
+    /// cartridge the state was written against, battery and all, so wiping the
+    /// backup memory would throw away the progress being restored.
+    pub fn restore_rom(&mut self, rom: Vec<u8>) {
+        self.rom = rom;
+    }
+
+    /// Whether a cartridge is present.
+    pub fn has_rom(&self) -> bool {
+        !self.rom.is_empty()
+    }
+
+    /// Return the machine to its power-on state.
+    ///
+    /// Clears everything volatile: work RAM, video memory, and the I/O
+    /// registers. The cartridge, the BIOS image, and battery-backed save data
+    /// all survive, exactly as they do when you press reset on the hardware.
+    ///
+    /// Without this a reset only rolled back the CPU and PPU while every byte
+    /// of RAM and every I/O register kept the previous game's values, so
+    /// swapping cartridges left the old game on screen and the new one wedged
+    /// on hardware it never configured.
+    pub fn reset(&mut self) {
+        self.ewram.fill(0);
+        self.iwram.fill(0);
+        self.io.fill(0);
+        self.palette.fill(0);
+        self.vram.fill(0);
+        self.oam.fill(0);
+
+        // Everything the PPU and APU mirror has just changed under them, so
+        // hand back the full span rather than a stale window.
+        self.palette_dirty.mark_all(REGION_PALETTE_SIZE);
+        self.vram_dirty.mark_all(REGION_VRAM_SIZE);
+        self.oam_dirty.mark_all(REGION_OAM_SIZE);
+        self.audio_io_dirty.mark_all(REGION_IO_SIZE);
+        self.ppu_io_dirty.mark_all(REGION_IO_SIZE);
+        // The DMA and timer units are reset by the caller rather than re-synced
+        // from these registers, so there is nothing pending to hand them.
+        self.timer_control_dirty = false;
+        self.dma_dirty = false;
+        self.sio_dirty = false;
+
+        self.open_bus_value = 0;
+        self.vcount = 0;
+        self.vcount_cycles = 0;
+        self.bios_protected = false;
+        // The BIOS latch is part of the machine's volatile state; leaving it
+        // set makes a reset machine differ from a cold one, which is exactly
+        // what `a_switched_rom_runs_like_a_cold_boot` exists to catch.
+        self.bios_opcode.set(0);
+        self.executing_in_bios.set(true);
+        self.cpu_timing_active.set(false);
+        self.cpu_timing_cycles.set(0);
+        self.cpu_last_access.set(None);
+
+        // The cartridge stays in the slot, so its backup memory stays with it;
+        // only the volatile command state of the flash chip is cleared.
+        self.reset_save_state();
+    }
+
+    /// Human-readable name of the cartridge backup this ROM advertises.
+    ///
+    /// Detected from the tag string every commercial GBA cart embeds. Exposed
+    /// so the frontend can show it when bringing up a new game: a wrong or
+    /// missing backup type is the usual reason a game boots but cannot save.
+    pub fn save_type_label(&self) -> &'static str {
+        match self.save_type {
+            SaveType::None => "None detected",
+            SaveType::Sram => "SRAM 32K",
+            SaveType::Flash64K => "Flash 64K",
+            SaveType::Flash128K => "Flash 128K",
+            SaveType::Eeprom => "EEPROM",
+        }
+    }
+
+    /// Whether the cartridge advertises any battery-backed save at all.
+    pub fn has_battery_save(&self) -> bool {
+        !matches!(self.save_type, SaveType::None)
     }
 
     fn detect_save_type(&mut self) {
@@ -469,7 +632,12 @@ impl SimpleBus {
                 .any(|w| w == b"FLASH512_V")
         {
             SaveType::Flash64K
-        } else if self.rom.windows(b"SRAM_V".len()).any(|w| w == b"SRAM_V") {
+        } else if self.rom.windows(b"SRAM_V".len()).any(|w| w == b"SRAM_V")
+            || self
+                .rom
+                .windows(b"SRAM_F_V".len())
+                .any(|w| w == b"SRAM_F_V")
+        {
             SaveType::Sram
         } else if self
             .rom
@@ -484,10 +652,15 @@ impl SimpleBus {
         self.save_type = save_type;
         let size = match save_type {
             SaveType::None => REGION_SRAM_SIZE,
-            SaveType::Sram | SaveType::Flash64K | SaveType::Eeprom => REGION_SRAM_SIZE,
+            SaveType::Sram => SRAM_CHIP_SIZE,
+            SaveType::Flash64K => REGION_SRAM_SIZE,
+            SaveType::Eeprom => EEPROM_LARGE_SIZE,
             SaveType::Flash128K => REGION_SRAM_SIZE * 2,
         };
         self.save_memory = vec![0xFF; size];
+        if matches!(save_type, SaveType::Eeprom) {
+            *self.eeprom.get_mut() = Eeprom::new();
+        }
     }
 
     fn reset_save_state(&mut self) {
@@ -497,12 +670,21 @@ impl SimpleBus {
         self.save_dirty = false;
     }
 
+    /// Where an address inside the 64 KB window lands in the save chip.
+    ///
+    /// A plain SRAM cartridge carries 32 KB, so it mirrors halfway up the
+    /// window; flash fills it. Missing that mirror leaves the upper half of the
+    /// window reading as a separate, empty 32 KB that a game expects to be the
+    /// same memory it just wrote.
     fn flash_bank_offset(&self, masked_addr: u32) -> usize {
-        let bank = match self.save_type {
-            SaveType::Flash128K => self.flash_bank,
-            _ => 0,
+        let (bank, chip_mask) = match self.save_type {
+            SaveType::Flash128K => (self.flash_bank, 0xFFFF),
+            SaveType::Sram => (0, SRAM_CHIP_SIZE as u32 - 1),
+            _ => (0, 0xFFFF),
         };
-        bank * REGION_SRAM_SIZE + masked_addr as usize
+        let offset = bank * REGION_SRAM_SIZE + (masked_addr & chip_mask) as usize;
+        // Never index past the chip, whatever the save type claims.
+        offset.min(self.save_memory.len().saturating_sub(1))
     }
 
     fn erase_flash_sector(&mut self, masked_addr: u32) {
@@ -519,18 +701,30 @@ impl SimpleBus {
 
     /// Return whether the current cartridge has persistent save storage.
     pub fn has_persistent_save(&self) -> bool {
-        !matches!(self.save_type, SaveType::None | SaveType::Eeprom)
+        !matches!(self.save_type, SaveType::None)
     }
 
     /// Return a snapshot of the cartridge save memory for persistence.
-    pub fn save_data(&self) -> Option<&[u8]> {
-        self.has_persistent_save()
-            .then_some(self.save_memory.as_slice())
+    ///
+    /// EEPROM is not memory-mapped, so its contents live in the chip rather
+    /// than in `save_memory`; the caller should not have to care which.
+    pub fn save_data(&self) -> Vec<u8> {
+        match self.save_type {
+            SaveType::None => Vec::new(),
+            SaveType::Eeprom => self.eeprom.borrow().data().to_vec(),
+            _ => self.save_memory.clone(),
+        }
     }
 
     /// Replace the cartridge save memory from persisted data.
     pub fn load_save_data(&mut self, data: &[u8]) {
         if !self.has_persistent_save() {
+            return;
+        }
+
+        if matches!(self.save_type, SaveType::Eeprom) {
+            self.eeprom.get_mut().load(data);
+            self.save_dirty = false;
             return;
         }
 
@@ -645,6 +839,34 @@ impl SimpleBus {
         let dirty = self.dma_dirty;
         self.dma_dirty = false;
         dirty
+    }
+
+    /// Take and clear the serial-dirty flag.
+    ///
+    /// True when the game touched a link-cable register, which is the only
+    /// time the serial port needs looking at. The alternative is re-reading a
+    /// register that almost never changes on every single instruction.
+    #[inline(always)]
+    pub fn take_sio_dirty(&mut self) -> bool {
+        // Checked once per instruction and true perhaps a few times in a whole
+        // game, so the early return matters: clearing unconditionally means a
+        // store into this struct on every instruction ever executed.
+        if !self.sio_dirty {
+            return false;
+        }
+        self.sio_dirty = false;
+        true
+    }
+
+    #[inline(always)]
+    fn mark_sio_dirty(&mut self, offset: usize, len: usize) {
+        let end = offset.saturating_add(len);
+        // The data and control registers sit together at 0x120..=0x12F. RCNT,
+        // which decides whether the port is a link cable at all, is off on its
+        // own at 0x134.
+        if (offset < 0x130 && 0x120 < end) || (offset < 0x136 && 0x134 < end) {
+            self.sio_dirty = true;
+        }
     }
 
     #[inline(always)]
@@ -769,26 +991,150 @@ impl SimpleBus {
             0x0700_0000..=0x07FF_FFFF => addr & 0x3FF,
             // ROM mirrors in 0x08000000-0x0DFFFFFF
             0x0800_0000..=0x0DFF_FFFF => addr & 0x1FFFFFF,
-            // Game Pak SRAM/Flash window mirrors every 64KB.
-            0x0E00_0000..=0x0E00_FFFF => addr & 0xFFFF,
+            // Game Pak SRAM/Flash window mirrors every 64KB, all the way up.
+            0x0E00_0000..=0x0FFF_FFFF => addr & 0xFFFF,
             _ => addr,
         }
     }
 
     /// Get ROM index with mirroring
-    fn rom_index(&self, addr: u32) -> Option<usize> {
-        if self.rom.is_empty() {
-            return None;
+    /// Whether `addr` lands on the cartridge's serial EEPROM.
+    ///
+    /// EEPROM sits at the top of the Game Pak window. On a cartridge of 16 MB
+    /// or less the whole of `0x0D000000..=0x0DFFFFFF` answers, because there is
+    /// no ROM up there to collide with; a larger cartridge leaves only the last
+    /// 256 bytes, which is why big games address it at `0x0DFFFF00`.
+    fn is_eeprom_addr(&self, addr: u32) -> bool {
+        if !matches!(self.save_type, SaveType::Eeprom) {
+            return false;
         }
-
-        let masked = addr & 0x1FFFFFF;
-        let rom_size = self.rom.len() as u32;
-
-        // Mirror ROM if it's smaller than the maximum
-        if rom_size > 0 {
-            Some((masked % rom_size) as usize)
+        if self.rom.len() > 16 * 1024 * 1024 {
+            (0x0DFF_FF00..=0x0DFF_FFFF).contains(&addr)
         } else {
-            None
+            (0x0D00_0000..=0x0DFF_FFFF).contains(&addr)
+        }
+    }
+
+    /// Clock one bit out of the EEPROM. The game sees it in bit 0.
+    fn eeprom_read(&self) -> u8 {
+        u8::from(self.eeprom.borrow_mut().read_bit())
+    }
+
+    /// Clock one bit in. Only bit 0 of the written value carries data.
+    fn eeprom_write(&mut self, value: u32) {
+        let chip = self.eeprom.get_mut();
+        chip.write_bit(value & 1 == 1);
+        if chip.is_dirty() {
+            chip.clear_dirty();
+            self.save_dirty = true;
+        }
+    }
+
+    /// Where `addr` lands in the cartridge, or `None` if it is past the end.
+    ///
+    /// Cartridge ROM does not mirror. An earlier version wrapped with `%`, so a
+    /// read beyond the cartridge answered with its own opening bytes instead of
+    /// what the hardware returns.
+    fn rom_index(&self, addr: u32) -> Option<usize> {
+        let offset = (addr & 0x1FF_FFFF) as usize;
+        (offset < self.rom.len()).then_some(offset)
+    }
+
+    /// Where sprite VRAM starts, which depends on the video mode.
+    ///
+    /// Tiled modes give backgrounds the first 64 KB; the bitmap modes need
+    /// 80 KB for the frame buffer and push sprites up to match.
+    fn obj_vram_base(&self) -> usize {
+        if self.io[0] & 0x7 >= 3 {
+            0x1_4000
+        } else {
+            0x1_0000
+        }
+    }
+
+    /// Note where an instruction was fetched from, for BIOS protection.
+    fn note_opcode_fetch(&self, addr: u32, opcode: u32) {
+        let in_bios = addr <= REGION_BIOS_END;
+        self.executing_in_bios.set(in_bios);
+        if in_bios {
+            self.bios_opcode.set(opcode);
+        }
+    }
+
+    /// One aligned word of the BIOS, wrapping inside the image.
+    fn bios_word(&self, addr: u32) -> u32 {
+        let idx = (addr as usize & !3) % REGION_BIOS_SIZE;
+        u32::from_le_bytes([
+            self.bios[idx],
+            self.bios[idx + 1],
+            self.bios[idx + 2],
+            self.bios[idx + 3],
+        ])
+    }
+
+    /// A read of the BIOS region, honouring its read protection.
+    ///
+    /// Code running inside the BIOS sees the real thing; anything else gets the
+    /// last opcode the BIOS fetched.
+    fn bios_read_u32(&self, masked_addr: u32) -> u32 {
+        if self.executing_in_bios.get() {
+            let idx = (masked_addr & !3) as usize;
+            u32::from_le_bytes([
+                self.bios[idx],
+                self.bios[idx + 1],
+                self.bios[idx + 2],
+                self.bios[idx + 3],
+            ])
+        } else {
+            self.bios_opcode.get()
+        }
+    }
+
+    /// What the Game Pak bus reports for an address with no ROM behind it.
+    ///
+    /// Nothing drives the data lines, so what comes back is the address the CPU
+    /// put on the bus: the halfword at `addr` reads as `addr >> 1`.
+    fn gamepak_open_bus_u16(addr: u32) -> u16 {
+        (addr >> 1) as u16
+    }
+
+    fn gamepak_open_bus_u8(addr: u32) -> u8 {
+        let half = Self::gamepak_open_bus_u16(addr);
+        if addr & 1 == 0 {
+            half as u8
+        } else {
+            (half >> 8) as u8
+        }
+    }
+
+    /// Read a halfword of cartridge, falling back to the bus past the end.
+    fn rom_read_u16(&self, addr: u32) -> u16 {
+        let aligned = addr & !1;
+        match self.rom_index(aligned) {
+            Some(idx) if idx + 1 < self.rom.len() => {
+                u16::from_le_bytes([self.rom[idx], self.rom[idx + 1]])
+            }
+            _ => Self::gamepak_open_bus_u16(aligned),
+        }
+    }
+
+    /// Read a word of cartridge, falling back to the bus past the end.
+    fn rom_read_u32(&self, addr: u32) -> u32 {
+        let aligned = addr & !3;
+        match self.rom_index(aligned) {
+            Some(idx) if idx + 3 < self.rom.len() => u32::from_le_bytes([
+                self.rom[idx],
+                self.rom[idx + 1],
+                self.rom[idx + 2],
+                self.rom[idx + 3],
+            ]),
+            // A word straddling the end is two halfwords, each answered by
+            // whichever side of the boundary it falls on.
+            _ => {
+                let low = self.rom_read_u16(aligned) as u32;
+                let high = self.rom_read_u16(aligned.wrapping_add(2)) as u32;
+                low | (high << 16)
+            }
         }
     }
 
@@ -1063,6 +1409,11 @@ impl SimpleBus {
 }
 
 impl Bus for SimpleBus {
+    fn has_real_bios(&self) -> bool {
+        u32::from_le_bytes([self.bios[0], self.bios[1], self.bios[2], self.bios[3]])
+            != HLE_STUB_OPCODE
+    }
+
     fn begin_instruction_timing(&mut self) {
         self.cpu_timing_active.set(true);
         self.cpu_timing_cycles.set(0);
@@ -1080,7 +1431,10 @@ impl Bus for SimpleBus {
         let masked_addr = self.mask_address(addr);
 
         let value = match addr {
-            REGION_BIOS_START..=REGION_BIOS_END => self.bios[masked_addr as usize],
+            REGION_BIOS_START..=REGION_BIOS_END => {
+                let word = self.bios_read_u32(masked_addr);
+                (word >> ((masked_addr & 3) * 8)) as u8
+            }
             REGION_EWRAM_START..=REGION_EWRAM_END => self.ewram[masked_addr as usize],
             REGION_IWRAM_START..=REGION_IWRAM_END => self.iwram[masked_addr as usize],
             REGION_IO_START..=REGION_IO_END => self.io[masked_addr as usize],
@@ -1088,11 +1442,12 @@ impl Bus for SimpleBus {
             REGION_VRAM_START..=REGION_VRAM_END => self.vram[masked_addr as usize],
             REGION_OAM_START..=REGION_OAM_END => self.oam[masked_addr as usize],
             REGION_ROM_START..=REGION_ROM_END => {
-                if let Some(idx) = self.rom_index(addr) {
+                if self.is_eeprom_addr(addr) {
+                    self.eeprom_read()
+                } else if let Some(idx) = self.rom_index(addr) {
                     self.rom[idx]
                 } else {
-                    // Open bus - return last read value (upper byte)
-                    ((self.open_bus_value >> 8) & 0xFF) as u8
+                    Self::gamepak_open_bus_u8(addr)
                 }
             }
             REGION_SRAM_START..=REGION_SRAM_END => self.flash_read_u8(masked_addr),
@@ -1107,12 +1462,12 @@ impl Bus for SimpleBus {
 
     fn read_u16(&self, addr: u32) -> u16 {
         self.record_cpu_access(addr & !1, AccessWidth::Half, AccessKind::Data);
-        let masked_addr = self.mask_address(addr);
+        let masked_addr = self.mask_address(addr) & !1;
 
         let value = match addr {
             REGION_BIOS_START..=REGION_BIOS_END => {
-                let idx = masked_addr as usize & !1;
-                u16::from_le_bytes([self.bios[idx], self.bios[idx + 1]])
+                let word = self.bios_read_u32(masked_addr);
+                (word >> ((masked_addr & 2) * 8)) as u16
             }
             REGION_EWRAM_START..=REGION_EWRAM_END => {
                 let idx = masked_addr as usize & !1;
@@ -1153,23 +1508,21 @@ impl Bus for SimpleBus {
                 u16::from_le_bytes([self.oam[idx], self.oam[idx + 1]])
             }
             REGION_ROM_START..=REGION_ROM_END => {
-                if let Some(idx) = self.rom_index(addr) {
-                    if idx + 1 < self.rom.len() {
-                        u16::from_le_bytes([self.rom[idx], self.rom[idx + 1]])
-                    } else {
-                        self.rom[idx] as u16
-                    }
+                // One halfword access carries one EEPROM bit; this is the path
+                // the DMA that drives the chip actually takes.
+                if self.is_eeprom_addr(addr) {
+                    self.eeprom_read() as u16
                 } else {
-                    // Open bus
-                    (self.open_bus_value & 0xFFFF) as u16
+                    self.rom_read_u16(addr)
                 }
             }
             REGION_SRAM_START..=REGION_SRAM_END => {
-                let idx = masked_addr & !1;
-                u16::from_le_bytes([
-                    self.flash_read_u8(idx),
-                    self.flash_read_u8((idx + 1) & 0xFFFF),
-                ])
+                // The cartridge save bus is 8 bits wide, so a halfword access
+                // returns the single byte at that address repeated, not the
+                // two bytes either side of it. The address is deliberately the
+                // unaligned one: an 8-bit chip picks its byte from the low bits
+                // the wider buses ignore.
+                self.flash_read_u8(self.mask_address(addr)) as u16 * 0x0101
             }
             _ => {
                 // Unmapped - open bus behavior
@@ -1182,18 +1535,10 @@ impl Bus for SimpleBus {
 
     fn read_u32(&self, addr: u32) -> u32 {
         self.record_cpu_access(addr & !3, AccessWidth::Word, AccessKind::Data);
-        let masked_addr = self.mask_address(addr);
+        let masked_addr = self.mask_address(addr) & !3;
 
         let value = match addr {
-            REGION_BIOS_START..=REGION_BIOS_END => {
-                let idx = masked_addr as usize & !3;
-                u32::from_le_bytes([
-                    self.bios[idx],
-                    self.bios[idx + 1],
-                    self.bios[idx + 2],
-                    self.bios[idx + 3],
-                ])
-            }
+            REGION_BIOS_START..=REGION_BIOS_END => self.bios_read_u32(masked_addr),
             REGION_EWRAM_START..=REGION_EWRAM_END => {
                 let idx = masked_addr as usize & !3;
                 u32::from_le_bytes([
@@ -1249,37 +1594,15 @@ impl Bus for SimpleBus {
                 ])
             }
             REGION_ROM_START..=REGION_ROM_END => {
-                if let Some(idx) = self.rom_index(addr) {
-                    if idx + 3 < self.rom.len() {
-                        u32::from_le_bytes([
-                            self.rom[idx],
-                            self.rom[idx + 1],
-                            self.rom[idx + 2],
-                            self.rom[idx + 3],
-                        ])
-                    } else {
-                        // Partial read from end of ROM
-                        let mut bytes = [0u8; 4];
-                        for i in 0..4 {
-                            if idx + i < self.rom.len() {
-                                bytes[i] = self.rom[idx + i];
-                            }
-                        }
-                        u32::from_le_bytes(bytes)
-                    }
+                if self.is_eeprom_addr(addr) {
+                    self.eeprom_read() as u32
                 } else {
-                    // Open bus
-                    self.open_bus_value
+                    self.rom_read_u32(addr)
                 }
             }
             REGION_SRAM_START..=REGION_SRAM_END => {
-                let idx = masked_addr & !3;
-                u32::from_le_bytes([
-                    self.flash_read_u8(idx),
-                    self.flash_read_u8((idx + 1) & 0xFFFF),
-                    self.flash_read_u8((idx + 2) & 0xFFFF),
-                    self.flash_read_u8((idx + 3) & 0xFFFF),
-                ])
+                // Same 8-bit bus: one byte, repeated across the word.
+                self.flash_read_u8(self.mask_address(addr)) as u32 * 0x0101_0101
             }
             _ => {
                 // Unmapped - open bus behavior
@@ -1292,12 +1615,13 @@ impl Bus for SimpleBus {
 
     fn read_opcode_u16(&self, addr: u32) -> u16 {
         self.record_cpu_access(addr & !1, AccessWidth::Half, AccessKind::Opcode);
-        let masked_addr = self.mask_address(addr);
+        let masked_addr = self.mask_address(addr) & !1;
+        self.executing_in_bios.set(addr <= REGION_BIOS_END);
 
-        match addr {
+        let fetched = match addr {
             REGION_BIOS_START..=REGION_BIOS_END => {
-                let idx = masked_addr as usize & !1;
-                u16::from_le_bytes([self.bios[idx], self.bios[idx + 1]])
+                let word = self.bios_read_u32(masked_addr);
+                (word >> ((masked_addr & 2) * 8)) as u16
             }
             REGION_EWRAM_START..=REGION_EWRAM_END => {
                 let idx = masked_addr as usize & !1;
@@ -1324,41 +1648,33 @@ impl Bus for SimpleBus {
                 u16::from_le_bytes([self.oam[idx], self.oam[idx + 1]])
             }
             REGION_ROM_START..=REGION_ROM_END => {
-                if let Some(idx) = self.rom_index(addr) {
-                    if idx + 1 < self.rom.len() {
-                        u16::from_le_bytes([self.rom[idx], self.rom[idx + 1]])
-                    } else {
-                        self.rom[idx] as u16
-                    }
-                } else {
-                    (self.open_bus_value & 0xFFFF) as u16
-                }
+                self.rom_read_u16(addr)
             }
             REGION_SRAM_START..=REGION_SRAM_END => {
-                let idx = masked_addr & !1;
-                u16::from_le_bytes([
-                    self.flash_read_u8(idx),
-                    self.flash_read_u8((idx + 1) & 0xFFFF),
-                ])
+                // The cartridge save bus is 8 bits wide, so a halfword access
+                // returns the single byte at that address repeated, not the
+                // two bytes either side of it. The address is deliberately the
+                // unaligned one: an 8-bit chip picks its byte from the low bits
+                // the wider buses ignore.
+                self.flash_read_u8(self.mask_address(addr)) as u16 * 0x0101
             }
             _ => (self.open_bus_value & 0xFFFF) as u16,
+        };
+
+        if addr <= REGION_BIOS_END {
+            // Thumb prefetches two halfwords ahead rather than two words.
+            self.bios_opcode.set(self.bios_word(masked_addr.wrapping_add(4)));
         }
+        fetched
     }
 
     fn read_opcode_u32(&self, addr: u32) -> u32 {
         self.record_cpu_access(addr & !3, AccessWidth::Word, AccessKind::Opcode);
-        let masked_addr = self.mask_address(addr);
+        let masked_addr = self.mask_address(addr) & !3;
+        self.executing_in_bios.set(addr <= REGION_BIOS_END);
 
-        match addr {
-            REGION_BIOS_START..=REGION_BIOS_END => {
-                let idx = masked_addr as usize & !3;
-                u32::from_le_bytes([
-                    self.bios[idx],
-                    self.bios[idx + 1],
-                    self.bios[idx + 2],
-                    self.bios[idx + 3],
-                ])
-            }
+        let fetched = match addr {
+            REGION_BIOS_START..=REGION_BIOS_END => self.bios_read_u32(masked_addr),
             REGION_EWRAM_START..=REGION_EWRAM_END => {
                 let idx = masked_addr as usize & !3;
                 u32::from_le_bytes([
@@ -1414,38 +1730,23 @@ impl Bus for SimpleBus {
                 ])
             }
             REGION_ROM_START..=REGION_ROM_END => {
-                if let Some(idx) = self.rom_index(addr) {
-                    if idx + 3 < self.rom.len() {
-                        u32::from_le_bytes([
-                            self.rom[idx],
-                            self.rom[idx + 1],
-                            self.rom[idx + 2],
-                            self.rom[idx + 3],
-                        ])
-                    } else {
-                        let mut bytes = [0u8; 4];
-                        for i in 0..4 {
-                            if idx + i < self.rom.len() {
-                                bytes[i] = self.rom[idx + i];
-                            }
-                        }
-                        u32::from_le_bytes(bytes)
-                    }
-                } else {
-                    self.open_bus_value
-                }
+                self.rom_read_u32(addr)
             }
             REGION_SRAM_START..=REGION_SRAM_END => {
-                let idx = masked_addr & !3;
-                u32::from_le_bytes([
-                    self.flash_read_u8(idx),
-                    self.flash_read_u8((idx + 1) & 0xFFFF),
-                    self.flash_read_u8((idx + 2) & 0xFFFF),
-                    self.flash_read_u8((idx + 3) & 0xFFFF),
-                ])
+                // Same 8-bit bus: one byte, repeated across the word.
+                self.flash_read_u8(self.mask_address(addr)) as u32 * 0x0101_0101
             }
             _ => self.open_bus_value,
+        };
+
+        if addr <= REGION_BIOS_END {
+            // What the BIOS hands out is the opcode its *prefetch* holds, two
+            // instructions ahead of the one executing. This core fetches and
+            // executes in one step, so the value is read from where the
+            // prefetch would have been rather than from where it is.
+            self.bios_opcode.set(self.bios_word(masked_addr.wrapping_add(8)));
         }
+        fetched
     }
 
     fn write_u8(&mut self, addr: u32, value: u8) {
@@ -1490,27 +1791,42 @@ impl Bus for SimpleBus {
                 self.mark_ppu_io_dirty(masked_addr as usize, 1);
                 self.mark_timer_control_dirty(masked_addr as usize, 1);
                 self.mark_dma_dirty(masked_addr as usize);
+                self.mark_sio_dirty(masked_addr as usize, 1);
             }
+            // Video memory sits on a 16-bit bus, so a byte write cannot address
+            // half of a halfword. Palette and background VRAM answer by storing
+            // the byte in *both* halves; sprite VRAM and OAM ignore the write
+            // altogether. Storing the single byte instead corrupts the
+            // neighbouring one, which shows up as stray colours and misplaced
+            // tiles rather than as an obvious failure.
             REGION_PALETTE_START..=REGION_PALETTE_END => {
                 self.log_watch_if_hit(addr, 1, value as u32, "u8");
-                self.palette[masked_addr as usize] = value;
-                self.palette_dirty
-                    .mark(masked_addr as usize, 1, REGION_PALETTE_SIZE);
+                let idx = (masked_addr & !1) as usize;
+                self.palette[idx] = value;
+                self.palette[idx + 1] = value;
+                self.palette_dirty.mark(idx, 2, REGION_PALETTE_SIZE);
             }
             REGION_VRAM_START..=REGION_VRAM_END => {
                 self.log_watch_if_hit(addr, 1, value as u32, "u8");
-                self.vram[masked_addr as usize] = value;
-                self.vram_dirty
-                    .mark(masked_addr as usize, 1, REGION_VRAM_SIZE);
+                let idx = masked_addr as usize;
+                if idx >= self.obj_vram_base() {
+                    // Sprite VRAM ignores byte writes.
+                } else {
+                    let idx = idx & !1;
+                    self.vram[idx] = value;
+                    self.vram[idx + 1] = value;
+                    self.vram_dirty.mark(idx, 2, REGION_VRAM_SIZE);
+                }
             }
             REGION_OAM_START..=REGION_OAM_END => {
+                // Ignored outright.
                 self.log_watch_if_hit(addr, 1, value as u32, "u8");
-                self.oam[masked_addr as usize] = value;
-                self.oam_dirty
-                    .mark(masked_addr as usize, 1, REGION_OAM_SIZE);
             }
             REGION_ROM_START..=REGION_ROM_END => {
-                // ROM writes are ignored (could be flash/SRAM save)
+                if self.is_eeprom_addr(addr) {
+                    self.eeprom_write(value as u32);
+                }
+                // Otherwise ROM writes are ignored.
             }
             REGION_SRAM_START..=REGION_SRAM_END => self.flash_write_u8(masked_addr, value),
             _ => {
@@ -1521,7 +1837,7 @@ impl Bus for SimpleBus {
 
     fn write_u16(&mut self, addr: u32, value: u16) {
         self.record_cpu_access(addr & !1, AccessWidth::Half, AccessKind::Data);
-        let masked_addr = self.mask_address(addr);
+        let masked_addr = self.mask_address(addr) & !1;
         let bytes = value.to_le_bytes();
 
         // Trace DMA register writes when TINYBIRD_DMA_DEBUG is set
@@ -1578,6 +1894,7 @@ impl Bus for SimpleBus {
                 self.mark_ppu_io_dirty(idx, 2);
                 self.mark_timer_control_dirty(idx, 2);
                 self.mark_dma_dirty(idx);
+                self.mark_sio_dirty(idx, 2);
             }
             REGION_PALETTE_START..=REGION_PALETTE_END => {
                 let idx = masked_addr as usize;
@@ -1601,11 +1918,17 @@ impl Bus for SimpleBus {
                 self.oam_dirty.mark(idx, 2, REGION_OAM_SIZE);
             }
             REGION_ROM_START..=REGION_ROM_END => {
-                // ROM writes are ignored
+                // A halfword write clocks one bit into the EEPROM; this is how
+                // the DMA that drives the chip delivers a command.
+                if self.is_eeprom_addr(addr) {
+                    self.eeprom_write(value as u32);
+                }
             }
             REGION_SRAM_START..=REGION_SRAM_END => {
-                self.flash_write_u8(masked_addr, bytes[0]);
-                self.flash_write_u8((masked_addr + 1) & 0xFFFF, bytes[1]);
+                // Only one byte reaches an 8-bit bus: the one in the lane the
+                // real address selects, which the alignment above discards.
+                let raw = self.mask_address(addr);
+                self.flash_write_u8(raw, bytes[(raw & 1) as usize]);
             }
             _ => {
                 // Unmapped - ignore
@@ -1615,7 +1938,7 @@ impl Bus for SimpleBus {
 
     fn write_u32(&mut self, addr: u32, value: u32) {
         self.record_cpu_access(addr & !3, AccessWidth::Word, AccessKind::Data);
-        let masked_addr = self.mask_address(addr);
+        let masked_addr = self.mask_address(addr) & !3;
         let bytes = value.to_le_bytes();
 
         // Trace DMA register writes when TINYBIRD_DMA_DEBUG is set
@@ -1683,6 +2006,7 @@ impl Bus for SimpleBus {
                 self.mark_ppu_io_dirty(idx, 4);
                 self.mark_timer_control_dirty(idx, 4);
                 self.mark_dma_dirty(idx);
+                self.mark_sio_dirty(idx, 4);
             }
             REGION_PALETTE_START..=REGION_PALETTE_END => {
                 let idx = masked_addr as usize;
@@ -1703,13 +2027,13 @@ impl Bus for SimpleBus {
                 self.oam_dirty.mark(idx, 4, REGION_OAM_SIZE);
             }
             REGION_ROM_START..=REGION_ROM_END => {
-                // ROM writes are ignored
+                if self.is_eeprom_addr(addr) {
+                    self.eeprom_write(value);
+                }
             }
             REGION_SRAM_START..=REGION_SRAM_END => {
-                self.flash_write_u8(masked_addr, bytes[0]);
-                self.flash_write_u8((masked_addr + 1) & 0xFFFF, bytes[1]);
-                self.flash_write_u8((masked_addr + 2) & 0xFFFF, bytes[2]);
-                self.flash_write_u8((masked_addr + 3) & 0xFFFF, bytes[3]);
+                let raw = self.mask_address(addr);
+                self.flash_write_u8(raw, bytes[(raw & 3) as usize]);
             }
             _ => {
                 // Unmapped - ignore
@@ -1765,6 +2089,58 @@ mod tests {
     }
 
     #[test]
+    fn reset_clears_volatile_memory() {
+        let mut bus = SimpleBus::new(Some(vec![0xAA; 64]));
+        bus.write_u16(0x0200_0000, 0x1234); // EWRAM
+        bus.write_u16(0x0300_0000, 0x5678); // IWRAM
+        bus.write_u16(0x0500_0000, 0x7FFF); // palette
+        bus.write_u16(0x0600_0000, 0x4321); // VRAM
+        bus.write_u16(0x0700_0000, 0x8765); // OAM
+        bus.write_io_direct(0x00, 0x40); // DISPCNT
+
+        bus.reset();
+
+        assert_eq!(bus.read_u16(0x0200_0000), 0, "EWRAM");
+        assert_eq!(bus.read_u16(0x0300_0000), 0, "IWRAM");
+        assert_eq!(bus.read_u16(0x0500_0000), 0, "palette");
+        assert_eq!(bus.read_u16(0x0600_0000), 0, "VRAM");
+        assert_eq!(bus.read_u16(0x0700_0000), 0, "OAM");
+        assert_eq!(bus.read_u16(0x0400_0000), 0, "DISPCNT");
+    }
+
+    /// A reset is not the same as pulling the cartridge out.
+    #[test]
+    fn reset_keeps_the_cartridge_and_its_battery() {
+        let mut bus = SimpleBus::new(Some(vec![0xAA; 64]));
+        bus.save_type = SaveType::Sram;
+        bus.write_u8(0x0E00_0000, 0x42);
+        assert_eq!(bus.read_u8(0x0E00_0000), 0x42);
+
+        bus.reset();
+
+        assert_eq!(bus.read_u8(REGION_ROM_START), 0xAA, "ROM survives a reset");
+        assert_eq!(bus.read_u8(0x0E00_0000), 0x42, "battery save survives a reset");
+    }
+
+    /// A different cartridge brings its own battery.
+    #[test]
+    fn a_new_rom_wipes_the_previous_save() {
+        let mut bus = SimpleBus::new(Some(vec![0xAA; 64]));
+        bus.save_type = SaveType::Sram;
+        bus.write_u8(0x0E00_0000, 0x42);
+
+        bus.load_rom(vec![0xBB; 64]);
+        bus.save_type = SaveType::Sram;
+
+        assert_eq!(bus.read_u8(REGION_ROM_START), 0xBB);
+        assert_eq!(
+            bus.read_u8(0x0E00_0000),
+            0xFF,
+            "the new cartridge must not see the old one's save"
+        );
+    }
+
+    #[test]
     fn test_rom_read() {
         let rom = vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
         let bus = SimpleBus::new(Some(rom));
@@ -1773,14 +2149,54 @@ mod tests {
         assert_eq!(bus.read_u32(REGION_ROM_START + 4), 0x07060504);
     }
 
+    /// Cartridge ROM does not mirror; past the end the bus answers with the
+    /// address itself.
+    ///
+    /// This test used to assert the opposite, which is what an earlier
+    /// `masked % rom_size` produced: a read beyond the cartridge came back with
+    /// the cartridge's own opening bytes. Hardware leaves the data lines
+    /// undriven, so what returns is the address the CPU put on the bus — the
+    /// halfword at `addr` reads as `addr >> 1`. jsmolka's unsafe.gba checks
+    /// exactly this.
     #[test]
-    fn test_rom_mirroring() {
+    fn rom_reads_past_the_cartridge_return_the_address_not_a_mirror() {
         let rom = vec![0xAA, 0xBB, 0xCC, 0xDD];
         let bus = SimpleBus::new(Some(rom));
 
-        // ROM should mirror
-        assert_eq!(bus.read_u32(REGION_ROM_START), 0xDDCCBBAA);
-        assert_eq!(bus.read_u32(REGION_ROM_START + 4), 0xDDCCBBAA);
+        assert_eq!(bus.read_u32(REGION_ROM_START), 0xDDCCBBAA, "in range");
+
+        // 0x08000004 is past the end: halfwords read as 0x0002 and 0x0003.
+        assert_eq!(bus.read_u32(REGION_ROM_START + 4), 0x0003_0002);
+        assert_eq!(bus.read_u16(REGION_ROM_START + 4), 0x0002);
+
+        // Bytes take the low or high half of that halfword.
+        assert_eq!(bus.read_u8(REGION_ROM_START + 4), 0x02);
+        assert_eq!(bus.read_u8(REGION_ROM_START + 5), 0x00);
+    }
+
+    /// The eight-bit cartridge save bus repeats one byte across a wider access.
+    #[test]
+    fn a_wide_read_of_save_memory_repeats_one_byte() {
+        let mut bus = SimpleBus::new(Some(vec![0; 4]));
+        bus.save_type = SaveType::Sram;
+        bus.write_u8(0x0E00_0000, 0x5A);
+
+        assert_eq!(bus.read_u8(0x0E00_0000), 0x5A);
+        assert_eq!(bus.read_u16(0x0E00_0000), 0x5A5A);
+        assert_eq!(bus.read_u32(0x0E00_0000), 0x5A5A_5A5A);
+    }
+
+    /// A 32 KB SRAM chip mirrors halfway up its 64 KB window, and the window
+    /// itself repeats to the top of the address space.
+    #[test]
+    fn save_memory_mirrors_the_way_the_chip_does() {
+        let mut bus = SimpleBus::new(Some(vec![0; 4]));
+        bus.save_type = SaveType::Sram;
+        bus.save_memory = vec![0xFF; 0x8000];
+
+        bus.write_u8(0x0E00_0000, 0x42);
+        assert_eq!(bus.read_u8(0x0E00_8000), 0x42, "32 KB chip mirror");
+        assert_eq!(bus.read_u8(0x0F00_0000), 0x42, "window mirror");
     }
 
     #[test]
@@ -1803,7 +2219,9 @@ mod tests {
         bus.write_u32(0x0700_0008, 0xDEADBEEF);
 
         let (palette, vram, oam) = bus.take_video_dirty_ranges();
-        assert_eq!(palette, Some((1, 2)));
+        // A byte write to palette lands on the whole halfword, because the
+        // video bus is 16 bits wide and stores the byte in both halves.
+        assert_eq!(palette, Some((0, 2)));
         assert_eq!(vram, Some((0x10, 0x12)));
         assert_eq!(oam, Some((0x08, 0x0C)));
 

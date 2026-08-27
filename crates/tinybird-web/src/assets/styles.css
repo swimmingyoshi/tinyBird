@@ -766,6 +766,160 @@ pre {
   white-space: nowrap;
 }
 
+/* Cards and meters, for the schema kinds the read-out rail introduced.
+
+   An overlay is read from across a room, so nothing here collapses and the
+   bar is the point: a viewer takes in six coloured bars far faster than six
+   fractions, and on a stream they only ever get the glance. */
+
+.generic-cards {
+  display: grid;
+  gap: 10px;
+}
+
+.generic-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-left: 3px solid var(--line-soft);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.generic-card[data-tone="good"] {
+  border-left-color: var(--accent);
+}
+
+.generic-card[data-tone="warn"] {
+  border-left-color: #ffb347;
+}
+
+.generic-card[data-tone="bad"] {
+  border-left-color: #ff6b6b;
+}
+
+.generic-card header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Pixel sprites, kept crisp. Smoothing 64x64 art up to overlay size is what
+   makes an emulator overlay look like a web page instead of a console. */
+.generic-portrait {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.generic-card h3 {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  font: 700 1rem/1.2 var(--font-display);
+}
+
+.generic-card header p {
+  margin: 0;
+  color: var(--muted, rgba(255, 255, 255, 0.55));
+  font: 800 0.55rem/1 var(--font-mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.generic-card header strong {
+  font: 700 0.95rem/1 var(--font-mono);
+  color: var(--ink);
+}
+
+.generic-meter {
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+/* Inside a field row the bar spans both columns rather than sitting in one. */
+.generic-fields .generic-meter {
+  grid-column: 1 / -1;
+  margin-bottom: 8px;
+}
+
+.generic-meter span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.generic-meter[data-tone="warn"] span {
+  background: #ffb347;
+}
+
+.generic-meter[data-tone="bad"] span {
+  background: #ff6b6b;
+}
+
+.generic-fields div[data-tone="warn"] dd {
+  color: #ffb347;
+}
+
+.generic-fields div[data-tone="bad"] dd {
+  color: #ff6b6b;
+}
+
+.generic-flag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font: 800 0.6rem/1.6 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #0a1018;
+  background: var(--accent);
+}
+
+.generic-flag[data-tone="warn"] {
+  background: #ffb347;
+}
+
+.generic-flag[data-tone="bad"] {
+  background: #ff6b6b;
+}
+
+.generic-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.generic-chips span {
+  padding: 2px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  font: 800 0.55rem/1.5 var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted, rgba(255, 255, 255, 0.6));
+}
+
+.generic-chips span[data-tone="good"] {
+  color: var(--accent);
+  border-color: rgba(120, 220, 200, 0.4);
+}
+
+.generic-chips span[data-tone="warn"] {
+  color: #ffb347;
+  border-color: rgba(255, 179, 71, 0.4);
+}
+
+.generic-chips span[data-tone="bad"] {
+  color: #ff6b6b;
+  border-color: rgba(255, 107, 107, 0.4);
+}
+
 .generic-list {
   display: grid;
   gap: 6px;

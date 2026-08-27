@@ -12,5 +12,14 @@ path = "src/main.rs"
 
 [dependencies]
 tinybird-addons.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["multipart", "ws"] }
+serde.workspace = true
+serde_json.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread"] }
+# Session identifiers must be unguessable, so they come from OS entropy rather
+# than a general-purpose PRNG.
+getrandom = "0.2"
+# Splitting a WebSocket into a reader and a writer, so a member can be sent
+# other people's messages while their own are still arriving.
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }

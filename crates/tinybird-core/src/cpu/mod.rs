@@ -26,9 +26,14 @@ pub(crate) fn armv4_load_word<B: Bus>(bus: &B, addr: u32) -> u32 {
     aligned.rotate_right((addr & 3) * 8)
 }
 
+/// `LDRH`, including the rotation a misaligned address causes.
+///
+/// The rotate is of the 32-bit register value, not of the halfword: loading
+/// `0x0020` from an odd address gives `0x20000000`, not `0x00002000`. Rotating
+/// the narrow value instead puts the bytes in the wrong half of the register.
 #[inline]
-pub(crate) fn armv4_load_halfword<B: Bus>(bus: &B, addr: u32) -> u16 {
-    let aligned = bus.read_u16(addr & !1);
+pub(crate) fn armv4_load_halfword<B: Bus>(bus: &B, addr: u32) -> u32 {
+    let aligned = bus.read_u16(addr & !1) as u32;
     if (addr & 1) != 0 {
         aligned.rotate_right(8)
     } else {

@@ -2,7 +2,9 @@
 //!
 //! Draws directly into the ARGB u32 pixel buffer produced by softbuffer.
 
-use crate::game_addons::{
+use tinybird_addons::schema::{AddonSection, AddonSectionContent};
+
+use tinybird_games::{
     AddonData, FireRedAreaSnapshot, FireRedBattleSnapshot, FireRedEncounterEntry,
     FireRedEncounterGroup, FireRedMoveSlot, FireRedPartyMember, FireRedSnapshot, FireRedStatSpread,
     StreamSnapshot,
@@ -79,19 +81,28 @@ fn rom_display_label(snapshot: &StreamSnapshot) -> String {
     }
 
     let Some(rom) = &snapshot.rom else {
-        return "Load a supported game to enable addons".to_string();
+        return tinybird_games::game_display_label(snapshot);
     };
 
     if rom.game_code.starts_with("BPR") || rom.title.eq_ignore_ascii_case("POKEMON FIRE") {
         "Pokemon FireRed".to_string()
     } else if rom.game_code.starts_with("BPG") || rom.title.eq_ignore_ascii_case("POKEMON LEAF") {
         "Pokemon LeafGreen".to_string()
-    } else if rom.title.is_empty() {
-        "Unknown Game".to_string()
+    } else if rom.game_code.is_empty() {
+        "Unknown cartridge".to_string()
     } else {
-        rom.title.clone()
+        // The raw 12-byte header title is often a build tag rather than a name
+        // ("FFTA_USVER."), so lead with the game code and region instead.
+        format!("{} - {}", rom.game_code, rom.region_name())
     }
 }
+
+/// Widest the generic section column is allowed to get.
+///
+/// Without a cap, a key/value row on a full-width dashboard puts its label at
+/// the far left and its value at the far right, which reads as two unrelated
+/// columns instead of one field.
+const GENERIC_CONTENT_MAX_W: usize = 380;
 
 pub const GAME_PREVIEW_SIZE_COUNT: u8 = 3;
 pub const SIDE_PANEL_SIZE_COUNT: u8 = 3;
@@ -926,7 +937,7 @@ pub fn draw_overlay(
         buf_h,
         tx,
         ty,
-        "F6 Dash  F7 Game  F10 Side",
+        "F6 Dash  F7 Game  F10 Menu",
         scale,
         grey,
         bg,
@@ -1046,24 +1057,40 @@ pub fn draw_addon_panel(
         }
     }
 
-    let side_by_side_preview = expanded && panel_w >= preview_w + 360 && panel_h >= 300;
-    let content_x = if side_by_side_preview {
-        panel_x + preview_w + 36
+    // A game with a hand-written renderer lays its content out around the
+    // preview. Everything else gets a fixed card on the right, because the
+    // preview is centred in the panel and would otherwise be drawn straight
+    // over a full-width column.
+    let has_rich_renderer = matches!(
+        snapshot.addon.as_ref().map(|addon| &addon.data),
+        Some(AddonData::FireRed(_))
+    );
+    let side_by_side_preview =
+        has_rich_renderer && expanded && panel_w >= preview_w + 460 && panel_h >= 300;
+
+    let (content_x, content_w) = if expanded && !has_rich_renderer {
+        let card_w = panel_w.saturating_sub(32).min(GENERIC_CONTENT_MAX_W).max(180);
+        (panel_x + panel_w.saturating_sub(card_w + 16), card_w)
     } else {
-        panel_x + 12
+        let start = if side_by_side_preview {
+            panel_x + preview_w + 36
+        } else {
+            panel_x + 12
+        };
+        let width = panel_x
+            .saturating_add(panel_w)
+            .saturating_sub(start)
+            .saturating_sub(12)
+            .max(180);
+        (start, width)
     };
-    let content_w = panel_x
-        .saturating_add(panel_w)
-        .saturating_sub(content_x)
-        .saturating_sub(12)
-        .max(180);
     let center_x = content_x + content_w / 2;
-    let mut y = if expanded && !side_by_side_preview {
+    let mut y = if expanded && has_rich_renderer && !side_by_side_preview {
         panel_y + preview_h + 18
     } else {
         panel_y + 14
     };
-    let title_scale = if expanded || panel_w > 260 { 2 } else { 1 };
+    let mut title_scale = if expanded || panel_w > 260 { 2 } else { 1 };
     let title = snapshot
         .addon
         .as_ref()
@@ -1072,13 +1099,16 @@ pub fn draw_addon_panel(
             AddonViewMode::Encounters => addon.display_name.replace("Party", "Encounters"),
         })
         .unwrap_or_else(|| "Game Addons".to_string());
+    if title_scale > 1 && text_width(&title, title_scale) > content_w {
+        title_scale = 1;
+    }
     draw_text_centered(
         buf,
         buf_w,
         buf_h,
         center_x,
         y,
-        &title,
+        &short_label(&title, content_w / (9 * title_scale)),
         title_scale,
         accent,
         panel_bg,
@@ -1124,6 +1154,25 @@ pub fn draw_addon_panel(
                 );
             }
         },
+        // Every other payload describes itself through schema sections, which
+        // the generic renderer below can draw without knowing the game.
+        Some(_) => {
+            let sections = snapshot
+                .addon
+                .as_ref()
+                .map(|addon| addon.sections.as_slice())
+                .unwrap_or(&[]);
+            draw_addon_sections(
+                buf,
+                buf_w,
+                buf_h,
+                content_x,
+                y,
+                content_w,
+                footer_y.saturating_sub(8),
+                sections,
+            );
+        }
         None => {
             draw_text_centered(
                 buf,
@@ -1142,7 +1191,7 @@ pub fn draw_addon_panel(
                 buf_h,
                 center_x,
                 y + 24,
-                "Load a supported game to populate this view.",
+                "Load a ROM to populate this view.",
                 1,
                 muted,
                 panel_bg,
@@ -1152,8 +1201,8 @@ pub fn draw_addon_panel(
 
     let footer = if expanded {
         match view_mode {
-            AddonViewMode::Team => "F4 Encounters   F7 Game   F10 Side   F11 Move",
-            AddonViewMode::Encounters => "F2 Team   F7 Game   F10 Side   F11 Move",
+            AddonViewMode::Team => "F4 Encounters   F7 Game   F10 Menu   F11 Move",
+            AddonViewMode::Encounters => "F2 Team   F7 Game   F10 Menu   F11 Move",
         }
     } else if view_mode == AddonViewMode::Team {
         "F4 Encounters   F6 Dash   F3 Hide"
@@ -1191,6 +1240,179 @@ pub fn draw_addon_panel(
         draw_text_centered(
             buf, buf_w, buf_h, center_x, footer_y, footer, 1, muted, panel_bg,
         );
+    }
+}
+
+/// Draw generic addon sections: the fallback renderer for any game.
+///
+/// Games without a hand-written dashboard still export `key_value`, `list`, and
+/// `table` sections through the shared schema. Before this existed, loading
+/// anything but FireRed drew "No addon data yet" and nothing else — the schema
+/// was consumed only by the web overlay.
+#[allow(clippy::too_many_arguments)]
+fn draw_addon_sections(
+    buf: &mut [u32],
+    buf_w: usize,
+    buf_h: usize,
+    x: usize,
+    top: usize,
+    width: usize,
+    bottom: usize,
+    sections: &[AddonSection],
+) {
+    let ink = 0xFF_F7_F3_EC;
+    let muted = 0xFF_96_A0_B4;
+    let accent = 0xFF_FF_9F_1C;
+    let bg = 0xFF_12_17_26;
+    let row_h = 12;
+
+    if sections.is_empty() {
+        draw_text(buf, buf_w, buf_h, x, top, "No sections reported", 1, muted, bg);
+        return;
+    }
+
+    let mut y = top;
+    for section in sections {
+        // Stop cleanly rather than drawing a half-clipped section.
+        if y + row_h * 2 > bottom {
+            draw_text(buf, buf_w, buf_h, x, y, "...", 1, muted, bg);
+            return;
+        }
+
+        draw_text(buf, buf_w, buf_h, x, y, &section.title, 1, accent, bg);
+        y += row_h;
+        fill_rect(buf, buf_w, buf_h, x, y, width, 1, 0xFF_2E_3A_57);
+        y += 5;
+
+        // The note says what the section is reading. Worth a line here only
+        // while there is room for content under it as well.
+        if let Some(note) = &section.note {
+            if y + row_h * 2 <= bottom {
+                let text = short_label(note, width / 9);
+                draw_text(buf, buf_w, buf_h, x, y, &text, 1, muted, bg);
+                y += row_h;
+            }
+        }
+
+        match &section.content {
+            AddonSectionContent::KeyValue(fields) => {
+                for field in fields {
+                    if y + row_h > bottom {
+                        break;
+                    }
+                    draw_text(buf, buf_w, buf_h, x, y, &field.label, 1, muted, bg);
+                    let value_w = text_width(&field.value, 1);
+                    let value_x = x + width.saturating_sub(value_w);
+                    // Only right-align when the two do not collide.
+                    if value_x > x + text_width(&field.label, 1) + 8 {
+                        draw_text(buf, buf_w, buf_h, value_x, y, &field.value, 1, ink, bg);
+                    }
+                    y += row_h;
+                }
+            }
+            AddonSectionContent::List(items) => {
+                for item in items {
+                    if y + row_h > bottom {
+                        break;
+                    }
+                    let text = short_label(item, width / 9);
+                    draw_text(buf, buf_w, buf_h, x, y, &text, 1, ink, bg);
+                    y += row_h;
+                }
+            }
+            AddonSectionContent::Table(table) => {
+                let columns = table.columns.len().max(1);
+                let column_w = width / columns;
+                let cell_chars = (column_w / 9).max(3);
+
+                for (index, heading) in table.columns.iter().enumerate() {
+                    draw_text(
+                        buf,
+                        buf_w,
+                        buf_h,
+                        x + index * column_w,
+                        y,
+                        &short_label(heading, cell_chars),
+                        1,
+                        muted,
+                        bg,
+                    );
+                }
+                y += row_h;
+
+                for row in &table.rows {
+                    if y + row_h > bottom {
+                        break;
+                    }
+                    for (index, cell) in row.iter().take(columns).enumerate() {
+                        draw_text(
+                            buf,
+                            buf_w,
+                            buf_h,
+                            x + index * column_w,
+                            y,
+                            &short_label(cell, cell_chars),
+                            1,
+                            ink,
+                            bg,
+                        );
+                    }
+                    y += row_h;
+                }
+            }
+            // A card is a heading with its own headline stat, some flags, and
+            // detail rows. At this size the bars a graphical consumer draws
+            // are not worth the pixels, so meters fall back to their text.
+            AddonSectionContent::Cards(cards) => {
+                for card in cards {
+                    if y + row_h * 2 > bottom {
+                        break;
+                    }
+
+                    let mut heading = card.title.clone();
+                    if let Some(lead) = &card.lead {
+                        heading.push_str(&format!("  {}", lead.value));
+                    }
+                    draw_text(
+                        buf,
+                        buf_w,
+                        buf_h,
+                        x,
+                        y,
+                        &short_label(&heading, width / 9),
+                        1,
+                        ink,
+                        bg,
+                    );
+                    y += row_h;
+
+                    // Subtitle and badges share one line: both are short, and
+                    // neither is worth a row of its own in a stream overlay.
+                    let mut chips: Vec<String> = Vec::new();
+                    if let Some(subtitle) = &card.subtitle {
+                        chips.push(subtitle.clone());
+                    }
+                    chips.extend(card.badges.iter().map(|badge| badge.text.clone()));
+                    if !chips.is_empty() && y + row_h <= bottom {
+                        let text = short_label(&chips.join(" - "), width / 9);
+                        draw_text(buf, buf_w, buf_h, x, y, &text, 1, muted, bg);
+                        y += row_h;
+                    }
+
+                    for field in &card.fields {
+                        if y + row_h > bottom {
+                            break;
+                        }
+                        let text =
+                            short_label(&format!("{}: {}", field.label, field.value), width / 9);
+                        draw_text(buf, buf_w, buf_h, x + 6, y, &text, 1, ink, bg);
+                        y += row_h;
+                    }
+                    y += 4;
+                }
+            }
+        }
+        y += 8;
     }
 }
 

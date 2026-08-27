@@ -3,58 +3,155 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>tinyBird Web</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <title>tinyBird</title>
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="A Game Boy Advance emulator that runs on the desktop, in the browser, and as a live stream overlay from one core."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/console.css" />
   </head>
-  <body class="shell-body">
-    <main class="shell">
-      <section class="hero">
-        <p class="eyebrow">tinyBird Web</p>
-        <h1>Overlay control room for tinyBird streams.</h1>
-        <p class="lede">
-          Use the combined web UI to monitor everything together, then add the
-          dedicated section URLs as separate OBS browser sources.
+  <body>
+    <div class="rig">
+      <header class="bar">
+        <a class="bar__mark" href="/">
+          <span class="bar__glyph" aria-hidden="true"></span>
+          tinyBird
+        </a>
+        <nav class="bar__nav">
+          <a class="is-current" href="/" aria-current="page">Home</a>
+          <a href="/play">Play</a>
+        </nav>
+        <p class="bar__state" id="link-state" data-state="idle">
+          <span class="dot" aria-hidden="true"></span><span id="link-label">checking</span>
         </p>
-        <div class="hero-actions">
-          <a class="primary-link" href="/overlay/full">Open Combined Web UI</a>
-          <a class="secondary-link" href="/overlay/party">Party OBS Source</a>
-          <a class="secondary-link" href="/overlay/area">Area OBS Source</a>
-          <a class="secondary-link" href="/overlay/battle">Battle OBS Source</a>
+      </header>
+
+      <main>
+        <!-- The thesis: one emulator core, three places it runs. That is the
+             actual architecture, so it is what the page leads with. -->
+        <section class="hero">
+          <h1 class="hero__title">
+            One GBA core.<br />Three places to run it.
+          </h1>
+          <p class="hero__lede">
+            tinyBird emulates a Game Boy Advance in Rust. The same core drives a
+            desktop app, this page, and the stream overlays — so a game reports
+            the same live data wherever you run it.
+          </p>
+          <p class="hero__actions">
+            <a class="key key--lead" href="/play">Play in this browser</a>
+            <a class="key" href="/overlay/full">Open the overlay</a>
+          </p>
+        </section>
+
+        <!-- A spec sheet rather than feature cards: these are three surfaces
+             over one core, and what differs between them is concrete. -->
+        <section class="spec">
+          <table class="spec__table">
+            <caption class="panel__eyebrow">Surfaces</caption>
+            <thead>
+              <tr>
+                <th scope="col">Surface</th>
+                <th scope="col">Runs</th>
+                <th scope="col">Use it for</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><a href="/play">Browser</a></th>
+                <td>WebAssembly, 60&nbsp;fps</td>
+                <td>Play a ROM from your vault with no install.</td>
+              </tr>
+              <tr>
+                <th scope="row">Desktop</th>
+                <td><code>cargo run --release</code></td>
+                <td>Full speed, gamepads, save states, the addon dashboard.</td>
+              </tr>
+              <tr>
+                <th scope="row"><a href="/overlay/full">Overlay</a></th>
+                <td>Browser source</td>
+                <td>Live party and encounter data in OBS.</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <div class="split">
+          <!-- Addons: the thing that makes this more than an emulator. -->
+          <section class="panel">
+            <p class="panel__eyebrow">Game addons</p>
+            <p class="panel__lead">
+              An addon reads live state out of the running game and publishes it
+              through one schema, so the dashboard, the overlay, and any tool of
+              yours see the same data.
+            </p>
+            <dl class="cart__facts">
+              <div>
+                <dt>Pokemon FireRed / LeafGreen</dt>
+                <dd>party · encounters · battle</dd>
+              </div>
+              <div>
+                <dt>Final Fantasy Tactics Advance</dt>
+                <dd>units · player</dd>
+              </div>
+              <div>
+                <dt>Any other cartridge</dt>
+                <dd>header · region · checksum</dd>
+              </div>
+            </dl>
+            <p class="panel__foot">
+              The last one claims every ROM, so a game nobody has written an
+              addon for still shows something useful.
+            </p>
+          </section>
+
+          <!-- Storage: real state, read from the server. -->
+          <section class="panel">
+            <p class="panel__eyebrow">
+              Storage<span class="panel__note" id="storage-note">checking</span>
+            </p>
+            <p class="panel__lead" id="storage-lead">
+              Reading your vault…
+            </p>
+            <dl class="cart__facts" id="storage-facts" hidden>
+              <div><dt>Vault</dt><dd id="storage-vault">—</dd></div>
+              <div><dt>ROMs</dt><dd id="storage-roms">—</dd></div>
+              <div><dt>BIOS</dt><dd id="storage-bios">—</dd></div>
+            </dl>
+            <p class="panel__foot">
+              Asset bytes come straight from the CDN; the API key stays on the
+              server and is only used to list the vault and store save states.
+            </p>
+          </section>
         </div>
-      </section>
 
-      <section class="shell-grid">
-        <article class="info-card">
-          <p class="card-kicker">Run Order</p>
-          <h2>1. Start the desktop app</h2>
-          <p>Keep tinyBird running so it can refresh <code>stream-data/current-game.json</code>.</p>
-          <h2>2. Start the web server</h2>
-          <pre><code>cargo run --release --bin tinybird-web</code></pre>
-          <h2>3. Monitor together</h2>
-          <pre><code>http://127.0.0.1:8877/overlay/full</code></pre>
-        </article>
+        <section class="panel">
+          <p class="panel__eyebrow">Run it yourself</p>
+          <pre class="code"><code># Desktop
+cargo run --release -- roms/game.gba
 
-        <article class="info-card">
-          <p class="card-kicker">OBS Sources</p>
-          <p>Add these as separate browser sources so each section can be positioned independently.</p>
-          <ul class="endpoint-list">
-            <li><code>/overlay/party</code> for the team cards</li>
-            <li><code>/overlay/area</code> for route encounter info</li>
-            <li><code>/overlay/battle</code> for active battle scout info</li>
-            <li><code>/overlay/full</code> for the organized all-in-one view</li>
-          </ul>
-        </article>
+# This page, plus the overlay server
+cargo build -p tinybird-wasm --target wasm32-unknown-unknown --release
+cargo run -p tinybird-web
 
-        <article class="info-card">
-          <p class="card-kicker">Current APIs</p>
-          <ul class="endpoint-list">
-            <li><code>/api/health</code> for local status</li>
-            <li><code>/api/snapshot</code> for the live export JSON</li>
-            <li><code>/sprites/:species_id</code> for cached art</li>
-            <li><code>/overlay/:section</code> for stream overlays</li>
-          </ul>
-        </article>
-      </section>
-    </main>
+# Optional: point it at your asset vault
+cp .env.example .env   # then set TINYBIRD_MEDIA_KEY</code></pre>
+        </section>
+      </main>
+
+      <footer class="foot">
+        <span>tinyBird · MIT</span>
+        <span id="foot-msg"></span>
+      </footer>
+    </div>
+
+    <script type="module" src="/home.js"></script>
   </body>
 </html>

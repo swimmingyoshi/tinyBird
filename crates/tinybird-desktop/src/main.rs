@@ -1,8 +1,11 @@
 //! tinyBird Desktop - GBA Emulator Desktop Frontend
 
 mod audio;
-mod game_addons;
+mod ui;
+mod addon_export;
 mod input_map;
+mod settings;
+mod shell;
 mod overlay;
 mod pokemon_assets;
 
@@ -18,7 +21,9 @@ use gilrs::{Axis as GamepadAxis, EventType, GamepadId, Gilrs};
 use softbuffer::Surface;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{
+    ElementState, KeyEvent, MouseButton as WinitMouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
 use winit::window::{Fullscreen, Window};
@@ -26,14 +31,18 @@ use winit::window::{Fullscreen, Window};
 use tinybird_core::ppu::render::Pixel;
 use tinybird_core::{Color, Framebuffer, Gba, GbaButton, GbaState, CLOCK_SPEED, CYCLES_PER_FRAME};
 
+use settings::SettingsStore;
+use ui::input::{Modifiers, MouseButton as UiMouseButton, UiInput, UiKey};
+use ui::menubar::{MenuBarState, UiCommand};
+
 const SCREEN_WIDTH: u32 = 240;
 const SCREEN_HEIGHT: u32 = 160;
-const SCALE: u32 = 3;
 const FRAME_DURATION: Duration = Duration::from_nanos(
     (CYCLES_PER_FRAME as u64 * 1_000_000_000 + (CLOCK_SPEED as u64 / 2)) / CLOCK_SPEED as u64,
 );
 const FRAME_PACING_TOLERANCE: Duration = Duration::from_micros(750);
 const FRAME_CATCHUP_LIMIT: u32 = 3;
+const FRAME_STEP_BUDGET: u64 = CYCLES_PER_FRAME as u64 * 2;
 const AUDIO_BACKPRESSURE_MILLIS: u32 = 94;
 const ADDON_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const RGB555_COLOR_COUNT: usize = 1 << 15;
@@ -79,6 +88,56 @@ fn rgb555_lookup(color_correction: bool) -> &'static [u32; RGB555_COLOR_COUNT] {
     }
 }
 
+/// Map a winit mouse button to the UI's button set, ignoring extra buttons.
+fn map_mouse_button(button: WinitMouseButton) -> Option<UiMouseButton> {
+    match button {
+        WinitMouseButton::Left => Some(UiMouseButton::Left),
+        WinitMouseButton::Right => Some(UiMouseButton::Right),
+        WinitMouseButton::Middle => Some(UiMouseButton::Middle),
+        _ => None,
+    }
+}
+
+/// Translate a winit logical key into the UI's key vocabulary.
+///
+/// Returns `None` for keys the classic shell has no use for, which keeps them
+/// available to the emulator input path.
+fn map_ui_key(key: &Key) -> Option<UiKey> {
+    let ui_key = match key {
+        Key::Named(NamedKey::ArrowUp) => UiKey::Up,
+        Key::Named(NamedKey::ArrowDown) => UiKey::Down,
+        Key::Named(NamedKey::ArrowLeft) => UiKey::Left,
+        Key::Named(NamedKey::ArrowRight) => UiKey::Right,
+        Key::Named(NamedKey::Home) => UiKey::Home,
+        Key::Named(NamedKey::End) => UiKey::End,
+        Key::Named(NamedKey::PageUp) => UiKey::PageUp,
+        Key::Named(NamedKey::PageDown) => UiKey::PageDown,
+        Key::Named(NamedKey::Enter) => UiKey::Enter,
+        Key::Named(NamedKey::Escape) => UiKey::Escape,
+        Key::Named(NamedKey::Tab) => UiKey::Tab,
+        Key::Named(NamedKey::Backspace) => UiKey::Backspace,
+        Key::Named(NamedKey::Delete) => UiKey::Delete,
+        Key::Named(NamedKey::Space) => UiKey::Space,
+        // `Alt` opens the menu the same way `F10` does.
+        Key::Named(NamedKey::Alt) => UiKey::Function(10),
+        Key::Named(NamedKey::F1) => UiKey::Function(1),
+        Key::Named(NamedKey::F2) => UiKey::Function(2),
+        Key::Named(NamedKey::F3) => UiKey::Function(3),
+        Key::Named(NamedKey::F4) => UiKey::Function(4),
+        Key::Named(NamedKey::F5) => UiKey::Function(5),
+        Key::Named(NamedKey::F6) => UiKey::Function(6),
+        Key::Named(NamedKey::F7) => UiKey::Function(7),
+        Key::Named(NamedKey::F8) => UiKey::Function(8),
+        Key::Named(NamedKey::F9) => UiKey::Function(9),
+        Key::Named(NamedKey::F10) => UiKey::Function(10),
+        Key::Named(NamedKey::F11) => UiKey::Function(11),
+        Key::Named(NamedKey::F12) => UiKey::Function(12),
+        Key::Character(text) => UiKey::Char(text.chars().next()?),
+        _ => return None,
+    };
+    Some(ui_key)
+}
+
 fn is_rom_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -120,6 +179,23 @@ struct StatusMessage {
     text: String,
     tone: overlay::ToastTone,
     expires_at: Instant,
+}
+
+/// Everything the addon dashboard needs for one frame.
+///
+/// This was a nine-element tuple threaded through the presentation path, which
+/// made the already-long `present_buffer` signature unreadable and every call
+/// site position-sensitive.
+struct AddonPanelParams<'a> {
+    snapshot: &'a tinybird_games::StreamSnapshot,
+    sprites: &'a pokemon_assets::PokemonSpriteStore,
+    view_mode: overlay::AddonViewMode,
+    expanded: bool,
+    preview_size: u8,
+    side_panel_size: u8,
+    dashboard_layout: u8,
+    dashboard_theme: u8,
+    wallpaper: Option<&'a overlay::DashboardWallpaper>,
 }
 
 struct App {
@@ -168,10 +244,22 @@ struct App {
     fullscreen: bool,
     hovered_file: Option<PathBuf>,
     status_message: Option<StatusMessage>,
-    addon_snapshot: game_addons::StreamSnapshot,
+    addon_snapshot: tinybird_games::StreamSnapshot,
     pokemon_sprites: pokemon_assets::PokemonSpriteStore,
     last_addon_refresh: Instant,
     last_addon_export_json: Option<String>,
+
+    // --- classic shell ---
+    /// Persisted user preferences; the fields above stay the live copy and are
+    /// mirrored back into here whenever the user changes one.
+    settings: SettingsStore,
+    /// Pointer and UI keyboard state accumulated since the last frame.
+    ui_input: UiInput,
+    menu_state: MenuBarState,
+    /// Whether auto-hidden chrome is currently revealed.
+    chrome_revealed: bool,
+    /// Set by `UiCommand::Exit`; drained in `about_to_wait`.
+    exit_requested: bool,
 }
 
 impl App {
@@ -196,13 +284,30 @@ impl App {
                 (false, None, None, None, None)
             };
         let addon_snapshot = if rom_loaded {
-            game_addons::capture_stream_snapshot(Some(gba.as_ref()))
+            tinybird_games::capture_stream_snapshot(Some(gba.as_ref()))
         } else {
-            game_addons::capture_stream_snapshot(None)
+            tinybird_games::capture_stream_snapshot(None)
         };
         let mut pokemon_sprites = pokemon_assets::PokemonSpriteStore::new();
         pokemon_sprites.queue_snapshot(&addon_snapshot);
-        let dashboard_wallpaper = Self::load_default_dashboard_wallpaper();
+        let mut settings = SettingsStore::load();
+        // An auto-loaded ROM belongs in the recent list too, otherwise the
+        // most-played game is the one entry that never appears there.
+        if let Some(path) = rom_path.as_ref() {
+            settings.edit().push_recent_rom(path);
+        }
+        // A wallpaper chosen in a previous session wins over folder discovery.
+        let dashboard_wallpaper = settings
+            .get()
+            .dashboard
+            .wallpaper
+            .as_ref()
+            .and_then(|path| Self::decode_dashboard_wallpaper(path).ok())
+            .or_else(Self::load_default_dashboard_wallpaper);
+
+        let video = settings.get().video.clone();
+        let audio = settings.get().audio.clone();
+        let dashboard = settings.get().dashboard.clone();
 
         Self {
             window: None,
@@ -229,31 +334,40 @@ impl App {
             fps_frame_count: 0,
             fps_timer: Instant::now(),
             current_fps: 0.0,
-            show_overlay: false,
-            show_addon_panel: false,
-            addon_panel_expanded: false,
-            game_preview_size: 1,
-            side_panel_size: 1,
-            dashboard_layout: 0,
-            dashboard_theme: dashboard_wallpaper.as_ref().map_or(0, |_| 3),
+            show_overlay: video.show_hud,
+            show_addon_panel: dashboard.start_expanded,
+            addon_panel_expanded: dashboard.start_expanded,
+            game_preview_size: dashboard.game_size,
+            side_panel_size: dashboard.side_panel_size,
+            dashboard_layout: dashboard.layout,
+            // The persisted theme is authoritative. Choosing a wallpaper at
+            // runtime switches to the wallpaper theme and persists that, so
+            // inferring it here as well would override an explicit choice.
+            dashboard_theme: dashboard.theme,
             dashboard_wallpaper,
             addon_view_mode: overlay::AddonViewMode::Team,
-            muted: false,
-            volume: 1.0,
-            color_correction: false,
+            muted: audio.muted,
+            volume: audio.volume,
+            color_correction: video.color_correction,
             cart_save_dirty: false,
             last_save_flush: Instant::now(),
             save_state_slot: 1,
             loaded_save_state_slot: None,
             save_state_menu: None,
             theme_menu_selected: None,
-            fullscreen: false,
+            fullscreen: video.fullscreen,
             hovered_file: None,
             status_message: None,
             addon_snapshot,
             pokemon_sprites,
             last_addon_refresh: Instant::now(),
             last_addon_export_json: None,
+
+            settings,
+            ui_input: UiInput::new(),
+            menu_state: MenuBarState::default(),
+            chrome_revealed: false,
+            exit_requested: false,
         }
     }
 
@@ -341,6 +455,7 @@ impl App {
 
     fn cycle_game_preview_size(&mut self) {
         self.game_preview_size = (self.game_preview_size + 1) % overlay::GAME_PREVIEW_SIZE_COUNT;
+        self.settings.edit().dashboard.game_size = self.game_preview_size;
         self.request_redraw();
         self.set_status(
             format!(
@@ -357,6 +472,7 @@ impl App {
             0 => 2,
             _ => 1,
         };
+        self.settings.edit().dashboard.side_panel_size = self.side_panel_size;
         self.request_redraw();
         self.set_status(
             format!(
@@ -369,6 +485,7 @@ impl App {
 
     fn cycle_dashboard_layout(&mut self) {
         self.dashboard_layout = (self.dashboard_layout + 1) % overlay::DASHBOARD_LAYOUT_COUNT;
+        self.settings.edit().dashboard.layout = self.dashboard_layout;
         self.request_redraw();
         self.set_status(
             format!(
@@ -463,6 +580,7 @@ impl App {
         }
 
         self.dashboard_theme = theme % overlay::DASHBOARD_THEME_COUNT;
+        self.settings.edit().dashboard.theme = self.dashboard_theme;
         self.theme_menu_selected = None;
         self.sync_input_state();
         self.request_redraw();
@@ -477,6 +595,7 @@ impl App {
 
     fn toggle_fullscreen(&mut self) {
         self.fullscreen = !self.fullscreen;
+        self.settings.edit().video.fullscreen = self.fullscreen;
         if let Some(window) = &self.window {
             if self.fullscreen {
                 window.set_fullscreen(Some(Fullscreen::Borderless(window.current_monitor())));
@@ -509,7 +628,10 @@ impl App {
         match Self::decode_dashboard_wallpaper(&path) {
             Ok(wallpaper) => {
                 self.dashboard_wallpaper = Some(wallpaper);
-                self.dashboard_theme = 3;
+                self.dashboard_theme = ui::theme::THEME_WALLPAPER;
+                let settings = self.settings.edit();
+                settings.dashboard.wallpaper = Some(path.clone());
+                settings.dashboard.theme = ui::theme::THEME_WALLPAPER;
                 self.request_redraw();
                 let label = path
                     .file_name()
@@ -800,9 +922,9 @@ impl App {
         }
 
         let snapshot = if self.rom_loaded {
-            game_addons::capture_stream_snapshot(Some(self.gba.as_ref()))
+            tinybird_games::capture_stream_snapshot(Some(self.gba.as_ref()))
         } else {
-            game_addons::capture_stream_snapshot(None)
+            tinybird_games::capture_stream_snapshot(None)
         };
         self.pokemon_sprites.queue_snapshot(&snapshot);
 
@@ -811,7 +933,7 @@ impl App {
             self.request_redraw();
         }
 
-        game_addons::write_stream_snapshot(&self.addon_snapshot, &mut self.last_addon_export_json);
+        addon_export::write_stream_snapshot(&self.addon_snapshot, &mut self.last_addon_export_json);
         self.last_addon_refresh = Instant::now();
     }
 
@@ -930,11 +1052,12 @@ impl App {
         let Some(save_path) = &self.save_path else {
             return;
         };
-        let Some(save_data) = self.gba.save_data() else {
+        let save_data = self.gba.save_data();
+        if save_data.is_empty() {
             return;
-        };
+        }
 
-        match fs::write(save_path, save_data) {
+        match fs::write(save_path, &save_data) {
             Ok(()) => {
                 self.cart_save_dirty = false;
                 self.last_save_flush = Instant::now();
@@ -971,6 +1094,7 @@ impl App {
         }
 
         self.rom_loaded = true;
+        self.settings.edit().push_recent_rom(&path);
         self.rom_path = Some(path);
         self.save_path = Some(save_path);
         self.state_path = Some(state_path.clone());
@@ -1022,7 +1146,17 @@ impl App {
                         self.gba.pc()
                     );
                 }
-                self.gba.run_frame();
+                if self.gba.run_frame_with_budget(FRAME_STEP_BUDGET).is_none() {
+                    self.gba.pause();
+                    self.clear_audio_output();
+                    self.reset_timing_state();
+                    self.refresh_window_title();
+                    self.set_status(
+                        "ROM stopped at a frame boundary; emulation paused",
+                        overlay::ToastTone::Warning,
+                    );
+                    break;
+                }
                 frames_ran += 1;
             }
 
@@ -1111,10 +1245,12 @@ impl App {
                 .map(|name| Self::short_label(name, 24))
         });
 
+        // Built before the field borrows below, so the `&self` borrow they take
+        // has ended by the time `surface` and `menu_state` are borrowed mutably.
+        let mut chrome_frame = self.build_chrome_frame();
+        let integer_scaling = self.settings.get().video.integer_scaling;
+
         if !self.rom_loaded {
-            let Some(surface) = &mut self.surface else {
-                return;
-            };
             let home = overlay::HomeScreen {
                 bios_loaded: self.gba.use_bios,
                 hovered_file: hovered_file.as_deref(),
@@ -1123,11 +1259,18 @@ impl App {
                 text: text.as_str(),
                 tone: *tone,
             });
-            Self::present_buffer(
+            let mut chrome = chrome_frame
+                .as_mut()
+                .map(|frame| frame.borrow(&self.ui_input, &mut self.menu_state));
+            let Some(surface) = self.surface.as_mut() else {
+                return;
+            };
+            let command = Self::present_buffer(
                 surface,
                 self.surface_size,
                 None,
                 false,
+                integer_scaling,
                 None,
                 None,
                 Some(home),
@@ -1135,25 +1278,24 @@ impl App {
                 None,
                 None,
                 toast,
+                chrome.as_mut(),
             );
+            self.finish_frame(command);
             return;
         }
 
         let framebuffer = self.gba.ppu.get_framebuffer();
-        let addon_panel = self.show_addon_panel.then_some((
-            &self.addon_snapshot,
-            &self.pokemon_sprites,
-            self.addon_view_mode,
-            self.addon_panel_expanded,
-            self.game_preview_size,
-            self.side_panel_size,
-            self.dashboard_layout,
-            self.dashboard_theme,
-            self.dashboard_wallpaper.as_ref(),
-        ));
-        let Some(surface) = &mut self.surface else {
-            return;
-        };
+        let addon_panel = self.show_addon_panel.then_some(AddonPanelParams {
+            snapshot: &self.addon_snapshot,
+            sprites: &self.pokemon_sprites,
+            view_mode: self.addon_view_mode,
+            expanded: self.addon_panel_expanded,
+            preview_size: self.game_preview_size,
+            side_panel_size: self.side_panel_size,
+            dashboard_layout: self.dashboard_layout,
+            dashboard_theme: self.dashboard_theme,
+            wallpaper: self.dashboard_wallpaper.as_ref(),
+        });
         let overlay_params = if self.show_overlay && self.gba.state == GbaState::Running {
             Some((
                 self.current_fps,
@@ -1177,11 +1319,18 @@ impl App {
             text: text.as_str(),
             tone: *tone,
         });
-        Self::present_buffer(
+        let mut chrome = chrome_frame
+            .as_mut()
+            .map(|frame| frame.borrow(&self.ui_input, &mut self.menu_state));
+        let Some(surface) = self.surface.as_mut() else {
+            return;
+        };
+        let command = Self::present_buffer(
             surface,
             self.surface_size,
             Some(framebuffer),
             self.color_correction,
+            integer_scaling,
             overlay_params,
             addon_panel,
             None,
@@ -1189,7 +1338,23 @@ impl App {
             save_state_menu,
             theme_menu,
             toast,
+            chrome.as_mut(),
         );
+        self.finish_frame(command);
+    }
+
+    /// End-of-frame housekeeping: run whatever the menu produced, then clear
+    /// the edge-triggered input so the next frame starts clean.
+    fn finish_frame(&mut self, command: Option<UiCommand>) {
+        self.ui_input.end_frame();
+        // A menu opened by mouse also has to drop held buttons; the keyboard
+        // path does this itself, but a click only becomes visible here.
+        if self.shell_capturing_input() && !self.keyboard_buttons.is_empty() {
+            self.release_all_buttons();
+        }
+        if let Some(command) = command {
+            self.run_command(command);
+        }
     }
 
     fn render_frame(&mut self, base_frames: u32) {
@@ -1197,189 +1362,210 @@ impl App {
         self.present_current_frame();
     }
 
+    /// Compose one frame: game image, addon layers, then the classic chrome.
+    ///
+    /// Chrome is drawn last and on the *full* buffer, while everything else is
+    /// composed into a slice covering only the content region, so the menu and
+    /// status bars reserve real estate instead of overlapping the game.
+    ///
+    /// Returns the command the menu bar produced, if any; the caller runs it
+    /// once the surface borrow has been released.
+    #[allow(clippy::too_many_arguments)]
     fn present_buffer(
         surface: &mut Surface<Arc<Window>, Arc<Window>>,
         surface_size: (u32, u32),
         framebuffer: Option<&Framebuffer>,
         color_correction: bool,
-        overlay: Option<(f64, u32, bool, u32, bool, bool)>,
-        addon_panel: Option<(
-            &game_addons::StreamSnapshot,
-            &pokemon_assets::PokemonSpriteStore,
-            overlay::AddonViewMode,
-            bool,
-            u8,
-            u8,
-            u8,
-            u8,
-            Option<&overlay::DashboardWallpaper>,
-        )>,
+        integer_scaling: bool,
+        overlay_params: Option<(f64, u32, bool, u32, bool, bool)>,
+        addon_panel: Option<AddonPanelParams<'_>>,
         home_screen: Option<overlay::HomeScreen<'_>>,
         pause_screen: Option<overlay::PauseScreen<'_>>,
         save_state_menu: Option<overlay::SaveStateMenu>,
         theme_menu: Option<overlay::ThemeMenu>,
         toast: Option<overlay::Toast<'_>>,
-    ) {
+        mut chrome: Option<&mut shell::ChromeFrame<'_>>,
+    ) -> Option<UiCommand> {
         if surface_size.0 == 0 || surface_size.1 == 0 {
-            return;
+            return None;
         }
 
         let Ok(mut buffer) = surface.buffer_mut() else {
-            return;
+            return None;
         };
 
         let win_w = buffer.width().get() as usize;
         let win_h = buffer.height().get() as usize;
-
-        let Some(framebuffer) = framebuffer else {
-            if let Some(home) = home_screen {
-                overlay::draw_home_screen(&mut buffer, win_w, win_h, home);
-            } else {
-                buffer.fill(0x000000);
-            }
-            if let Some(toast) = toast {
-                overlay::draw_toast(&mut buffer, win_w, win_h, toast);
-            }
-            Self::normalize_softbuffer_pixels(&mut buffer);
-            let _ = buffer.present();
-            return;
-        };
-
-        let src_w = SCREEN_WIDTH as usize;
-        let src_h = SCREEN_HEIGHT as usize;
-
-        let (draw_w, draw_h) = {
-            let integer_scale = (win_w / src_w).min(win_h / src_h);
-            if integer_scale >= 1 {
-                (src_w * integer_scale, src_h * integer_scale)
-            } else if win_w * src_h <= win_h * src_w {
-                (win_w, win_w * src_h / src_w)
-            } else {
-                (win_h * src_w / src_h, win_h)
-            }
-        };
-        let offset_x = (win_w.saturating_sub(draw_w)) / 2;
-        let offset_y = (win_h.saturating_sub(draw_h)) / 2;
-        let pixels = framebuffer.as_slice();
-        let color_lookup = rgb555_lookup(color_correction);
-        let needs_clear = offset_x != 0 || offset_y != 0 || draw_w != win_w || draw_h != win_h;
-        if needs_clear {
-            buffer.fill(0x000000);
+        if win_w == 0 || win_h == 0 {
+            return None;
         }
 
-        if draw_w % src_w == 0 && draw_h % src_h == 0 && draw_w / src_w == draw_h / src_h {
-            let scale = draw_w / src_w;
-            if scale > 0 {
-                let mut converted_row = [0u32; SCREEN_WIDTH as usize];
-                for src_y in 0..src_h {
-                    let src_row = src_y * src_w;
-                    let dst_y_base = offset_y + src_y * scale;
-                    let first_dst_row = dst_y_base * win_w + offset_x;
+        let content = match &chrome {
+            Some(frame) => frame.layout.content,
+            None => ui::Rect::new(0, 0, win_w as i32, win_h as i32),
+        };
+        let content_y = content.y.clamp(0, win_h as i32) as usize;
+        let content_h = content.h.clamp(0, (win_h - content_y) as i32) as usize;
 
-                    for src_x in 0..src_w {
-                        converted_row[src_x] =
-                            color_lookup[pixels[src_row + src_x].color.to_rgb555() as usize];
-                    }
+        {
+            // A slice starting at the content's first row gives every existing
+            // draw function a vertically inset surface for free: the row stride
+            // is unchanged, so their `y * buf_w + x` indexing still holds.
+            let view = &mut buffer[content_y * win_w..(content_y + content_h) * win_w];
 
-                    let mut dst_x = 0;
-                    for color in converted_row.iter().take(src_w) {
-                        buffer[first_dst_row + dst_x..first_dst_row + dst_x + scale].fill(*color);
-                        dst_x += scale;
-                    }
-
-                    for dy in 1..scale {
-                        let dst_row = (dst_y_base + dy) * win_w + offset_x;
-                        buffer.copy_within(first_dst_row..first_dst_row + draw_w, dst_row);
+            match framebuffer {
+                None => {
+                    if let Some(home) = home_screen {
+                        overlay::draw_home_screen(view, win_w, content_h, home);
+                    } else {
+                        view.fill(0x000000);
                     }
                 }
-
-                if let Some((fps, speed, muted, volume_pct, cc, fast_forward)) = overlay {
-                    overlay::draw_overlay(
-                        &mut buffer,
+                Some(framebuffer) => {
+                    let color_lookup = rgb555_lookup(color_correction);
+                    let pixels = framebuffer.as_slice();
+                    Self::blit_game(view, win_w, content_h, pixels, color_lookup, integer_scaling);
+                    Self::compose_layers(
+                        view,
                         win_w,
-                        win_h,
-                        fps,
-                        speed,
-                        muted,
-                        volume_pct,
-                        cc,
-                        fast_forward,
+                        content_h,
+                        pixels,
+                        color_lookup,
+                        overlay_params,
+                        addon_panel,
+                        pause_screen,
+                        save_state_menu,
+                        theme_menu,
                     );
                 }
-                if let Some((
-                    snapshot,
-                    sprites,
-                    view_mode,
-                    expanded,
-                    preview_size,
-                    side_panel_size,
-                    dashboard_layout,
-                    dashboard_theme,
-                    dashboard_wallpaper,
-                )) = addon_panel
-                {
-                    overlay::draw_addon_panel(
-                        &mut buffer,
-                        win_w,
-                        win_h,
-                        snapshot,
-                        sprites,
-                        expanded,
-                        view_mode,
-                        preview_size,
-                        side_panel_size,
-                        dashboard_layout,
-                        dashboard_theme,
-                        dashboard_wallpaper,
-                    );
-                    if expanded {
-                        Self::draw_game_preview(
-                            &mut buffer,
-                            win_w,
-                            win_h,
-                            pixels,
-                            color_lookup,
-                            preview_size,
-                            side_panel_size,
-                            dashboard_layout,
-                        );
-                    }
-                }
-                if let Some(paused) = pause_screen {
-                    overlay::dim_screen(&mut buffer);
-                    overlay::draw_pause_screen(&mut buffer, win_w, win_h, paused);
-                }
-                if let Some(menu) = save_state_menu {
-                    overlay::draw_save_state_menu(&mut buffer, win_w, win_h, menu);
-                }
-                if let Some(menu) = theme_menu {
-                    overlay::draw_theme_menu(&mut buffer, win_w, win_h, menu);
-                }
-                if let Some(toast) = toast {
-                    overlay::draw_toast(&mut buffer, win_w, win_h, toast);
-                }
-                Self::normalize_softbuffer_pixels(&mut buffer);
-                let _ = buffer.present();
-                return;
             }
+
+            if let Some(toast) = toast {
+                overlay::draw_toast(view, win_w, content_h, toast);
+            }
+        }
+
+        let command = chrome
+            .as_mut()
+            .and_then(|frame| shell::draw_chrome(&mut buffer, win_w, win_h, frame));
+
+        Self::normalize_softbuffer_pixels(&mut buffer);
+        let _ = buffer.present();
+        command
+    }
+
+    /// Where the 240x160 game image lands inside a content area of `w` x `h`.
+    ///
+    /// Prefers a whole-pixel multiple so the pixel art stays crisp; falls back
+    /// to a letterboxed fit when the area is smaller than one full scale, or
+    /// when the user has turned integer scaling off.
+    fn game_dest_rect(w: usize, h: usize, integer_scaling: bool) -> (usize, usize, usize, usize) {
+        let src_w = SCREEN_WIDTH as usize;
+        let src_h = SCREEN_HEIGHT as usize;
+        if w == 0 || h == 0 {
+            return (0, 0, 0, 0);
+        }
+
+        let integer_scale = (w / src_w).min(h / src_h);
+        let (draw_w, draw_h) = if integer_scaling && integer_scale >= 1 {
+            (src_w * integer_scale, src_h * integer_scale)
+        } else if w * src_h <= h * src_w {
+            (w, (w * src_h / src_w).max(1))
+        } else {
+            ((h * src_w / src_h).max(1), h)
+        };
+
+        let draw_w = draw_w.min(w);
+        let draw_h = draw_h.min(h);
+        ((w - draw_w) / 2, (h - draw_h) / 2, draw_w, draw_h)
+    }
+
+    /// Scale the GBA framebuffer into the content area.
+    fn blit_game(
+        buf: &mut [u32],
+        buf_w: usize,
+        buf_h: usize,
+        pixels: &[Pixel],
+        color_lookup: &[u32; RGB555_COLOR_COUNT],
+        integer_scaling: bool,
+    ) {
+        let src_w = SCREEN_WIDTH as usize;
+        let src_h = SCREEN_HEIGHT as usize;
+        let (offset_x, offset_y, draw_w, draw_h) =
+            Self::game_dest_rect(buf_w, buf_h, integer_scaling);
+        if draw_w == 0 || draw_h == 0 {
+            return;
+        }
+
+        if offset_x != 0 || offset_y != 0 || draw_w != buf_w || draw_h != buf_h {
+            buf.fill(0x000000);
+        }
+
+        // Fast path: a uniform whole-pixel scale, replicating rows rather than
+        // recomputing the color lookup for every destination pixel.
+        let uniform_scale = (draw_w % src_w == 0 && draw_h % src_h == 0)
+            .then(|| draw_w / src_w)
+            .filter(|scale| *scale > 0 && draw_h / src_h == *scale);
+
+        if let Some(scale) = uniform_scale {
+            let mut converted_row = [0u32; SCREEN_WIDTH as usize];
+            for src_y in 0..src_h {
+                let src_row = src_y * src_w;
+                let dst_y_base = offset_y + src_y * scale;
+                let first_dst_row = dst_y_base * buf_w + offset_x;
+
+                for (src_x, slot) in converted_row.iter_mut().enumerate() {
+                    *slot = color_lookup[pixels[src_row + src_x].color.to_rgb555() as usize];
+                }
+
+                let mut dst_x = 0;
+                for color in converted_row.iter() {
+                    buf[first_dst_row + dst_x..first_dst_row + dst_x + scale].fill(*color);
+                    dst_x += scale;
+                }
+
+                for dy in 1..scale {
+                    let dst_row = (dst_y_base + dy) * buf_w + offset_x;
+                    buf.copy_within(first_dst_row..first_dst_row + draw_w, dst_row);
+                }
+            }
+            return;
         }
 
         for y in 0..draw_h {
             let src_y = y * src_h / draw_h;
             let src_row = src_y * src_w;
-            let dst_row = (offset_y + y) * win_w + offset_x;
+            let dst_row = (offset_y + y) * buf_w + offset_x;
             for x in 0..draw_w {
                 let src_x = x * src_w / draw_w;
-                buffer[dst_row + x] =
-                    color_lookup[pixels[src_row + src_x].color.to_rgb555() as usize];
+                buf[dst_row + x] = color_lookup[pixels[src_row + src_x].color.to_rgb555() as usize];
             }
         }
+    }
 
-        if let Some((fps, speed, muted, volume_pct, cc, fast_forward)) = overlay {
+    /// Draw everything that sits on top of the game image.
+    ///
+    /// This block used to be copy-pasted into both scaling paths of
+    /// `present_buffer`, so a new UI layer had to be added twice or it would
+    /// silently appear only at some window sizes.
+    #[allow(clippy::too_many_arguments)]
+    fn compose_layers(
+        buf: &mut [u32],
+        buf_w: usize,
+        buf_h: usize,
+        pixels: &[Pixel],
+        color_lookup: &[u32; RGB555_COLOR_COUNT],
+        overlay_params: Option<(f64, u32, bool, u32, bool, bool)>,
+        addon_panel: Option<AddonPanelParams<'_>>,
+        pause_screen: Option<overlay::PauseScreen<'_>>,
+        save_state_menu: Option<overlay::SaveStateMenu>,
+        theme_menu: Option<overlay::ThemeMenu>,
+    ) {
+        if let Some((fps, speed, muted, volume_pct, cc, fast_forward)) = overlay_params {
             overlay::draw_overlay(
-                &mut buffer,
-                win_w,
-                win_h,
+                buf,
+                buf_w,
+                buf_h,
                 fps,
                 speed,
                 muted,
@@ -1388,60 +1574,46 @@ impl App {
                 fast_forward,
             );
         }
-        if let Some((
-            snapshot,
-            sprites,
-            view_mode,
-            expanded,
-            preview_size,
-            side_panel_size,
-            dashboard_layout,
-            dashboard_theme,
-            dashboard_wallpaper,
-        )) = addon_panel
-        {
+
+        if let Some(panel) = addon_panel {
             overlay::draw_addon_panel(
-                &mut buffer,
-                win_w,
-                win_h,
-                snapshot,
-                sprites,
-                expanded,
-                view_mode,
-                preview_size,
-                side_panel_size,
-                dashboard_layout,
-                dashboard_theme,
-                dashboard_wallpaper,
+                buf,
+                buf_w,
+                buf_h,
+                panel.snapshot,
+                panel.sprites,
+                panel.expanded,
+                panel.view_mode,
+                panel.preview_size,
+                panel.side_panel_size,
+                panel.dashboard_layout,
+                panel.dashboard_theme,
+                panel.wallpaper,
             );
-            if expanded {
+            if panel.expanded {
                 Self::draw_game_preview(
-                    &mut buffer,
-                    win_w,
-                    win_h,
+                    buf,
+                    buf_w,
+                    buf_h,
                     pixels,
                     color_lookup,
-                    preview_size,
-                    side_panel_size,
-                    dashboard_layout,
+                    panel.preview_size,
+                    panel.side_panel_size,
+                    panel.dashboard_layout,
                 );
             }
         }
+
         if let Some(paused) = pause_screen {
-            overlay::dim_screen(&mut buffer);
-            overlay::draw_pause_screen(&mut buffer, win_w, win_h, paused);
+            overlay::dim_screen(buf);
+            overlay::draw_pause_screen(buf, buf_w, buf_h, paused);
         }
         if let Some(menu) = save_state_menu {
-            overlay::draw_save_state_menu(&mut buffer, win_w, win_h, menu);
+            overlay::draw_save_state_menu(buf, buf_w, buf_h, menu);
         }
         if let Some(menu) = theme_menu {
-            overlay::draw_theme_menu(&mut buffer, win_w, win_h, menu);
+            overlay::draw_theme_menu(buf, buf_w, buf_h, menu);
         }
-        if let Some(toast) = toast {
-            overlay::draw_toast(&mut buffer, win_w, win_h, toast);
-        }
-        Self::normalize_softbuffer_pixels(&mut buffer);
-        let _ = buffer.present();
     }
 
     fn normalize_softbuffer_pixels(buffer: &mut [u32]) {
@@ -1651,6 +1823,27 @@ impl App {
             return;
         }
 
+        // The classic shell gets first refusal. This has to happen *before* the
+        // button mapping below, otherwise navigating an open menu with the
+        // arrow keys would also walk the player around the game world.
+        if pressed {
+            if let Some(ui_key) = map_ui_key(logical_key) {
+                if self.shell_handle_key(ui_key) {
+                    return;
+                }
+            }
+            if let Some(command) = self.shortcut_command(logical_key) {
+                self.run_command(command);
+                return;
+            }
+        }
+        // Only *presses* are withheld while the shell owns input. A release
+        // must always reach the emulator, otherwise opening a menu with a
+        // direction held down would leave that button stuck on forever.
+        if pressed && self.shell_capturing_input() {
+            return;
+        }
+
         if let Some(btn) = input_map::map_physical_key(physical_key) {
             if pressed {
                 self.keyboard_buttons.insert(btn);
@@ -1832,7 +2025,8 @@ impl ApplicationHandler for App {
             return;
         }
 
-        let window_size = LogicalSize::new(SCREEN_WIDTH * SCALE, SCREEN_HEIGHT * SCALE);
+        let scale = self.settings.get().video.window_scale.max(1);
+        let window_size = LogicalSize::new(SCREEN_WIDTH * scale, SCREEN_HEIGHT * scale);
         let attrs = Window::default_attributes()
             .with_title("tinyBird - GBA Emulator")
             .with_inner_size(window_size)
@@ -1861,6 +2055,11 @@ impl ApplicationHandler for App {
         self.update_audio_emulation_state();
         self.reset_timing_state();
         self.refresh_game_addon_state(true);
+        if self.fullscreen {
+            if let Some(window) = &self.window {
+                window.set_fullscreen(Some(Fullscreen::Borderless(window.current_monitor())));
+            }
+        }
         self.request_redraw();
 
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_deadline));
@@ -1874,7 +2073,7 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested => {
-                self.flush_battery_save(true);
+                self.shutdown();
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
@@ -1882,6 +2081,36 @@ impl ApplicationHandler for App {
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.on_cursor_moved(position.x, position.y);
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.on_cursor_left();
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let Some(button) = map_mouse_button(button) else {
+                    return;
+                };
+                self.on_mouse_button(button, state == ElementState::Pressed);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Line and pixel deltas are both reported depending on device;
+                // normalise to "rows of scroll" so lists behave the same on a
+                // wheel mouse and a trackpad.
+                let rows = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(position) => position.y as f32 / 24.0,
+                };
+                self.on_mouse_wheel(rows);
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                let state = modifiers.state();
+                self.ui_input.set_modifiers(Modifiers {
+                    shift: state.shift_key(),
+                    ctrl: state.control_key(),
+                    alt: state.alt_key(),
+                });
             }
             WindowEvent::HoveredFile(path) => {
                 self.hovered_file = Some(path);
@@ -1958,7 +2187,15 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.exit_requested {
+            self.shutdown();
+            event_loop.exit();
+            return;
+        }
         self.flush_battery_save(false);
+        // Settings are written on change rather than on a timer; the store only
+        // touches the disk when something actually differs.
+        self.settings.flush();
         if self.pokemon_sprites.drain_updates() {
             self.request_redraw();
         }
@@ -1982,10 +2219,13 @@ impl ApplicationHandler for App {
 fn main() {
     let mut rom_path: Option<PathBuf> = None;
     let mut bios_path: Option<PathBuf> = None;
+    let mut state_path: Option<PathBuf> = None;
     let mut iter = env::args().skip(1);
     while let Some(arg) = iter.next() {
         if arg == "--bios" {
             bios_path = iter.next().map(PathBuf::from);
+        } else if arg == "--state" {
+            state_path = iter.next().map(PathBuf::from);
         } else if rom_path.is_none() {
             rom_path = Some(PathBuf::from(arg));
         }
@@ -2038,7 +2278,7 @@ fn main() {
         }
     } else {
         println!("tinyBird - GBA Emulator");
-        println!("Usage: tinybird [--bios gba_bios.bin] [rom.gba]");
+        println!("Usage: tinybird [--bios gba_bios.bin] [--state file.state] [rom.gba]");
         println!("Press 'O' to open a ROM file");
         println!("If exactly one ROM is in ./roms/, it will be loaded automatically");
         None
@@ -2046,5 +2286,91 @@ fn main() {
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     let mut app = App::new(rom, bios);
+
+    // Resuming straight into a savestate is what makes a bug reproducible and
+    // an addon testable without replaying to the same screen every time.
+    if let Some(path) = state_path {
+        match fs::read(&path) {
+            Ok(bytes) => match app.gba.load_state_bytes(&bytes) {
+                Ok(()) => {
+                    app.gba.start();
+                    app.refresh_game_addon_state(true);
+                    println!("Loaded save state: {}", path.display());
+                }
+                Err(err) => eprintln!("Failed to load state '{}': {err}", path.display()),
+            },
+            Err(err) => eprintln!("Failed to read state '{}': {err}", path.display()),
+        }
+    }
     event_loop.run_app(&mut app).expect("Event loop error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SRC_W: usize = SCREEN_WIDTH as usize;
+    const SRC_H: usize = SCREEN_HEIGHT as usize;
+
+    #[test]
+    fn integer_scaling_picks_the_largest_whole_multiple() {
+        let (x, y, w, h) = App::game_dest_rect(SRC_W * 3 + 40, SRC_H * 3 + 30, true);
+        assert_eq!((w, h), (SRC_W * 3, SRC_H * 3));
+        assert_eq!((x, y), (20, 15), "leftover space is split evenly");
+    }
+
+    #[test]
+    fn an_exact_fit_leaves_no_border() {
+        let (x, y, w, h) = App::game_dest_rect(SRC_W * 2, SRC_H * 2, true);
+        assert_eq!((x, y, w, h), (0, 0, SRC_W * 2, SRC_H * 2));
+    }
+
+    #[test]
+    fn a_window_smaller_than_one_scale_still_fills_an_axis() {
+        // Below 240x160 there is no whole multiple, so the image must letterbox
+        // rather than vanish.
+        let (_, _, w, h) = App::game_dest_rect(120, 200, true);
+        assert_eq!(w, 120);
+        assert!(h > 0 && h <= 200);
+    }
+
+    #[test]
+    fn disabling_integer_scaling_fills_the_constraining_axis() {
+        let (_, _, w, h) = App::game_dest_rect(SRC_W * 3 + 40, SRC_H * 3 + 30, false);
+        assert!(
+            w == SRC_W * 3 + 40 || h == SRC_H * 3 + 30,
+            "one axis must be filled exactly, got {w}x{h}"
+        );
+    }
+
+    #[test]
+    fn the_aspect_ratio_is_preserved_within_a_pixel() {
+        for (win_w, win_h) in [(1000, 700), (640, 480), (1920, 1080), (300, 900)] {
+            let (_, _, w, h) = App::game_dest_rect(win_w, win_h, false);
+            let expected_h = w * SRC_H / SRC_W;
+            assert!(
+                h.abs_diff(expected_h) <= 1,
+                "{win_w}x{win_h} produced {w}x{h}, expected height near {expected_h}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_destination_never_escapes_the_content_area() {
+        for (win_w, win_h) in [(1, 1), (239, 159), (1000, 12), (37, 1000)] {
+            for integer in [true, false] {
+                let (x, y, w, h) = App::game_dest_rect(win_w, win_h, integer);
+                assert!(
+                    x + w <= win_w && y + h <= win_h,
+                    "{win_w}x{win_h} integer={integer} produced {x},{y} {w}x{h}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_zero_sized_area_draws_nothing() {
+        assert_eq!(App::game_dest_rect(0, 100, true), (0, 0, 0, 0));
+        assert_eq!(App::game_dest_rect(100, 0, true), (0, 0, 0, 0));
+    }
 }

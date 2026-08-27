@@ -17,6 +17,22 @@ pub const SAMPLE_RATE: u32 = 32768;
 /// Audio buffer size
 pub const BUFFER_SIZE: usize = 1024;
 
+/// Hard cap on buffered output samples (interleaved stereo).
+///
+/// One second at [`SAMPLE_RATE`]. A frontend drains every frame, so reaching
+/// this means nothing is consuming audio — a headless run, or a frontend with
+/// no audio device. Without a cap the buffer grows for as long as emulation
+/// runs, and because it is part of the savestate, a long headless session
+/// produced savestates of a hundred megabytes and could later hand the audio
+/// backend a batch large enough to overflow its own bookkeeping.
+///
+/// Audio older than a second is useless to play, so the oldest is dropped.
+pub const MAX_BUFFERED_SAMPLES: usize = SAMPLE_RATE as usize * 2;
+
+/// How much to discard at once when the cap is hit, so a host that never
+/// drains costs one memmove per quarter-second rather than one per sample.
+const SAMPLE_DISCARD_CHUNK: usize = MAX_BUFFERED_SAMPLES / 4;
+
 /// Frame sequencer frequency (512 Hz)
 const FRAME_SEQ_FREQ: u32 = 512;
 
@@ -795,8 +811,7 @@ impl Apu {
             self.sample_counter += cycles;
             while self.sample_counter >= self.cycles_per_sample {
                 self.sample_counter -= self.cycles_per_sample;
-                self.sample_buffer.push(0);
-                self.sample_buffer.push(0);
+                self.push_stereo(0, 0);
             }
             return;
         }
@@ -952,8 +967,23 @@ impl Apu {
         self.lp_left = (self.lp_left * (256 - K) + left * K) / 256;
         self.lp_right = (self.lp_right * (256 - K) + right * K) / 256;
 
-        self.sample_buffer.push(self.lp_left as i16);
-        self.sample_buffer.push(self.lp_right as i16);
+        self.push_stereo(self.lp_left as i16, self.lp_right as i16);
+    }
+
+    /// Append one stereo frame, discarding the oldest audio at the cap.
+    ///
+    /// Always writes both channels together so the interleaved buffer can never
+    /// end up with an odd length, which would swap left and right for every
+    /// sample after it.
+    fn push_stereo(&mut self, left: i16, right: i16) {
+        if self.sample_buffer.len() >= MAX_BUFFERED_SAMPLES {
+            let discard = SAMPLE_DISCARD_CHUNK.min(self.sample_buffer.len());
+            // Keep the discard even so the stereo pairing survives.
+            let discard = discard - (discard % 2);
+            self.sample_buffer.drain(..discard);
+        }
+        self.sample_buffer.push(left);
+        self.sample_buffer.push(right);
     }
 
     /// Take all buffered audio samples for output (interleaved stereo).
@@ -1520,6 +1550,62 @@ impl From<LegacyApuV2> for Apu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buffered_samples_are_capped_when_nothing_drains() {
+        // A headless run never drains. Before the cap the buffer grew for the
+        // whole session and was serialized into savestates, producing files of
+        // a hundred megabytes.
+        let mut apu = Apu::new();
+        for _ in 0..MAX_BUFFERED_SAMPLES * 2 {
+            apu.push_stereo(1, -1);
+        }
+        assert!(
+            apu.sample_buffer.len() <= MAX_BUFFERED_SAMPLES,
+            "buffer grew to {} past the {MAX_BUFFERED_SAMPLES} cap",
+            apu.sample_buffer.len()
+        );
+    }
+
+    #[test]
+    fn the_buffer_stays_stereo_aligned_across_the_cap() {
+        // An odd length would swap left and right for every later sample.
+        let mut apu = Apu::new();
+        // Values stay inside i16 so the test exercises the buffer, not overflow.
+        for index in 0..MAX_BUFFERED_SAMPLES + SAMPLE_DISCARD_CHUNK + 7 {
+            let value = (index % 1000) as i16;
+            apu.push_stereo(value, -value);
+        }
+        assert!(apu.sample_buffer.len().is_multiple_of(2));
+        for pair in apu.sample_buffer.chunks_exact(2) {
+            assert_eq!(pair[0], -pair[1], "a left/right pair was split");
+        }
+    }
+
+    #[test]
+    fn the_cap_keeps_the_newest_audio() {
+        let mut apu = Apu::new();
+        let total = MAX_BUFFERED_SAMPLES + SAMPLE_DISCARD_CHUNK;
+        for index in 0..total {
+            let value = (index % 1000) as i16;
+            apu.push_stereo(value, value);
+        }
+        let last = *apu.sample_buffer.last().expect("buffer should not be empty");
+        assert_eq!(
+            last,
+            ((total - 1) % 1000) as i16,
+            "the most recent sample must survive"
+        );
+    }
+
+    #[test]
+    fn draining_empties_the_buffer() {
+        let mut apu = Apu::new();
+        apu.push_stereo(5, 6);
+        assert_eq!(apu.drain_samples(), vec![5, 6]);
+        assert!(apu.sample_buffer.is_empty());
+        assert!(apu.drain_samples().is_empty());
+    }
 
     #[test]
     fn test_square_channel_new_and_reset() {
