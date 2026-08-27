@@ -149,6 +149,69 @@ envelope shape changes.
 
 ---
 
+## Addons written as data
+
+**Proof of concept.** `crates/tinybird-addons/src/manifest.rs`, with a worked
+example in `addons/example.firered-trainer.json`.
+
+A manifest is a JSON file saying *where to read* and *what to call it*:
+
+```json
+{
+  "addon_id": "custom.firered_money",
+  "display_name": "Money",
+  "matches": { "game_code_prefix": ["BPR"] },
+  "sections": [{
+    "id": "wallet", "title": "Wallet", "kind": "key_value",
+    "fields": [{ "label": "Money", "read": { "u32": { "at": "0x03005008", "deref": [290] } } }]
+  }]
+}
+```
+
+`ManifestAddon` implements `GameAddon`, so nothing downstream can tell the
+difference — the registry, the export envelope, the web read-out and the stream
+overlay all see an `AddonSnapshot`. `build_registry_with(manifests)` slots them
+**between** the compiled addons and the cartridge fallback: ahead of the
+fallback because a real reading beats a header dump, behind the compiled ones
+because a hand-written file should not quietly replace the module that decrypts
+FireRed's party.
+
+Loading the files is the host's job. This crate has no filesystem dependency by
+design and the WebAssembly build has no filesystem at all, so there a manifest
+arrives over HTTP like everything else.
+
+### Why this shape
+
+The two halves of writing an addon are not equally hard. Deciding a number is
+worth a row, and what to call it, is mechanical. Working out that `0x02024284`
+is the party block and not a buffer that happens to look like one is the work,
+and it comes from `tinybird-probe` — two savestates either side of a change,
+`--diff` between them, `--find-u16` to narrow the survivors.
+
+So the split is: **something finds the addresses, and the manifest is the cheap
+half.** That cheap half is small and closed enough to be a reliable generation
+target, which is the point — it is the piece a language model could write, with
+the probe still doing the part that needs a running game.
+
+A manifest naming a wrong address would otherwise produce confident nonsense,
+so `snapshot` reports nothing when every read came back zero: unmapped memory
+reads as zero, and a panel of zeroes is indistinguishable from a panel that is
+simply wrong.
+
+### What it cannot do yet
+
+| Missing | Why it matters |
+|---|---|
+| Decryption | Gen 3 party slots are XOR-encrypted with a derived key and reordered by personality value. No declarative format expresses that; the plain fields — nickname, level, HP — are readable. |
+| Arithmetic | No totals, no percentages, no "species 16 is Pidgey". |
+| Conditions | A section cannot appear only during a battle, which is what the dex tab does. |
+| Tone and badge rules | Nothing can flag itself the way the IV check does. |
+
+A manifest can express a **reader**, not an **interpreter**. Conditions and
+simple arithmetic are the two worth adding next, in that order.
+
+---
+
 ## Adding a game
 
 1. Implement `GameAddon` in `crates/tinybird-desktop/src/addons/<game>/`.
@@ -166,8 +229,9 @@ Use `tinybird-probe` to find the addresses —
 
 ## Still to do
 
-- External addon folders loaded from a local `addons/` directory with a
-  manifest, so a game can be supported without recompiling.
+- External addon folders loaded from a local `addons/` directory. A **proof of
+  concept exists**: see "Addons written as data" below. What is missing is the
+  host side — reading the files and passing them to `build_registry_with`.
 - Per-addon enable/disable in settings.
 - FFTA: identify the two unlabelled `u16` stats in the unit record, the clan
   name, and gil; verify the Japanese and European layouts.

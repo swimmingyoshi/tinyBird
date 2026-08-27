@@ -16,10 +16,12 @@
 //!
 //! See `ADDONS.md` for a worked example.
 
+pub mod manifest;
 pub mod memory;
 pub mod registry;
 pub mod schema;
 
+pub use manifest::{Manifest, ManifestAddon};
 pub use memory::{read_ascii, MemoryView, SparseMemory, EWRAM_BASE, IWRAM_BASE, ROM_BASE};
 pub use registry::{
     read_rom_identity, AddonInfo, AddonRegistry, Detection, GameAddon, RomIdentity,

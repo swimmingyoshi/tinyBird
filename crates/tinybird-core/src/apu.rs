@@ -1906,6 +1906,74 @@ mod tests {
         assert!(!apu.master_enable);
     }
 
+    /// The property the batched ticking in `Gba::step` relies on.
+    ///
+    /// The chip is handed cycles in batches of 64 rather than one instruction
+    /// at a time. That is only safe because `tick` loops internally: a sample
+    /// falls due every 512 cycles, and a batch smaller than that cannot skip
+    /// one. This asserts it rather than trusting the arithmetic.
+    #[test]
+    fn batched_ticking_produces_the_same_samples_as_cycle_by_cycle() {
+        const CYCLES: u32 = 20_000;
+
+        let mut fine = Apu::new();
+        fine.master_enable = true;
+        for _ in 0..CYCLES {
+            fine.tick(1);
+        }
+
+        let mut batched = Apu::new();
+        batched.master_enable = true;
+        for _ in 0..(CYCLES / 64) {
+            batched.tick(64);
+        }
+        batched.tick(CYCLES % 64);
+
+        let fine = fine.drain_samples();
+        let batched = batched.drain_samples();
+
+        assert_eq!(
+            fine.len(),
+            batched.len(),
+            "batching must not change how many samples come out"
+        );
+        assert_eq!(fine, batched, "nor what they are");
+    }
+
+    /// A batch larger than the sample period would still produce the right
+    /// count — the loop sees to that — so the guard is about *when* a sample
+    /// lands, not whether it does.
+    #[test]
+    fn a_batch_never_outruns_the_sample_period() {
+        let apu = Apu::new();
+        assert!(
+            crate::gba::APU_TICK_BATCH_CYCLES < apu.cycles_per_sample,
+            "a batch of {} would span a whole {}-cycle sample period",
+            crate::gba::APU_TICK_BATCH_CYCLES,
+            apu.cycles_per_sample
+        );
+    }
+
+    /// Samples have to arrive at the rate the frontend expects, or audio
+    /// drifts against the picture over a session rather than glitching once.
+    #[test]
+    fn a_frames_worth_of_cycles_produces_a_frames_worth_of_samples() {
+        // 280,896 cycles is one Game Boy Advance frame.
+        let mut apu = Apu::new();
+        apu.master_enable = true;
+        for _ in 0..(280_896 / 64) {
+            apu.tick(64);
+        }
+
+        // The buffer is interleaved stereo, so each sample instant pushes two.
+        let produced = apu.drain_samples().len();
+        let expected = 2 * (280_896 / apu.cycles_per_sample as usize);
+        assert!(
+            produced.abs_diff(expected) <= 2,
+            "expected about {expected} interleaved samples a frame, got {produced}"
+        );
+    }
+
     #[test]
     fn test_apu_drain_samples() {
         let mut apu = Apu::new();

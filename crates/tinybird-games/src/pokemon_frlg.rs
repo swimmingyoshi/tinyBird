@@ -2472,6 +2472,48 @@ mod tests {
         }
     }
 
+    /// The species table is indexed by what the game stores, which is not the
+    /// National Dex. Kanto and Johto line up; Hoenn does not, and a traded
+    /// Treecko is species 277. Getting this wrong renames every Hoenn Pokemon
+    /// in a FireRed party without any other symptom.
+    #[test]
+    fn species_are_keyed_by_internal_index_not_dex_number() {
+        assert_eq!(species_display_name(1), "Bulbasaur");
+        assert_eq!(species_display_name(251), "Celebi");
+
+        // The gap between Johto and Hoenn is unused.
+        for unused in [252, 260, 276] {
+            assert!(
+                fallback_species_info(unused).is_none(),
+                "{unused} is one of the unused slots"
+            );
+        }
+
+        // Hoenn sits 25 slots past its dex number.
+        assert_eq!(species_display_name(277), "Treecko");
+        assert_eq!(species_display_name(411), "Deoxys");
+    }
+
+    #[test]
+    fn every_species_the_table_knows_has_a_usable_catch_rate() {
+        let mut named = 0;
+        for id in 1..=411u16 {
+            if let Some((name, catch)) = fallback_species_info(id) {
+                named += 1;
+                assert!(!name.is_empty(), "species {id} has no name");
+                assert!(catch > 0, "species {id} would be impossible to catch");
+            }
+        }
+        assert_eq!(named, 386, "Generation 3 has 386 species");
+    }
+
+    /// An index outside the table still reads as something rather than
+    /// crashing or claiming to be a Pokemon it is not.
+    #[test]
+    fn an_unknown_species_says_so() {
+        assert_eq!(species_display_name(9999), "Species #9999");
+    }
+
     #[test]
     fn a_known_move_gets_a_pp_bar_and_an_unknown_one_gets_the_count() {
         let known = move_field(&FireRedMoveSlot {

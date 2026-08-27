@@ -62,6 +62,10 @@ impl DirtyRange {
         }
     }
 
+    fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     /// Mark the whole region dirty, for when it was replaced wholesale.
     fn mark_all(&mut self, max_len: usize) {
         self.start = 0;
@@ -818,6 +822,16 @@ impl SimpleBus {
     }
 
     /// Return and clear the dirty byte range for sound I/O mirrors.
+    /// Whether an audio register has been written since the last sync.
+    ///
+    /// Unlike `take_audio_io_dirty_range`, this leaves the range in place. The
+    /// APU batches its ticking, and a pending batch has to be flushed *before*
+    /// a register write reaches the chip — asking without consuming is what
+    /// lets the caller decide to flush first.
+    pub fn audio_io_dirty(&self) -> bool {
+        self.audio_io_dirty.is_dirty()
+    }
+
     pub fn take_audio_io_dirty_range(&mut self) -> Option<(usize, usize)> {
         self.audio_io_dirty.take()
     }
