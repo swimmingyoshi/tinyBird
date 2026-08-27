@@ -1224,12 +1224,9 @@ render, and save. Two emulator bugs that used to sit here are written up in
 - Sections carry pictures only where their addon named one per card. A
   `KeyValue` or `Table` section has no way to hold an image, so a team summary
   is text even when the party it summarises is not.
-- **Screenshots can be taken but not looked at.** "Screenshot" puts a picture
-  in the vault and the saves list shows it as a thumbnail beside its save, and
-  that is the whole of it: there is no way to open one full size, page through
-  the ones already taken, or keep a screenshot that is not attached to a save
-  state. The tabbed rail was built with room for this — the saves pane has the
-  height the cartridge panel used to take — but a gallery is still to write.
+- Screenshots have no editing or deleting: the gallery lists what is in the
+  vault and opens one full size, and removing a picture means removing it from
+  the vault by hand.
 - **The stream overlay is switched off.** It still reads the desktop app's JSON
   export rather than the emulator in the page beside it, so on a server run by
   itself it shows a snapshot that never changes, and it has had far less use

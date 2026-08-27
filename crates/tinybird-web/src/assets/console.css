@@ -1510,6 +1510,77 @@ button.card__head:hover .card__title {
   font-size: 14px;
 }
 
+/* Screenshots -------------------------------------------------------------
+
+   A grid rather than a list: these are pictures, and a picture in a labelled
+   row is a filename with a decoration next to it. Two to a row keeps each one
+   large enough to recognise the moment it was taken from.
+
+   `pixelated` for the same reason the sprites are: a 240x160 screen scaled to
+   anything else with smoothing on stops looking like a Game Boy Advance. */
+
+.shots {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.shots__item {
+  display: block;
+  width: 100%;
+  padding: 0;
+  background: rgba(6, 9, 15, 0.5);
+  border: 1px solid var(--rule);
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+}
+
+.shots__item:hover {
+  border-color: var(--teal);
+}
+
+.shots__thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 240 / 160;
+  object-fit: cover;
+  image-rendering: pixelated;
+  background: #000;
+}
+
+.shots__when {
+  padding: 3px 4px;
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.shots__item:hover .shots__when {
+  color: var(--ink);
+}
+
+/* The viewer. Wider than the other sheets, because the whole point is size. */
+.sheet--shot {
+  width: min(840px, calc(100vw - var(--gutter) * 2));
+}
+
+.sheet__body--shot {
+  max-height: none;
+  padding: 0;
+  background: #000;
+}
+
+.shot__full {
+  display: block;
+  width: 100%;
+  image-rendering: pixelated;
+}
+
 /* Chips ------------------------------------------------------------------
    Flags rather than measurements: fainted, poisoned, holding an item. They are
    short and there are several, so they wrap as a row instead of taking a

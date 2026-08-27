@@ -104,3 +104,34 @@ fn frame_cost_with_audio_disabled() {
     eprintln!("  audio off   {ms:.2} ms/frame");
     assert!(ms > 0.0);
 }
+
+/// How long it takes to read the whole cartridge through the addon's view.
+///
+/// Addons are handed a `MemoryView` and nothing else, and its `read_bytes`
+/// walks a byte at a time through the bus. Searching the ROM for a name table
+/// means reading all of it, so this is the question of whether that can happen
+/// on demand or has to be avoided.
+#[test]
+#[ignore = "Measurement, not an assertion; needs a commercial ROM"]
+fn scanning_the_whole_rom_through_a_memory_view() {
+    let rom_path = workspace().join("roms/pokemon_fire_red.gba");
+    if !rom_path.is_file() {
+        eprintln!("no ROM; nothing to measure");
+        return;
+    }
+
+    let rom = std::fs::read(&rom_path).expect("read ROM");
+    let len = rom.len();
+    let mut gba = Gba::new();
+    gba.load_rom(rom);
+
+    let start = Instant::now();
+    let mut checksum = 0u64;
+    for offset in 0..len as u32 {
+        checksum = checksum.wrapping_add(u64::from(gba.read_u8(0x0800_0000 + offset)));
+    }
+    let ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    eprintln!("  ROM scan    {ms:.1} ms for {} MB (checksum {checksum})", len / 1_048_576);
+}
+

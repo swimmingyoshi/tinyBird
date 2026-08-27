@@ -446,10 +446,30 @@ What the linked run establishes, with a real game:
   is position data crossing the cable and nothing else;
 - 18,739 transfers carrying 60-odd distinct values in each direction.
 
-It stops short of a Pokémon changing hands: opening the trade menu needs a
-button pressed on an exact tile, which is a puppeteering problem rather than an
-emulation one — the games are demonstrably running, taking input, and talking
-to each other at that point.
+It stops short of a Pokémon changing hands, and **the harness now says so
+mechanically** rather than leaving it to be judged from a filmstrip.
+
+Personality value and original-trainer id sit at offsets 0 and 4 of a party
+slot and are *unencrypted* — the rest of the slot is XOR-scrambled with a key
+derived from those two. So the identity of every Pokémon in both parties can be
+read without decrypting anything, and "did one change hands" becomes a set
+comparison: whoever holds an id the other console held before it started.
+
+Every strategy currently reports the same thing:
+
+```text
+both-together  transfers 2539  parent said 53 distinct  child said 50 distinct
+    no trade; both parties identical
+...
+traded: none - every strategy links up and none completes an exchange
+```
+
+That is the useful shape of the problem. The cable is not in question — 2,539
+transfers and fifty-odd distinct values each way against zero for the control
+run. What is missing is the button sequence that opens the trade menu, and the
+sweep will print `TRADED:` the moment one of them finds it. Until then this is
+a puppeteering problem with a pass/fail signal attached, which is a much better
+place to leave it than a puppeteering problem without one.
 
 **The control run is what makes the numbers mean anything.** The same games
 given the same buttons with no cable between them produce 0 transfers and

@@ -15,6 +15,7 @@
 //!   RAM signature instead of an empty panel.
 
 pub mod cartridge;
+pub mod gen3_names;
 pub mod ffta;
 pub mod pokemon_frlg;
 
