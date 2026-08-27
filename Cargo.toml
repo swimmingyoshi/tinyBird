@@ -20,6 +20,23 @@ authors = ["tinyBird Team"]
 [profile.dev]
 opt-level = 2
 
+# Kept for size, not for speed.
+#
+# This was added to see whether cross-crate inlining would buy frames in the
+# browser build, where one emulated frame has 16.74ms to happen in and takes
+# about 14.5. It did not: frame time was unchanged inside measurement noise, so
+# the cost is in the interpreter itself and not in what the linker can see.
+#
+# What it does buy is a wasm module about 14% smaller (610KB to 523KB), which
+# is worth having on a page someone loads over a network. The trade is a
+# release build that takes roughly ten times as long; dev builds are untouched.
+#
+# `panic = "abort"` is deliberately *not* set here: it would break
+# `cargo test --release`, which is how `tests/link_trade.rs` is meant to run.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 [profile.dev.package."*"]
 opt-level = 3
 

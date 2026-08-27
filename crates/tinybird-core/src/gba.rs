@@ -121,6 +121,14 @@ struct LegacySavestateV1 {
 }
 
 /// Main GBA emulator struct
+/// How many cycles may build up before the APU is handed them.
+///
+/// The chip emits a sample every ~380 cycles and clocks its frame sequencer
+/// every ~32768, so anything well under a sample period is inaudible. 64 keeps
+/// the batch far finer than the chip's own resolution while cutting the number
+/// of calls by roughly the average instruction length.
+pub(crate) const APU_TICK_BATCH_CYCLES: u32 = 64;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Gba {
     /// CPU core
@@ -131,6 +139,11 @@ pub struct Gba {
     pub ppu: Ppu,
     /// Audio processing unit
     pub apu: Apu,
+    /// Cycles owed to the APU but not yet handed to it.
+    ///
+    /// See `flush_apu`: ticking the sound chip once per instruction was about
+    /// a third of a frame, almost all of it fixed per-call overhead.
+    apu_pending_cycles: u32,
     /// Last status bits mirrored into DISPSTAT.
     last_dispstat_status_bits: u16,
     /// Last scanline mirrored into VCOUNT.
@@ -205,6 +218,9 @@ impl From<Savestate> for Gba {
             cpu: state.cpu,
             bus: state.bus,
             ppu: state.ppu,
+            // Transient bookkeeping, not part of the saved machine: a restored
+            // console owes the sound chip nothing.
+            apu_pending_cycles: 0,
             apu: state.apu,
             last_dispstat_status_bits: state.last_dispstat_status_bits,
             last_vcount: state.last_vcount,
@@ -232,6 +248,9 @@ impl From<LegacySavestateV2> for Gba {
             cpu: state.cpu,
             bus: state.bus,
             ppu: state.ppu,
+            // Transient bookkeeping, not part of the saved machine: a restored
+            // console owes the sound chip nothing.
+            apu_pending_cycles: 0,
             apu: state.apu.into(),
             last_dispstat_status_bits: state.last_dispstat_status_bits,
             last_vcount: state.last_vcount,
@@ -310,6 +329,9 @@ impl From<LegacySavestateV1> for Gba {
             cpu: state.cpu,
             bus: state.bus,
             ppu: state.ppu,
+            // Transient bookkeeping, not part of the saved machine: a restored
+            // console owes the sound chip nothing.
+            apu_pending_cycles: 0,
             apu: state.apu.into(),
             last_dispstat_status_bits: state.last_dispstat_status_bits,
             last_vcount: state.last_vcount,
@@ -358,6 +380,7 @@ impl Gba {
             state: GbaState::Stopped,
             speed: EmulationSpeed::FullSpeed,
             audio_enabled: true,
+            apu_pending_cycles: 0,
             total_cycles: 0,
             frame_count: 0,
             use_bios: false,
@@ -607,10 +630,23 @@ impl Gba {
         // Tick timers for the number of cycles the instruction consumed.
         self.tick_timers(cpu_cycles as u32);
 
-        // Tick audio for the instruction's cycle cost so timer-driven FIFO playback and frame
-        // sequencer state can advance while the BIOS sound driver is active.
+        // Audio is ticked in batches rather than once per instruction.
+        //
+        // `Apu::tick` walks four channels, the frame sequencer and the sample
+        // generator on every call. Called per instruction — a hundred thousand
+        // times a frame, usually with one to five cycles — almost all of that
+        // is fixed overhead: the chip only emits a sample every ~380 cycles and
+        // clocks its sequencer every ~32768, so the fine granularity bought
+        // nothing. Batching was worth about a third of a frame.
+        //
+        // The batch is flushed before any register write reaches the APU, so a
+        // game that changes a frequency still hears it change at the right
+        // point in the waveform.
         if self.audio_enabled {
-            self.apu.tick(cpu_cycles as u32);
+            self.apu_pending_cycles += cpu_cycles as u32;
+            if self.apu_pending_cycles >= APU_TICK_BATCH_CYCLES || self.bus.audio_io_dirty() {
+                self.flush_apu();
+            }
         }
 
         // Check for DMA transfers only when a DMA register was written
@@ -738,6 +774,13 @@ impl Gba {
                 break;
             }
         }
+
+        // Hand the APU what it is owed before the frame ends. Every caller
+        // drains audio after running a frame, so settling here means none of
+        // them has to know the chip is ticked in batches — a buffer short by
+        // up to a batch, with the gap landing somewhere different each time,
+        // is not a bug anyone would enjoy finding.
+        self.settle_audio();
 
         self.total_cycles - start_cycles
     }
@@ -1179,6 +1222,28 @@ impl Gba {
     }
 
     /// Sync sound I/O writes from the bus into the APU model.
+    /// Hand the APU the cycles it is owed, then any register writes.
+    ///
+    /// Order matters: the chip has to advance to the moment of the write
+    /// before the write lands, or a frequency change is heard slightly early.
+    fn flush_apu(&mut self) {
+        if self.apu_pending_cycles > 0 {
+            self.apu.tick(self.apu_pending_cycles);
+            self.apu_pending_cycles = 0;
+        }
+        self.sync_io_to_apu();
+    }
+
+    /// Flush any batched audio cycles, for callers about to read samples out.
+    ///
+    /// Draining without this would return a buffer missing up to a batch of
+    /// sound, and the gap would land differently every time.
+    pub fn settle_audio(&mut self) {
+        if self.audio_enabled {
+            self.flush_apu();
+        }
+    }
+
     fn sync_io_to_apu(&mut self) {
         let Some((start, end)) = self.bus.take_audio_io_dirty_range() else {
             return;

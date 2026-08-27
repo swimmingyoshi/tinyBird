@@ -1142,6 +1142,78 @@ console.log("round trip:", back.equals(raw));
 
 ---
 
+### Where the frame time goes
+
+Measured in the browser with FireRed running, all figures per call:
+
+| | ms |
+|---|---|
+| **`emu.runFrame`** | **11.8** |
+| `emu.snapshot` (read + JSON parse) | 1.9, four times a second |
+| `JSON.stringify(sections)` (the redraw check) | 0.016 |
+| `emu.frameView`, `emu.takeAudio` | ~0 |
+
+A GBA frame is 16.74ms, so emulation alone is about 70% of the budget and
+everything else on the page is rounding error. That one number explains what
+look like two separate problems:
+
+- **Fast forward does not reach its multiplier.** 4x needs four frames inside
+  one frame's time, or 4.2ms each. At 11.8ms the ceiling is about 1.4x, which
+  is what both `4x` and `Unlimited` measure at. The pacing is not broken; there
+  is nothing left to pace with.
+- **The occasional drop.** The headroom left cannot always absorb a garbage
+  collection or a browser repaint.
+
+Things measured and found *not* to be the problem: the read-out (its redraw
+check costs 16 microseconds and is skipped when nothing changed), the pixel and
+audio handoff, and the snapshot — the largest non-emulation cost and still
+under 1% of a second.
+
+`cargo test --release -p tinybird-core --test throughput -- --ignored --nocapture`
+measures the same thing natively, where a profiler can see inside it.
+
+#### What has been tried
+
+**Batching the APU tick: kept, worth 19% in the browser.** `Apu::tick` walks
+four channels, the frame sequencer and the sample generator on every call, and
+it was called once per *instruction* — a hundred thousand times a frame,
+usually with one to five cycles — when the chip only emits a sample every ~380
+cycles. Accumulating cycles and flushing every 64 (or before any register write
+reaches the chip, so a frequency change is still heard at the right point) took
+the browser from 14.5ms to 11.8ms and fast forward from 1.2x to 1.4x.
+
+Native only improved 9.0ms to 8.5ms, about 6%. The gap is the interesting part:
+WebAssembly pays more per call than native does, so cutting the call count
+helps it roughly three times as much. **Measure the browser, not the desktop,
+when the browser is what feels slow.**
+
+The flush happens at the end of `run_frame`, not at the drain sites. Every
+caller runs a frame and then drains, so settling there means none of them has
+to know the chip is batched — a buffer short by up to a batch, with the gap
+landing somewhere different each time, is not a bug worth leaving lying around.
+
+**Cross-crate inlining: no effect on speed, kept for size.** A release profile
+with `lto = "fat"` and `codegen-units = 1` left frame time unchanged inside
+noise. It does make the wasm module 14% smaller (610KB to 523KB), which is
+worth having on a page loaded over a network, so it stayed for that reason and
+the comment in `Cargo.toml` says so.
+
+#### What is left
+
+Audio still costs about 2.7ms of a frame natively (8.5ms with, 5.8ms without),
+and that remainder is real signal processing rather than call overhead —
+`generate_sample` and the channel loops do the same work however they are
+batched. The rest is the CPU and PPU.
+
+The next thing worth doing is finding out where inside a frame the time goes:
+CPU dispatch, the PPU scanline renderer, or bus reads. `step()` is a good place
+to start looking — it does a lot of bookkeeping per instruction, including a
+full bus read of the current opcode in `current_hle_swi_comment` purely to see
+whether it is an SWI, on every instruction, when the result is only used if a
+HALT follows.
+
+---
+
 ## 8. Known gaps
 
 Nothing outstanding on the five local dumps: Fire Red, Pokémon Pinball, Final

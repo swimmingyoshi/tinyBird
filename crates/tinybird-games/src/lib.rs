@@ -20,8 +20,9 @@ pub mod pokemon_frlg;
 
 use serde::Serialize;
 use tinybird_addons::{
-    read_rom_identity, AddonInfo, AddonRegistry, AddonSnapshot as ContractAddonSnapshot, MemoryView,
-    StreamSnapshot as ContractStreamSnapshot, SNAPSHOT_SCHEMA_VERSION,
+    read_rom_identity, AddonInfo, AddonRegistry, AddonSnapshot as ContractAddonSnapshot,
+    ManifestAddon, MemoryView, StreamSnapshot as ContractStreamSnapshot,
+    SNAPSHOT_SCHEMA_VERSION,
 };
 use tinybird_core::Gba;
 
@@ -39,11 +40,14 @@ pub type AddonSnapshot = ContractAddonSnapshot<AddonData>;
 /// [`AddonData::Generic`] is not a fallback for failure — it is the normal case
 /// for an addon that describes itself entirely through schema sections, which
 /// the dashboard renders with its generic table/list/key-value renderer.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum AddonData {
     FireRed(FireRedSnapshot),
     Ffta(FftaSnapshot),
+    /// No typed payload: the sections are the whole report. Manifest addons
+    /// always land here, which is also why they need no variant of their own.
+    #[default]
     Generic,
 }
 
@@ -73,10 +77,32 @@ impl MemoryView for GbaMemory<'_> {
 /// Order matters: the first addon that claims the ROM *and* produces data wins,
 /// so specific addons come first and the catch-all cartridge addon comes last.
 pub fn build_registry() -> AddonRegistry<AddonData> {
-    AddonRegistry::new()
+    build_registry_with(Vec::new())
+}
+
+/// The shipped addons, plus any written as manifests.
+///
+/// Manifests sit **between** the compiled addons and the cartridge fallback.
+/// Ahead of the fallback, because a manifest that reports something real beats
+/// a header dump; behind the compiled ones, because a hand-written JSON file
+/// pointed at FireRed should not quietly replace the module that decrypts its
+/// party. Someone who wants to replace a shipped addon can edit the shipped
+/// addon.
+///
+/// Loading the files is the host's job, not this crate's: this crate has no
+/// filesystem dependency by design, and the WebAssembly build has no
+/// filesystem at all — there, a manifest arrives over HTTP like everything
+/// else does.
+pub fn build_registry_with(manifests: Vec<ManifestAddon>) -> AddonRegistry<AddonData> {
+    let mut registry = AddonRegistry::new()
         .with(Box::new(pokemon_frlg::PokemonFrlgAddon))
-        .with(Box::new(ffta::FftaAddon))
-        .with(Box::new(cartridge::CartridgeAddon))
+        .with(Box::new(ffta::FftaAddon));
+
+    for manifest in manifests {
+        registry.register(Box::new(manifest));
+    }
+
+    registry.with(Box::new(cartridge::CartridgeAddon))
 }
 
 /// A detection result plus the metadata needed to explain it in the UI.
@@ -172,6 +198,32 @@ mod tests {
         assert!(ids.contains(&"pokemon_frlg_party"));
         assert!(ids.contains(&"ffta_clan"));
         assert!(ids.contains(&"cartridge"));
+    }
+
+    /// The ordering rule, which is the whole of how manifests coexist with the
+    /// compiled addons: ahead of the fallback, behind the real thing.
+    #[test]
+    fn a_manifest_sits_between_the_compiled_addons_and_the_fallback() {
+        let manifest = ManifestAddon::parse(
+            r#"{
+              "addon_id": "custom.test",
+              "display_name": "Custom",
+              "matches": { "game_code_prefix": ["BPR", "ZZZ"] },
+              "sections": [{ "id": "s", "title": "S", "kind": "key_value",
+                "fields": [{ "label": "X", "read": { "u8": "0x02000000" } }] }]
+            }"#,
+        )
+        .expect("manifest should parse");
+
+        let registry = build_registry_with(vec![manifest]);
+        let ids: Vec<_> = registry.infos().iter().map(|info| info.addon_id).collect();
+
+        let custom = ids.iter().position(|id| *id == "custom.test").unwrap();
+        let compiled = ids.iter().position(|id| *id == "pokemon_frlg_party").unwrap();
+        let fallback = ids.iter().position(|id| *id == "cartridge").unwrap();
+
+        assert!(compiled < custom, "a manifest must not shadow a real addon");
+        assert!(custom < fallback, "a manifest must beat the header dump");
     }
 
     #[test]

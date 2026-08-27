@@ -1,0 +1,67 @@
+{
+  "$comment": [
+    "A worked example of an addon written as data rather than as Rust.",
+    "",
+    "PROOF OF CONCEPT. Load it with build_registry_with(); see manifest.rs for",
+    "what this format can and cannot express.",
+    "",
+    "The addresses below are FireRed (BPRE, USA rev 0). SaveBlock1 lives behind",
+    "a pointer at 0x03005008 because the game moves the block around, which is",
+    "why the reads deref rather than naming an address directly. Offsets inside",
+    "the block differ between FireRed, LeafGreen, and the Japanese builds, so",
+    "the matcher deliberately names only BPR.",
+    "",
+    "How the addresses were found: tinybird-probe, two savestates taken either",
+    "side of spending money, --diff between them, then --find-u32 with the",
+    "amount to narrow the survivors. That half is the work. This file is the",
+    "cheap half, and it is the half a language model can write."
+  ],
+
+  "addon_id": "example.firered_trainer",
+  "display_name": "Trainer",
+  "version": "0.1.0",
+
+  "matches": {
+    "game_code_prefix": ["BPR"]
+  },
+
+  "sections": [
+    {
+      "id": "trainer",
+      "title": "Trainer",
+      "note": "SaveBlock1, followed through the pointer at 0x03005008",
+      "kind": "key_value",
+      "fields": [
+        {
+          "label": "Money",
+          "read": { "u32": { "at": "0x03005008", "deref": [290] } },
+          "hint": "XOR-obfuscated in the save"
+        },
+        {
+          "label": "Coins",
+          "read": { "u16": { "at": "0x03005008", "deref": [294] } }
+        }
+      ]
+    },
+
+    {
+      "id": "party_lite",
+      "title": "Party",
+      "note": "The plain fields of each slot; the encrypted half needs Rust",
+      "kind": "cards",
+      "repeat": { "count": 6, "stride": 100 },
+      "card": {
+        "title": { "text": { "at": "0x02024284", "len": 10 } },
+        "subtitle": { "index": null },
+        "lead": {
+          "label": "HP",
+          "read": { "u16": "0x0202429E" },
+          "max": { "u16": "0x020242A0" }
+        },
+        "fields": [
+          { "label": "Level", "read": { "u8": "0x0202429C" } }
+        ]
+      }
+    }
+  ]
+}
