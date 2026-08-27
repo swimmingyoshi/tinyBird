@@ -1240,6 +1240,8 @@ render, and save. Two emulator bugs that used to sit here are written up in
   switching on again.
 - Gamepad axes other than the left stick are ignored, so a pad with only a
   right stick or a hat switch reports no direction.
+- Addon manifests are fetched from `/api/addons` once at boot and cannot be
+  changed without a reload, because the registry is built on first use.
 - **Trading still stops short of a Pokémon changing hands.** The cable itself
   is done — the handshake completes, both players reach the same Trade Center,
   and position data crosses in both directions

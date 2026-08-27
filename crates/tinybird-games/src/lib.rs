@@ -18,6 +18,8 @@ pub mod cartridge;
 pub mod ffta;
 pub mod pokemon_frlg;
 
+use std::sync::OnceLock;
+
 use serde::Serialize;
 use tinybird_addons::{
     read_rom_identity, AddonInfo, AddonRegistry, AddonSnapshot as ContractAddonSnapshot,
@@ -80,6 +82,32 @@ pub fn build_registry() -> AddonRegistry<AddonData> {
     build_registry_with(Vec::new())
 }
 
+/// The registry every snapshot goes through.
+///
+/// Built once. It used to be rebuilt per call, which was cheap for compiled
+/// addons and would not be for manifests: constructing a `ManifestAddon` leaks
+/// the handful of strings `AddonInfo` needs for the life of the process, and
+/// doing that four times a second is a leak rather than a one-off cost.
+static REGISTRY: OnceLock<AddonRegistry<AddonData>> = OnceLock::new();
+
+/// Add manifest addons, before anything reads a snapshot.
+///
+/// Hosts call this once at startup with whatever they found on disk or over
+/// the network. It fails if the registry has already been used, because the
+/// alternative — swapping addons underneath a running game — is a worse
+/// answer than saying no.
+pub fn install_manifests(manifests: Vec<ManifestAddon>) -> Result<usize, String> {
+    let count = manifests.len();
+    REGISTRY
+        .set(build_registry_with(manifests))
+        .map(|()| count)
+        .map_err(|_| "addons were already in use; install manifests before the first snapshot".to_string())
+}
+
+fn registry() -> &'static AddonRegistry<AddonData> {
+    REGISTRY.get_or_init(|| build_registry_with(Vec::new()))
+}
+
 /// The shipped addons, plus any written as manifests.
 ///
 /// Manifests sit **between** the compiled addons and the cartridge fallback.
@@ -123,7 +151,7 @@ pub fn capture_stream_snapshot(gba: Option<&Gba>) -> StreamSnapshot {
         return StreamSnapshot::default();
     };
 
-    let detection = build_registry().detect(&memory, &rom);
+    let detection = registry().detect(&memory, &rom);
     StreamSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         rom: Some(rom),
@@ -133,7 +161,7 @@ pub fn capture_stream_snapshot(gba: Option<&Gba>) -> StreamSnapshot {
 
 /// Explain what the registry did with the current ROM, for `Tools > Addon Status`.
 pub fn describe_addon_status(gba: Option<&Gba>) -> AddonStatus {
-    let registry = build_registry();
+    let registry = registry();
     let registered = registry.infos();
 
     let Some(gba) = gba else {

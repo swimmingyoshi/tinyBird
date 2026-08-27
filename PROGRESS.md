@@ -16,11 +16,11 @@ This is the short version. The long versions live in
 | `tinybird-desktop` | Windowed runner: audio, keyboard and gamepad, battery saves, quicksave, stream overlay, addon dashboard. |
 | `tinybird-web` | Axum server: the browser build, save vault, accounts, rooms. |
 | `tinybird-wasm` | The core as a WebAssembly module with a plain C ABI. No `wasm-bindgen`. |
-| `tinybird-addons` | The addon contract: schema, memory view, registry, and manifests. |
+| `tinybird-addons` | The addon contract: schema, memory view, registry, and manifests — addons written as JSON, loaded from `addons/` on the desktop and over `/api/addons` in the browser. |
 | `tinybird-games` | Shipped addons: FireRed/LeafGreen, FFTA, and a cartridge fallback. |
 | `tinybird-probe` | The address-finding tool: diffing, scanning, text search. |
 
-Roughly 510 Rust tests and 72 browser-module tests. CI builds and tests the
+Roughly 630 Rust tests and 72 browser-module tests. CI builds and tests the
 non-windowing crates, runs the GBA accuracy suite as a gate, and builds the
 WebAssembly module.
 
@@ -41,14 +41,15 @@ Each of these is written up where it belongs; this is the index.
   view, and a screenshot cannot exist apart from a save state.
 - **Frame throughput is the ceiling on fast forward.** A frame costs ~11.8ms in
   the browser against a 16.74ms budget, so fast forward tops out near 1.4x.
+  Batching the APU tick bought 19% of that; the rest is CPU and PPU.
   The measurements and what has been tried are in
   [WEB.md](docs/WEB.md). `cargo test --release -p tinybird-core --test
   throughput -- --ignored --nocapture` reproduces them.
-- **FRLG species names cover the early game only.** Moves are complete; species
-  are not. Both tables are hardcoded rather than read from the cartridge, and
-  finding them in the ROM by searching for a known name is the real fix.
-- **Manifest addons have no host wiring.** The format works and is tested;
-  nothing yet reads `addons/*.json` and passes them to `build_registry_with`.
+- **FRLG name tables are hardcoded, not read from the cartridge.** Moves and
+  species are both complete for Generation 3 (354 and 386), but items are
+  barely covered and the ROM has all three. Searching the ROM for a known name,
+  rather than hardcoding an address that moves between versions, would fix the
+  lot.
 - **Lint and format backlogs.** `cargo clippy` runs in CI as reporting only,
   and there is no `cargo fmt --check`, because the tree predates both. The
   reasoning and the path to turning them on are in `.github/workflows/ci.yml`.

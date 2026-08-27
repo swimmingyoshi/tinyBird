@@ -38,6 +38,7 @@ use std::ptr::addr_of_mut;
 // module works through `Gba` and never touches memory directly.
 use tinybird_core::bus::Bus;
 use tinybird_core::{Gba, GbaButton, GbaState};
+use tinybird_addons::ManifestAddon;
 use tinybird_games::{capture_stream_snapshot, snapshot_to_json};
 
 /// GBA screen width in pixels.
@@ -245,6 +246,48 @@ pub unsafe extern "C" fn tb_load_rom(ptr: *const u8, len: usize) -> i32 {
         .load_rom(std::slice::from_raw_parts(ptr, len).to_vec());
     emu.gba.start();
     TB_OK
+}
+
+/// Install an addon manifest, as JSON.
+///
+/// The browser has no filesystem, so manifests arrive the way everything else
+/// does: the page fetches them and hands the bytes over. Call before the first
+/// snapshot — the registry is built on first use and cannot be changed after.
+///
+/// Returns the number of manifests now installed, or a negative error code.
+///
+/// # Safety
+///
+/// `ptr` must point to `len` readable bytes of UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn tb_install_manifests(ptr: *const u8, len: usize) -> i32 {
+    if ptr.is_null() || len == 0 {
+        return TB_ERR_BAD_ARGUMENT;
+    }
+
+    let Ok(json) = std::str::from_utf8(std::slice::from_raw_parts(ptr, len)) else {
+        return TB_ERR_BAD_ARGUMENT;
+    };
+
+    // A JSON array, so one call installs the lot: the registry can only be set
+    // once, and a per-file entry point would make the second file an error.
+    let Ok(manifests) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
+        return TB_ERR_BAD_ARGUMENT;
+    };
+
+    let mut addons = Vec::with_capacity(manifests.len());
+    for manifest in &manifests {
+        let Ok(addon) = ManifestAddon::parse(&manifest.to_string()) else {
+            // One bad manifest costs that manifest, not the page.
+            continue;
+        };
+        addons.push(addon);
+    }
+
+    match tinybird_games::install_manifests(addons) {
+        Ok(count) => count as i32,
+        Err(_) => TB_ERR_BAD_ARGUMENT,
+    }
 }
 
 /// Restore battery-backed cartridge save data.

@@ -3159,6 +3159,7 @@ dependencies = [
 name = "tinybird-wasm"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "tinybird-addons",
  "tinybird-core",
  "tinybird-games",

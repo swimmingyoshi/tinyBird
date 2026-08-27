@@ -101,6 +101,30 @@ export class TinyBird {
     return code;
   }
 
+  // --- addons -----------------------------------------------------------
+
+  /**
+   * Install addon manifests, as an array of parsed JSON objects.
+   *
+   * Must happen before the first snapshot: the registry is built the first
+   * time it is read and cannot be changed afterwards. Returns how many were
+   * installed, or 0 if the module was built without the entry point.
+   */
+  installManifests(manifests) {
+    if (!Array.isArray(manifests) || manifests.length === 0) return 0;
+    // An older module without this export is not an error; it just has no
+    // manifests, which is what it had before the feature existed.
+    if (typeof this.#exports.tb_install_manifests !== "function") return 0;
+
+    const json = new TextEncoder().encode(JSON.stringify(manifests));
+    const result = this.#withBytes(json, (ptr, len) =>
+      this.#exports.tb_install_manifests(ptr, len),
+    );
+    // Negative is an error code. A manifest that will not load is not worth
+    // stopping the page for, so it is reported and the game still runs.
+    return result < 0 ? 0 : result;
+  }
+
   // --- loading ----------------------------------------------------------
 
   loadRom(data) {
