@@ -3507,9 +3507,36 @@ window.addEventListener("drop", async (event) => {
 
 // --- boot ---------------------------------------------------------------
 
+/**
+ * Addon manifests, fetched before anything reads a snapshot.
+ *
+ * The browser has no filesystem, so the server hands them over as one array.
+ * Failing is not worth interrupting a boot for: the compiled addons are still
+ * there, and a page with no manifests is how this worked until recently.
+ */
+/** How many manifest addons loaded at boot, for the devtools handle. */
+let manifestsInstalled = 0;
+
+async function installManifests() {
+  try {
+    const response = await fetch("/api/addons");
+    if (!response.ok) return;
+    const manifests = await response.json();
+    const installed = emu.installManifests(manifests);
+    manifestsInstalled = installed;
+    if (installed > 0) {
+      say(`Loaded ${installed} addon manifest${installed === 1 ? "" : "s"}`);
+    }
+  } catch {
+    // No manifests, which is the ordinary case.
+  }
+}
+
 async function boot() {
   try {
     emu = await TinyBird.load();
+    // Before the first snapshot: the registry is built on first read.
+    await installManifests();
     // A handle for devtools. Everything the page does goes through these two
     // objects, so a session can be inspected — or a register read out while a
     // link misbehaves — without instrumenting the page to find out.
@@ -3519,6 +3546,10 @@ async function boot() {
       },
       get lobby() {
         return lobby;
+      },
+      /** Addon manifests installed at boot, beyond the compiled addons. */
+      get manifests() {
+        return manifestsInstalled;
       },
       /** What the emulator is being told to hold, and by what. */
       get buttons() {

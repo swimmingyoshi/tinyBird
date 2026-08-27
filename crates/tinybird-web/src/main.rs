@@ -25,6 +25,8 @@ const DEFAULT_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const DEFAULT_PORT: u16 = 8877;
 const DEFAULT_SNAPSHOT_PATH: &str = "stream-data/current-game.json";
 const DEFAULT_SPRITE_DIR: &str = "stream-data/pokemon-sprites";
+/// Addon manifests, served to the page because the browser has no disk.
+const DEFAULT_ADDON_DIR: &str = "addons";
 /// Local ROM folder offered alongside the vault, so the page is usable before
 /// any storage key exists.
 const DEFAULT_ROM_DIR: &str = "roms";
@@ -74,6 +76,8 @@ struct AppState {
     bios_path: PathBuf,
     /// Whether `/overlay` serves the overlay or the note explaining why not.
     overlay_enabled: bool,
+    /// Directory of addon manifests served to the page.
+    addon_dir: PathBuf,
     media: MediaConfig,
     auth: AuthConfig,
     /// Signed-in browsers. Shared, because the state is cloned per request.
@@ -110,6 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshot_path: config.snapshot_path,
         sprite_dir: config.sprite_dir,
         overlay_enabled: config.overlay_enabled,
+        addon_dir: config.addon_dir,
         wasm_path: config.wasm_path,
         rom_dir: config.rom_dir,
         bios_path: config.bios_path,
@@ -158,6 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/proxy", get(storage_proxy))
         .route("/api/health", get(health))
         .route("/api/snapshot", get(snapshot))
+        .route("/api/addons", get(addon_manifests))
         .route("/sprites/{species_id}", get(sprite_png))
         .with_state(state);
 
@@ -219,6 +225,7 @@ struct Config {
     snapshot_path: PathBuf,
     sprite_dir: PathBuf,
     overlay_enabled: bool,
+    addon_dir: PathBuf,
     wasm_path: PathBuf,
     rom_dir: PathBuf,
     bios_path: PathBuf,
@@ -242,6 +249,9 @@ impl Config {
             .unwrap_or_else(|_| PathBuf::from(DEFAULT_SPRITE_DIR));
         // Opt-in: an unfinished feature that silently does the wrong thing
         // is worse than one that is not there.
+        let addon_dir = env::var("TINYBIRD_ADDONS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(DEFAULT_ADDON_DIR));
         let overlay_enabled = env::var("TINYBIRD_WEB_OVERLAY")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
@@ -303,6 +313,7 @@ impl Config {
             snapshot_path,
             sprite_dir,
             overlay_enabled,
+            addon_dir,
             wasm_path,
             rom_dir,
             bios_path,
@@ -1311,6 +1322,40 @@ fn empty_snapshot_json() -> String {
 /// not, so the first run of a server populates itself and every run after it
 /// works offline. A miss is a plain 404: the page hides the picture and keeps
 /// the card, which is why the addon also sends the species name in words.
+/// Addon manifests, as one array the page can hand straight to the emulator.
+///
+/// The browser has no filesystem, so this is how a manifest reaches it. One
+/// array rather than a file listing plus fetches: the registry can only be
+/// built once, so the page needs all of them before it starts.
+///
+/// A file that will not parse is skipped rather than failing the request. One
+/// bad manifest should cost that manifest.
+async fn addon_manifests(State(state): State<AppState>) -> Response {
+    let mut manifests: Vec<serde_json::Value> = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&state.addon_dir) {
+        let mut paths: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        // Sorted, so registration order does not depend on the filesystem.
+        paths.sort();
+
+        for path in paths {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                manifests.push(value);
+            }
+        }
+    }
+
+    let body = serde_json::to_string(&manifests).unwrap_or_else(|_| "[]".to_string());
+    text(StatusCode::OK, body, "application/json; charset=utf-8")
+}
+
 async fn sprite_png(Path(species_id): Path<u16>, State(state): State<AppState>) -> Response {
     match sprites::fetch(&state.sprite_dir, species_id).await {
         sprites::Sprite::Png(bytes) => {

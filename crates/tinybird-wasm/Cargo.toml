@@ -13,6 +13,8 @@ crate-type = ["cdylib", "rlib"]
 tinybird-addons.workspace = true
 tinybird-core.workspace = true
 tinybird-games.workspace = true
+# Manifests arrive as JSON from the page; nothing else here needs it.
+serde_json.workspace = true
 
 [package.metadata.tinybird]
 # Built with a plain `cargo build --target wasm32-unknown-unknown`; there is no

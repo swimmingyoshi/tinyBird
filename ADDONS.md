@@ -176,9 +176,18 @@ fallback because a real reading beats a header dump, behind the compiled ones
 because a hand-written file should not quietly replace the module that decrypts
 FireRed's party.
 
-Loading the files is the host's job. This crate has no filesystem dependency by
-design and the WebAssembly build has no filesystem at all, so there a manifest
-arrives over HTTP like everything else.
+Loading the files is the host's job, and both hosts do it:
+
+| Host | How |
+|---|---|
+| Desktop | `addon_manifests::install()` at startup reads `addons/*.json`. `TINYBIRD_ADDONS` moves the directory. |
+| Browser | The server serves the same directory as one array at `/api/addons`; the page fetches it and calls `tb_install_manifests`. There is no filesystem in a browser, so the bytes arrive the way everything else does. |
+
+Either way it happens **once, before the first snapshot** — the registry is
+built the first time it is read and `install_manifests` refuses afterwards,
+because swapping addons underneath a running game is a worse answer than saying
+no. A file that will not parse is reported and skipped: one bad manifest should
+cost that manifest, not the emulator.
 
 ### Why this shape
 
@@ -229,20 +238,20 @@ Use `tinybird-probe` to find the addresses —
 
 ## Still to do
 
-- External addon folders loaded from a local `addons/` directory. A **proof of
-  concept exists**: see "Addons written as data" below. What is missing is the
-  host side — reading the files and passing them to `build_registry_with`.
+- Manifests cannot express decryption, arithmetic, conditions, or tone rules.
+  See "What it cannot do yet" below.
 - Per-addon enable/disable in settings.
 - FFTA: identify the two unlabelled `u16` stats in the unit record, the clan
   name, and gil; verify the Japanese and European layouts.
-- FRLG: **species** names still cover the early game only, so a late-game party
-  can report an unnamed species. Moves are complete (all 354 of Generation 3).
-- FRLG: move names and PP are a table in `pokemon_frlg.rs` rather than being
-  read out of the cartridge. The ROM has both, but at addresses that move
-  between FireRed, LeafGreen and their revisions, and a wrong address gives
-  confident nonsense where a table gives a known answer. Finding the tables by
-  searching the ROM for a known name — rather than hardcoding an address —
-  would fix names, PP and species together, and is the right long-term fix.
+- FRLG: names and PP are tables in `pokemon_frlg.rs` rather than being read out
+  of the cartridge. Both are complete for Generation 3 — all 354 moves and all
+  386 species — but see below for why reading them from the ROM would be
+  better still.
+- FRLG: reading the name tables out of the ROM would beat hardcoding them. The
+  cartridge has moves, species and items, but at addresses that move between
+  FireRed, LeafGreen and their revisions — so it wants *searching* for a known
+  name rather than a hardcoded offset. That would also pick up items, which are
+  still barely covered.
 - FRLG: encounter tables are hand-entered per map, so an area with none names
   the map it is missing rather than being read from the ROM's wild-encounter
   header.

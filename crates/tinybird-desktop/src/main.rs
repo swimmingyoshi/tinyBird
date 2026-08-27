@@ -3,6 +3,7 @@
 mod audio;
 mod ui;
 mod addon_export;
+mod addon_manifests;
 mod input_map;
 mod settings;
 mod shell;
@@ -2217,6 +2218,10 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
+    // Before anything reads a snapshot: the registry is built on first use and
+    // manifests cannot join it afterwards.
+    addon_manifests::install();
+
     let mut rom_path: Option<PathBuf> = None;
     let mut bios_path: Option<PathBuf> = None;
     let mut state_path: Option<PathBuf> = None;
