@@ -318,3 +318,56 @@ test("two tabs bypass the server for link traffic", () => {
   local.deliver({ type: "link_value", from: "child", seq: 9, value: 0xabcd });
   assert.deepEqual(values, [{ from: "child", seq: 9, value: 0xabcd }]);
 });
+
+test("a console can say it cannot take a transfer", () => {
+  const skips = [];
+  const { connection, socket } = connect({
+    onLinkSkip: (from, seq) => skips.push({ from, seq }),
+  });
+  socket().accept();
+  socket().deliver({
+    type: "welcome",
+    room: "BCDFG",
+    you: "child",
+    members: [
+      { id: "parent", name: "Ada", seat: 0 },
+      { id: "child", name: "Bea", seat: 1 },
+    ],
+  });
+
+  connection.publishLinkSkip(9);
+  assert.deepEqual(socket().sent.at(-1), { type: "link_skip", seq: 9 });
+
+  socket().deliver({ type: "link_skip", from: "child", seq: 9 });
+  assert.deepEqual(skips, [{ from: "child", seq: 9 }]);
+});
+
+test("a skip reaches the other tab directly, like every other link message", () => {
+  const local = new FakeLocalChannel();
+  const skips = [];
+  const { connection, socket } = connect({
+    openLocal: () => local,
+    onLinkSkip: (from, seq) => skips.push({ from, seq }),
+  });
+  socket().accept();
+  socket().deliver({
+    type: "welcome",
+    room: "BCDFG",
+    you: "parent",
+    members: [
+      { id: "parent", name: "Ada", seat: 0 },
+      { id: "child", name: "Bea", seat: 1 },
+    ],
+  });
+  local.deliver({ type: "hello", from: "child", reply: false });
+
+  const serverBefore = socket().sent.length;
+  connection.publishLinkSkip(9);
+  assert.equal(socket().sent.length, serverBefore, "the relay should be bypassed");
+
+  // Without this the same-machine path would drop skips and a child that bowed
+  // out would still be waited on for the full timeout — the exact stall the
+  // message exists to remove.
+  local.deliver({ type: "link_skip", from: "child", seq: 9 });
+  assert.deepEqual(skips, [{ from: "child", seq: 9 }]);
+});

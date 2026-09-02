@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tinyBird · Info</title>
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="What tinyBird's emulator does well, what is being worked on, and what is knowingly missing."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/console.css" />
+  </head>
+  <body>
+    <div class="rig">
+      <header class="bar">
+        <a class="bar__mark" href="/">
+          <span class="bar__glyph" aria-hidden="true"></span>
+          tinyBird
+        </a>
+        <nav class="bar__nav">
+          <a href="/">Home</a>
+          <a href="/play">Play</a>
+          <a class="is-current" href="/info" aria-current="page">Info</a>
+          <a href="/contact">Contact</a>
+        </nav>
+        <p class="bar__state" id="link-state" data-state="idle">
+          <span class="dot" aria-hidden="true"></span><span id="link-label">checking</span>
+        </p>
+
+        <!-- The account menu, built by account.js and the same on every
+             page. In the bar because it is checked rarely and read never. -->
+        <div class="account" id="account" hidden></div>
+      </header>
+
+      <main>
+        <section class="hero hero--slim">
+          <h1 class="hero__title">Where things stand</h1>
+          <p class="hero__lede">
+            An honest read-out rather than a feature list: what the emulator
+            does well, what is half-built, and what is knowingly missing. The
+            long versions live in the repository's
+            <code>docs/</code>; this is the short one.
+          </p>
+        </section>
+
+        <!-- Moved off the home page. Live state, read from this server:
+             the one section here that is not prose. -->
+        <section class="panel">
+          <p class="panel__eyebrow">
+            This server<span class="panel__note" id="storage-note">checking</span>
+          </p>
+          <p class="panel__lead" id="storage-lead">Reading your vault…</p>
+          <dl class="facts" id="storage-facts" hidden>
+            <div><dt>Vault</dt><dd id="storage-vault">—</dd></div>
+            <div><dt>ROMs</dt><dd id="storage-roms">—</dd></div>
+            <div><dt>BIOS</dt><dd id="storage-bios">—</dd></div>
+          </dl>
+          <p class="panel__foot">
+            Asset bytes come straight from the CDN; the API key stays on the
+            server and is only used to list the vault and store save states. A
+            missing BIOS is the difference between a correct picture and a
+            corrupt one, which is why it is on this list.
+          </p>
+        </section>
+
+        <!-- The crates, as a spec sheet. Same treatment the home page gives
+             the three surfaces: what each piece is, not what it promises. -->
+        <section class="panel">
+          <p class="panel__eyebrow">The pieces</p>
+          <dl class="roster">
+            <div>
+              <dt>tinybird-core</dt>
+              <dd>
+                CPU, bus, BIOS high-level emulation, DMA, timers, PPU, APU, save
+                types, savestates, link cable.
+              </dd>
+            </div>
+            <div>
+              <dt>tinybird-desktop</dt>
+              <dd>
+                Windowed runner: audio, keyboard and gamepad, battery saves,
+                quicksave, addon dashboard.
+              </dd>
+            </div>
+            <div>
+              <dt>tinybird-web</dt>
+              <dd>This server: the browser build, save vault, accounts, rooms.</dd>
+            </div>
+            <div>
+              <dt>tinybird-wasm</dt>
+              <dd>
+                The core as a WebAssembly module with a plain C ABI. No
+                <code>wasm-bindgen</code>.
+              </dd>
+            </div>
+            <div>
+              <dt>tinybird-addons</dt>
+              <dd>
+                The addon contract: schema, memory view, registry, manifests.
+                Addons are JSON, not code.
+              </dd>
+            </div>
+            <div>
+              <dt>tinybird-games</dt>
+              <dd>
+                Shipped addons: FireRed/LeafGreen, Final Fantasy Tactics
+                Advance, and a fallback that claims any cartridge.
+              </dd>
+            </div>
+            <div>
+              <dt>tinybird-probe</dt>
+              <dd>The address-finding tool: diffing, scanning, text search.</dd>
+            </div>
+          </dl>
+          <p class="panel__foot">
+            Roughly 650 Rust tests and 74 browser-module tests. CI builds and
+            tests the non-windowing crates, runs the GBA accuracy suite as a
+            gate, and builds the WebAssembly module.
+          </p>
+        </section>
+
+        <section class="panel">
+          <p class="panel__eyebrow">What it does well</p>
+          <ul class="track">
+            <li class="track__item" data-state="solid">
+              <p class="track__head"><span class="track__tag">Solid</span> Running commercial cartridges</p>
+              <p class="track__body">
+                Fire Red, Pokémon Pinball, Final Fantasy Tactics Advance, The
+                Minish Cap and Super Mario Advance 4 all boot, render and save.
+                Nothing outstanding on any of the five.
+              </p>
+            </li>
+            <li class="track__item" data-state="solid">
+              <p class="track__head"><span class="track__tag">Solid</span> One core, three surfaces</p>
+              <p class="track__body">
+                The desktop app, this browser build and the stream overlay run
+                the same emulator. Not three implementations kept in step — one,
+                compiled three ways.
+              </p>
+            </li>
+            <li class="track__item" data-state="solid">
+              <p class="track__head"><span class="track__tag">Solid</span> Reading a running game</p>
+              <p class="track__body">
+                Addons are JSON, not code. Move, species and item names are read
+                out of the cartridge by searching it for a known name, so they
+                are right for any build — ROM hacks included — rather than
+                depending on a table that matches one release.
+              </p>
+            </li>
+            <li class="track__item" data-state="solid">
+              <p class="track__head"><span class="track__tag">Solid</span> Saves that survive the browser</p>
+              <p class="track__body">
+                Battery saves and savestates, stored per account in a vault, and
+                claimable if they were made before you had an account.
+              </p>
+            </li>
+            <li class="track__item" data-state="solid">
+              <p class="track__head"><span class="track__tag">Solid</span> The link cable</p>
+              <p class="track__body">
+                The handshake completes, both players reach the same Trade
+                Center, and position data crosses in both directions — thousands
+                of transfers against zero for the control run.
+              </p>
+            </li>
+          </ul>
+        </section>
+
+        <section class="panel">
+          <p class="panel__eyebrow">Being worked on</p>
+          <ul class="track">
+            <li class="track__item" data-state="wip">
+              <p class="track__head"><span class="track__tag">In progress</span> Trading a Pokémon</p>
+              <p class="track__body">
+                The cable is done; the exchange is not. What is missing is the
+                button sequence that opens the trade menu — pressing a button on
+                an exact tile, which is a puppeteering problem rather than an
+                emulation one. The harness now proves no exchange happens rather
+                than leaving it to a filmstrip: it reads both parties by their
+                unencrypted personality values and reports either way.
+              </p>
+            </li>
+            <li class="track__item" data-state="wip">
+              <p class="track__head"><span class="track__tag">In progress</span> Fast forward past 1.4×</p>
+              <p class="track__body">
+                A frame costs about 11.8 ms in the browser against a 16.74 ms
+                budget, so fast forward tops out near 1.4×. Batching the APU tick
+                bought 19% of that; the rest is CPU and PPU work that has not
+                been won yet.
+              </p>
+            </li>
+            <li class="track__item" data-state="wip">
+              <p class="track__head"><span class="track__tag">In progress</span> The stream overlay</p>
+              <p class="track__body">
+                Switched off on purpose. It still reads the desktop app's JSON
+                export rather than the emulator in the page beside it, so on a
+                server run by itself it shows a snapshot that never changes.
+                Nothing was deleted — <code>TINYBIRD_WEB_OVERLAY=1</code> brings
+                it back. Pointing it at the WebAssembly snapshot is what would
+                make it worth switching on again.
+              </p>
+            </li>
+          </ul>
+        </section>
+
+        <section class="panel">
+          <p class="panel__eyebrow">Known gaps</p>
+          <p class="panel__lead">
+            Listed because they are real, not because they are next. Each is
+            written up properly where it belongs in the repository.
+          </p>
+          <ul class="track">
+            <li class="track__item" data-state="gap">
+              <p class="track__head"><span class="track__tag">Gap</span> A vault URL is unlisted, not protected</p>
+              <p class="track__body">
+                Listings are scoped to the signed-in account, but anyone given a
+                screenshot's CDN URL can open it. The private path that
+                <code>/api/saves</code> uses has no equivalent for pictures yet.
+              </p>
+            </li>
+            <li class="track__item" data-state="gap">
+              <p class="track__head"><span class="track__tag">Gap</span> Screenshots cannot be deleted from the page</p>
+              <p class="track__body">
+                The gallery lists your own and opens one full size. Removing one
+                means removing it from the vault by hand.
+              </p>
+            </li>
+            <li class="track__item" data-state="gap">
+              <p class="track__head"><span class="track__tag">Gap</span> Some numbers are still compiled tables</p>
+              <p class="track__body">
+                PP and catch rates live in differently-shaped structures than
+                names do, and have not had the read-it-from-the-cartridge
+                treatment that made the names hack-proof.
+              </p>
+            </li>
+            <li class="track__item" data-state="gap">
+              <p class="track__head"><span class="track__tag">Gap</span> Gamepad axes beyond the left stick</p>
+              <p class="track__body">
+                A pad with only a right stick or a hat switch reports no
+                direction.
+              </p>
+            </li>
+            <li class="track__item" data-state="gap">
+              <p class="track__head"><span class="track__tag">Gap</span> Addons need a reload</p>
+              <p class="track__body">
+                Manifests are fetched once at boot and the registry is built on
+                first use, so changing one means reloading the page.
+              </p>
+            </li>
+            <li class="track__item" data-state="gap">
+              <p class="track__head"><span class="track__tag">Gap</span> Lint and format backlogs</p>
+              <p class="track__body">
+                <code>cargo clippy</code> runs in CI as reporting only, and there
+                is no <code>cargo fmt --check</code>, because the tree predates
+                both. The path to turning them on is in the CI workflow.
+              </p>
+            </li>
+          </ul>
+        </section>
+
+        <section class="panel">
+          <p class="panel__eyebrow">Run it yourself</p>
+          <p class="panel__lead">
+            Neither ROMs nor a BIOS dump are in the repository, and
+            <code>.gitignore</code> is set up to keep it that way.
+          </p>
+          <pre class="code"><code># Desktop
+cargo run --release -- roms/game.gba
+
+# This page, plus the overlay server
+rustup target add wasm32-unknown-unknown
+cargo build -p tinybird-wasm --target wasm32-unknown-unknown --release
+cargo run -p tinybird-web
+
+# Optional: point it at your asset vault
+cp .env.example .env   # then set TINYBIRD_MEDIA_KEY</code></pre>
+          <p class="panel__foot">
+            A BIOS dump at <code>gba_bios.bin</code> is optional for most games
+            and required for FireRed, which decompresses its graphics through
+            BIOS calls the high-level stand-ins do not cover well enough.
+          </p>
+        </section>
+
+        <section class="panel">
+          <p class="panel__eyebrow">Found something else?</p>
+          <p class="panel__lead">
+            A cartridge that renders wrong is worth reporting even if it is not
+            on this page — say which one, and whether a BIOS dump is in place.
+            <a href="/contact">The contact form</a> reaches a person.
+          </p>
+        </section>
+      </main>
+
+      <footer class="foot">
+        <span>tinyBird · MIT</span>
+        <span id="foot-msg"></span>
+      </footer>
+    </div>
+
+    <script type="module" src="/info.js"></script>
+  </body>
+</html>

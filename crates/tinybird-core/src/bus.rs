@@ -3,9 +3,10 @@
 //! The GBA bus connects the CPU to all memory regions and peripherals.
 //! It handles address decoding, wait states, and open bus behavior.
 
-use crate::eeprom::{Eeprom, LARGE_SIZE as EEPROM_LARGE_SIZE};
 use crate::debug::config as debug_config;
+use crate::eeprom::{Eeprom, LARGE_SIZE as EEPROM_LARGE_SIZE};
 use crate::memory_map::*;
+use crate::rtc::{Rtc, GPIO_CONTROL, GPIO_DATA, GPIO_DIRECTION};
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -270,6 +271,18 @@ pub struct SimpleBus {
     /// field belongs in a savestate: both are re-established by the next fetch.
     bios_opcode: Cell<u32>,
     executing_in_bios: Cell<bool>,
+    /// The cartridge clock, when the cartridge has one.
+    ///
+    /// Left out of the savestate deliberately. A real cartridge's clock keeps
+    /// its own time on its own battery whether or not the console is running,
+    /// so restoring a machine should not wind it back — and the host pushes the
+    /// time in anyway, which puts it right on the very next frame.
+    rtc: Rtc,
+    /// Whether this cartridge has a clock chip on it at all.
+    ///
+    /// Only the three games that carry one get the GPIO registers, so no other
+    /// cartridge can have its ROM shadowed by them.
+    has_rtc: bool,
     /// Serial EEPROM, when the cartridge has one.
     ///
     /// Behind a `RefCell` because clocking a bit out changes the chip's state,
@@ -355,12 +368,29 @@ impl Serialize for SimpleBus {
     }
 }
 
+/// Whether a cartridge image is one of the three with a clock chip on it.
+///
+/// Named by game code rather than probed, because there is nothing to probe:
+/// the GPIO pins on a board without the chip read as ROM, which is exactly
+/// what they read as here. Ruby, Sapphire and Emerald are the whole list for
+/// the Game Boy Advance's Pokemon line; Boktai's cartridges also carry one,
+/// along with a light sensor this does not emulate, so they are left out.
+fn cart_has_clock(rom: &[u8]) -> bool {
+    const GAME_CODE: usize = 0xAC;
+    let Some(code) = rom.get(GAME_CODE..GAME_CODE + 3) else {
+        return false;
+    };
+    matches!(code, b"AXV" | b"AXP" | b"BPE")
+}
+
 impl<'de> Deserialize<'de> for SimpleBus {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let helper = SimpleBusSerde::deserialize(deserializer)?;
+        // Read before the fields are moved out of the helper.
+        let rom_for_clock = helper.rom.clone();
         let mut eeprom = Eeprom::new();
         if matches!(helper.save_type, SaveType::Eeprom) {
             eeprom.load(&helper.save_memory);
@@ -402,6 +432,8 @@ impl<'de> Deserialize<'de> for SimpleBus {
             cpu_last_access: Cell::new(None),
             bios_opcode: Cell::new(0),
             executing_in_bios: Cell::new(true),
+            rtc: Rtc::new(),
+            has_rtc: cart_has_clock(&rom_for_clock),
             eeprom: RefCell::new(eeprom),
         })
     }
@@ -454,8 +486,12 @@ impl SimpleBus {
             cpu_last_access: Cell::new(None),
             bios_opcode: Cell::new(0),
             executing_in_bios: Cell::new(true),
+            rtc: Rtc::new(),
+            // Set from the cartridge just below, once it is in the struct.
+            has_rtc: false,
             eeprom: RefCell::new(Eeprom::new()),
         };
+        bus.has_rtc = cart_has_clock(&bus.rom);
         bus.detect_save_type();
         bus.init_bios_stub();
         bus
@@ -492,21 +528,21 @@ impl SimpleBus {
         // Each instruction stored little-endian
         let stub: &[(usize, u32)] = &[
             (0x00, HLE_STUB_OPCODE), // BX LR  (reset/null-fn: return to caller)
-            (0x04, 0xE12FFF1E), // BX LR  (undefined instruction stub)
-            (0x08, 0xE12FFF1E), // BX LR  (SWI stub — handled by HLE, never reached)
-            (0x0C, 0xE12FFF1E), // BX LR  (prefetch abort stub)
-            (0x10, 0xE12FFF1E), // BX LR  (data abort stub)
-            (0x14, 0xE12FFF1E), // BX LR  (reserved stub)
-            (0x18, 0xE92D500F), // STMFD SP!, {R0-R3, R12, LR}
-            (0x1C, 0xE3A00403), // MOV R0, #0x03000000
-            (0x20, 0xE2800C7F), // ADD R0, R0, #0x7F00
-            (0x24, 0xE59000FC), // LDR R0, [R0, #0xFC]
-            (0x28, 0xE3500000), // CMP R0, #0
-            (0x2C, 0x0A000001), // BEQ 0x38
-            (0x30, 0xE1A0E00F), // MOV LR, PC  (LR = 0x38)
-            (0x34, 0xE12FFF10), // BX R0
-            (0x38, 0xE8BD500F), // LDMFD SP!, {R0-R3, R12, LR}
-            (0x3C, 0xE25EF004), // SUBS PC, LR, #4
+            (0x04, 0xE12FFF1E),      // BX LR  (undefined instruction stub)
+            (0x08, 0xE12FFF1E),      // BX LR  (SWI stub — handled by HLE, never reached)
+            (0x0C, 0xE12FFF1E),      // BX LR  (prefetch abort stub)
+            (0x10, 0xE12FFF1E),      // BX LR  (data abort stub)
+            (0x14, 0xE12FFF1E),      // BX LR  (reserved stub)
+            (0x18, 0xE92D500F),      // STMFD SP!, {R0-R3, R12, LR}
+            (0x1C, 0xE3A00403),      // MOV R0, #0x03000000
+            (0x20, 0xE2800C7F),      // ADD R0, R0, #0x7F00
+            (0x24, 0xE59000FC),      // LDR R0, [R0, #0xFC]
+            (0x28, 0xE3500000),      // CMP R0, #0
+            (0x2C, 0x0A000001),      // BEQ 0x38
+            (0x30, 0xE1A0E00F),      // MOV LR, PC  (LR = 0x38)
+            (0x34, 0xE12FFF10),      // BX R0
+            (0x38, 0xE8BD500F),      // LDMFD SP!, {R0-R3, R12, LR}
+            (0x3C, 0xE25EF004),      // SUBS PC, LR, #4
         ];
         for &(addr, word) in stub {
             let bytes = word.to_le_bytes();
@@ -522,6 +558,8 @@ impl SimpleBus {
     /// hands the new one somebody else's data under its own save type.
     pub fn load_rom(&mut self, rom: Vec<u8>) {
         self.rom = rom;
+        self.has_rtc = cart_has_clock(&self.rom);
+        self.rtc = Rtc::new();
         self.detect_save_type();
         self.reset_save_state();
         self.save_memory = vec![0xFF; self.save_memory.len().max(REGION_SRAM_SIZE)];
@@ -546,6 +584,73 @@ impl SimpleBus {
     /// backup memory would throw away the progress being restored.
     pub fn restore_rom(&mut self, rom: Vec<u8>) {
         self.rom = rom;
+        self.has_rtc = cart_has_clock(&self.rom);
+    }
+
+    /// Tell the cartridge clock what the time is. See [`crate::rtc`].
+    pub fn set_wall_clock(&mut self, unix_seconds: i64) {
+        self.rtc.set_wall_clock(unix_seconds);
+    }
+
+    /// Carry the cartridge clock forward by cycles the machine has run.
+    pub fn step_rtc(&mut self, cycles: u64) {
+        if self.has_rtc {
+            self.rtc.step(cycles);
+        }
+    }
+
+    /// Whether this cartridge has a clock chip on it.
+    pub fn has_clock(&self) -> bool {
+        self.has_rtc
+    }
+
+    /// The clock register at this address, if the game has switched the
+    /// registers on.
+    ///
+    /// Reads are gated on the control register as well as on the cartridge:
+    /// until a game sets it, these three halfwords are the ROM underneath, and
+    /// a game that never asks never sees anything else. The `has_rtc` check
+    /// comes first and is one bool, so every other ROM read pays a branch that
+    /// is always false.
+    fn live_gpio_addr(&self, addr: u32) -> Option<u32> {
+        if !self.has_rtc || !self.rtc.registers_are_live() {
+            return None;
+        }
+        self.is_gpio_addr(addr & !1)
+    }
+
+    /// Whether an address is one of the clock's three registers.
+    ///
+    /// Checked against the cartridge offset, so it catches the mirrors too.
+    fn is_gpio_addr(&self, addr: u32) -> Option<u32> {
+        // The region check is not redundant. The cartridge offset of these
+        // registers is 0xC4..0xC8, and every region mirrors down to the same
+        // low offsets — EWRAM's 0x020000C4 masks to 0xC4 as readily as ROM's
+        // 0x080000C4 does. Only one of them is the clock.
+        if !self.has_rtc || !matches!(addr, REGION_ROM_START..=REGION_ROM_END) {
+            return None;
+        }
+        match addr & 0x01FF_FFFF {
+            GPIO_DATA => Some(GPIO_DATA),
+            GPIO_DIRECTION => Some(GPIO_DIRECTION),
+            GPIO_CONTROL => Some(GPIO_CONTROL),
+            _ => None,
+        }
+    }
+
+    /// Take the cartridge out.
+    ///
+    /// Not the same as loading an empty one: the save memory, the backup type
+    /// and the clock all belong to the cartridge that just left, and leaving
+    /// any of them behind would hand the next game somebody else's battery.
+    pub fn eject_rom(&mut self) {
+        self.rom = Vec::new();
+        self.has_rtc = false;
+        self.rtc = Rtc::new();
+        self.save_type = SaveType::None;
+        self.save_memory = vec![0xFF; REGION_SRAM_SIZE];
+        self.eeprom = RefCell::new(Eeprom::new());
+        self.reset_save_state();
     }
 
     /// Whether a cartridge is present.
@@ -1458,6 +1563,9 @@ impl Bus for SimpleBus {
             REGION_ROM_START..=REGION_ROM_END => {
                 if self.is_eeprom_addr(addr) {
                     self.eeprom_read()
+                } else if let Some(register) = self.live_gpio_addr(addr) {
+                    // The low byte of the halfword the chip presents.
+                    (self.rtc.read(register) >> ((addr & 1) * 8)) as u8
                 } else if let Some(idx) = self.rom_index(addr) {
                     self.rom[idx]
                 } else {
@@ -1526,6 +1634,8 @@ impl Bus for SimpleBus {
                 // the DMA that drives the chip actually takes.
                 if self.is_eeprom_addr(addr) {
                     self.eeprom_read() as u16
+                } else if let Some(register) = self.live_gpio_addr(addr) {
+                    self.rtc.read(register)
                 } else {
                     self.rom_read_u16(addr)
                 }
@@ -1661,9 +1771,7 @@ impl Bus for SimpleBus {
                 let idx = masked_addr as usize & !1;
                 u16::from_le_bytes([self.oam[idx], self.oam[idx + 1]])
             }
-            REGION_ROM_START..=REGION_ROM_END => {
-                self.rom_read_u16(addr)
-            }
+            REGION_ROM_START..=REGION_ROM_END => self.rom_read_u16(addr),
             REGION_SRAM_START..=REGION_SRAM_END => {
                 // The cartridge save bus is 8 bits wide, so a halfword access
                 // returns the single byte at that address repeated, not the
@@ -1677,7 +1785,8 @@ impl Bus for SimpleBus {
 
         if addr <= REGION_BIOS_END {
             // Thumb prefetches two halfwords ahead rather than two words.
-            self.bios_opcode.set(self.bios_word(masked_addr.wrapping_add(4)));
+            self.bios_opcode
+                .set(self.bios_word(masked_addr.wrapping_add(4)));
         }
         fetched
     }
@@ -1743,9 +1852,7 @@ impl Bus for SimpleBus {
                     self.oam[idx + 3],
                 ])
             }
-            REGION_ROM_START..=REGION_ROM_END => {
-                self.rom_read_u32(addr)
-            }
+            REGION_ROM_START..=REGION_ROM_END => self.rom_read_u32(addr),
             REGION_SRAM_START..=REGION_SRAM_END => {
                 // Same 8-bit bus: one byte, repeated across the word.
                 self.flash_read_u8(self.mask_address(addr)) as u32 * 0x0101_0101
@@ -1758,7 +1865,8 @@ impl Bus for SimpleBus {
             // instructions ahead of the one executing. This core fetches and
             // executes in one step, so the value is read from where the
             // prefetch would have been rather than from where it is.
-            self.bios_opcode.set(self.bios_word(masked_addr.wrapping_add(8)));
+            self.bios_opcode
+                .set(self.bios_word(masked_addr.wrapping_add(8)));
         }
         fetched
     }
@@ -1864,6 +1972,14 @@ impl Bus for SimpleBus {
                 "DMA{} {} write: addr={:08x} val={:04x}",
                 ch, name, addr, value
             );
+        }
+
+        // Before the region match: the clock's registers sit inside the ROM,
+        // which is otherwise read-only, and the control register is how a game
+        // switches the other two on — so this cannot be gated on them being on.
+        if let Some(register) = self.is_gpio_addr(addr & !1) {
+            self.rtc.write(register, value);
+            return;
         }
 
         match addr {
@@ -2122,6 +2238,86 @@ mod tests {
         assert_eq!(bus.read_u16(0x0400_0000), 0, "DISPCNT");
     }
 
+    /// A cartridge image with a game code at the header offset, filled with a
+    /// recognisable byte so ROM showing through is obvious.
+    fn cart(code: &[u8; 4]) -> Vec<u8> {
+        let mut rom = vec![0xAA; 0x200];
+        rom[0xAC..0xB0].copy_from_slice(code);
+        rom
+    }
+
+    /// Ejecting takes the cartridge's battery and clock with it.
+    ///
+    /// A cartridge left half out is worse than one left in: the next game
+    /// would boot onto somebody else's save memory and read it as its own.
+    #[test]
+    fn ejecting_leaves_nothing_of_the_cartridge_behind() {
+        let mut bus = SimpleBus::new(Some(cart(b"BPEE")));
+        bus.save_type = SaveType::Sram;
+        bus.write_u8(0x0E00_0000, 0x42);
+        assert!(bus.has_rom());
+        assert!(bus.has_clock());
+
+        bus.eject_rom();
+
+        assert!(!bus.has_rom());
+        assert!(!bus.has_clock(), "the clock belonged to the cartridge");
+        assert_eq!(bus.save_type, SaveType::None);
+        assert_eq!(
+            bus.read_u8(0x0E00_0000),
+            0xFF,
+            "and so did the battery, so the next game does not read it"
+        );
+    }
+
+    /// FireRed has no clock chip, so 0x080000C4 is cartridge and stays it.
+    #[test]
+    fn a_cartridge_without_a_clock_never_shadows_its_own_rom() {
+        let mut bus = SimpleBus::new(Some(cart(b"BPRE")));
+        assert!(!bus.has_clock());
+
+        // Even a game that wrote the control register would get nothing: there
+        // is no chip on the board to answer.
+        bus.write_u16(REGION_ROM_START + 0xC8, 1);
+        assert_eq!(bus.read_u16(REGION_ROM_START + 0xC4), 0xAAAA);
+    }
+
+    /// Emerald has one, but the registers stay invisible until it asks.
+    #[test]
+    fn a_clock_appears_only_once_the_game_switches_it_on() {
+        let mut bus = SimpleBus::new(Some(cart(b"BPEE")));
+        assert!(bus.has_clock());
+
+        assert_eq!(
+            bus.read_u16(REGION_ROM_START + 0xC4),
+            0xAAAA,
+            "before the control register is set these are still the cartridge"
+        );
+
+        bus.write_u16(REGION_ROM_START + 0xC8, 1);
+        assert_eq!(bus.read_u16(REGION_ROM_START + 0xC8), 1);
+        assert_eq!(
+            bus.read_u16(REGION_ROM_START + 0xC4),
+            0,
+            "and now they are the chip, whose pins are all low"
+        );
+    }
+
+    /// The registers are at cartridge offset 0xC4, and every region mirrors
+    /// down to the same low offsets. Only the cartridge's is the clock.
+    #[test]
+    fn the_clock_does_not_capture_the_same_offset_in_other_regions() {
+        let mut bus = SimpleBus::new(Some(cart(b"BPEE")));
+        bus.write_u16(REGION_ROM_START + 0xC8, 1);
+
+        bus.write_u16(REGION_EWRAM_START + 0xC4, 0x1234);
+        assert_eq!(
+            bus.read_u16(REGION_EWRAM_START + 0xC4),
+            0x1234,
+            "EWRAM at the mirrored offset is memory, not a clock register"
+        );
+    }
+
     /// A reset is not the same as pulling the cartridge out.
     #[test]
     fn reset_keeps_the_cartridge_and_its_battery() {
@@ -2133,7 +2329,11 @@ mod tests {
         bus.reset();
 
         assert_eq!(bus.read_u8(REGION_ROM_START), 0xAA, "ROM survives a reset");
-        assert_eq!(bus.read_u8(0x0E00_0000), 0x42, "battery save survives a reset");
+        assert_eq!(
+            bus.read_u8(0x0E00_0000),
+            0x42,
+            "battery save survives a reset"
+        );
     }
 
     /// A different cartridge brings its own battery.

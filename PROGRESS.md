@@ -2,6 +2,10 @@
 
 Last updated: 27 August 2026.
 
+This file is also the source for the site's `/info` page
+([`crates/tinybird-web/src/assets/info.html`](crates/tinybird-web/src/assets/info.html)),
+which is hand-kept in step with it — change one, change the other.
+
 This is the short version. The long versions live in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (emulator internals),
 [`docs/WEB.md`](docs/WEB.md) (the browser build and the site),
@@ -39,9 +43,14 @@ Each of these is written up where it belongs; this is the index.
   export rather than the emulator in the page beside it, so on a server run by
   itself it shows a snapshot that never changes. `TINYBIRD_WEB_OVERLAY=1`
   re-enables it. ([WEB.md](docs/WEB.md))
-- **Screenshots cannot be deleted from the page.** The `Shots` pane lists what
-  is in the vault and opens one full size; removing one means removing it from
-  the vault by hand.
+- **Screenshots cannot be deleted from the page.** The `Shots` pane lists your
+  own and opens one full size; removing one means removing it from the vault by
+  hand.
+- **A vault URL is unlisted, not protected.** Listings are scoped to the
+  signed-in account, but anyone given a screenshot's CDN URL can open it. The
+  private-backend path `/api/saves` can use has no equivalent for pictures yet.
+  Screenshots taken before ownership existed carry no owner and appear in no
+  listing, but are still on public URLs.
 - **Frame throughput is the ceiling on fast forward.** A frame costs ~11.8ms in
   the browser against a 16.74ms budget, so fast forward tops out near 1.4x.
   Batching the APU tick bought 19% of that; the rest is CPU and PPU.

@@ -1,63 +1,27 @@
-// The home page shows real state rather than claims: whether storage is
-// configured and what is actually in the vault.
+// The home page is a landing page: one claim, the three places it holds, and
+// the way on. The live read-out it used to carry moved to /info, which is
+// where somebody checking their own install is looking.
+//
+// So there is one thing left for script to decide.
 
-const $ = (id) => document.getElementById(id);
+import { mountChrome } from "/chrome.js";
 
-async function report() {
-  const link = $("link-state");
-  const label = $("link-label");
-
-  let library = null;
-  let local = [];
+/**
+ * Show the contact signpost only if there is a form on the other end.
+ *
+ * The contact page says plainly when it is switched off, for somebody who
+ * arrives by URL or by the nav. But sending them there from a card promising
+ * to reach a person is a different thing, so this card waits to be told.
+ */
+async function signposts() {
   try {
-    const [libraryResponse, localResponse] = await Promise.all([
-      fetch("/api/library"),
-      fetch("/api/local"),
-    ]);
-    library = await libraryResponse.json();
-    local = (await localResponse.json()).assets ?? [];
+    const state = await (await fetch("/api/contact")).json();
+    document.getElementById("signpost-contact").hidden = !state.configured;
   } catch {
-    link.dataset.state = "error";
-    label.textContent = "server unreachable";
-    $("storage-note").textContent = "unreachable";
-    $("storage-lead").textContent = "The tinyBird server is not responding.";
-    return;
+    // Unreachable server: the header dot already says so, and a hidden card
+    // is the right failure here.
   }
-
-  link.dataset.state = "live";
-  label.textContent = "server up";
-
-  const romCount =
-    (library.assets ?? []).filter((a) => /\.(gba|bin|agb)$/i.test(a.name)).length +
-    local.length;
-
-  if (!library.configured) {
-    $("storage-note").textContent = "off";
-    $("storage-lead").textContent =
-      "No vault configured. Set TINYBIRD_MEDIA_KEY in .env to list and store assets on your media host.";
-  } else if (library.error) {
-    $("storage-note").textContent = "error";
-    $("storage-lead").textContent = library.error;
-  } else {
-    $("storage-note").textContent = "connected";
-    $("storage-lead").textContent =
-      "Your vault is reachable. ROMs listed here can be opened in the browser.";
-  }
-
-  // A missing BIOS is the difference between a correct picture and a corrupt
-  // one, so it belongs next to the storage state rather than buried.
-  let biosOk = false;
-  try {
-    biosOk = (await fetch("/bios", { method: "HEAD" })).ok;
-  } catch {
-    biosOk = false;
-  }
-
-  $("storage-facts").hidden = false;
-  $("storage-bios").textContent = biosOk ? "loaded" : "missing";
-  $("storage-vault").textContent = library.configured ? library.vault : "not configured";
-  $("storage-roms").textContent =
-    romCount === 0 ? "none found" : `${romCount} ready to play`;
 }
 
-report();
+mountChrome();
+signposts();

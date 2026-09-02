@@ -383,9 +383,19 @@ impl SpriteRenderer {
 
         // Handle affine transformation
         if sprite.is_affine() {
-            let render_x = sprite_x - ((width as i32 - orig_w as i32) / 2);
-            let render_y = sprite_y - ((height as i32 - orig_h as i32) / 2);
-            let local_y = scanline as i32 - render_y;
+            // X and Y are the top-left of the *bounding box*, which for a
+            // double-size OBJ is already the doubled one — the sampler below
+            // works in box coordinates and centres the texture inside them.
+            //
+            // Shifting the origin by half the extra size, as this did, put
+            // every double-size affine sprite half a sprite up and to the
+            // left: 32px each way on a 64x64. It also disagreed with
+            // `is_on_scanline`, which tests the box where the hardware puts
+            // it, so the rows that did get drawn sampled the wrong part of the
+            // texture. Ordinary affine sprites were unaffected, because for
+            // them the box is the sprite and the shift was zero.
+            let render_x = sprite_x;
+            let local_y = scanline as i32 - sprite_y;
             let (pa, pb, pc, pd) = self.read_affine_matrix(oam, sprite.affine_index);
             self.render_affine_sprite_pixels(
                 framebuffer,
@@ -986,6 +996,60 @@ mod tests {
         let sprite = ObjectAttribute::from_oam(&data).unwrap();
         assert_eq!(sprite.gfx_mode, 1);
         assert!(sprite.is_semi_transparent());
+    }
+
+    /// Build OAM for one 16x16 affine sprite, optionally double-size.
+    fn affine_oam(x: u16, y: u16, double: bool) -> Vec<u8> {
+        let mut oam = vec![0u8; OAM_COUNT * 8];
+        // attr0: y, rot/scale on (bit 8), double-size (bit 9), square, 16 colours.
+        let attr0 = (y & 0xFF) | (1 << 8) | if double { 1 << 9 } else { 0 };
+        // attr1: x, size 1 of a square shape is 16x16.
+        let attr1 = (x & 0x1FF) | (1 << 14);
+        oam[0..2].copy_from_slice(&attr0.to_le_bytes());
+        oam[2..4].copy_from_slice(&attr1.to_le_bytes());
+
+        // Affine matrix 0 = identity, in the attr3 slots of the first four
+        // entries: PA, PB, PC, PD at 8.8 fixed point.
+        for (slot, value) in [(0usize, 0x0100i16), (1, 0), (2, 0), (3, 0x0100)] {
+            let at = slot * 8 + 6;
+            oam[at..at + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        oam
+    }
+
+    /// The rows a sprite actually covers, by asking the scanline test.
+    fn covered_rows(oam: &[u8]) -> Vec<u16> {
+        let sprite = ObjectAttribute::from_oam(&oam[0..8]).expect("sprite");
+        (0..super::super::SCREEN_HEIGHT as u16)
+            .filter(|y| sprite.is_on_scanline(*y))
+            .collect()
+    }
+
+    /// X and Y are the top-left of the bounding box, and for a double-size
+    /// affine OBJ that box is the doubled one.
+    ///
+    /// The renderer used to shift its origin up and left by half the extra
+    /// size, which drew every double-size affine sprite half a sprite away
+    /// from where the hardware puts it — and disagreed with the scanline test,
+    /// which never moved. A 64x64 flash came out 32px up and 32px left.
+    #[test]
+    fn a_double_size_affine_sprite_occupies_the_box_the_hardware_gives_it() {
+        let plain = ObjectAttribute::from_oam(&affine_oam(40, 40, false)[0..8]).expect("sprite");
+        assert!(plain.is_affine());
+        assert!(!plain.double_size);
+        assert_eq!(plain.get_dimensions(), (16, 16));
+        assert_eq!(
+            covered_rows(&affine_oam(40, 40, false)),
+            (40..56).collect::<Vec<_>>()
+        );
+
+        let double = ObjectAttribute::from_oam(&affine_oam(40, 40, true)[0..8]).expect("sprite");
+        assert!(double.double_size);
+        assert_eq!(
+            covered_rows(&affine_oam(40, 40, true)),
+            (40..72).collect::<Vec<_>>(),
+            "the box starts at Y and is twice as tall, rather than starting half a sprite above it"
+        );
     }
 
     #[test]

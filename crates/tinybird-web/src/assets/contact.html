@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tinyBird · Contact</title>
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="Get in touch about tinyBird — a bug, a cartridge that renders wrong, or an addon you want."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/console.css" />
+  </head>
+  <body>
+    <div class="rig">
+      <header class="bar">
+        <a class="bar__mark" href="/">
+          <span class="bar__glyph" aria-hidden="true"></span>
+          tinyBird
+        </a>
+        <nav class="bar__nav">
+          <a href="/">Home</a>
+          <a href="/play">Play</a>
+          <a href="/info">Info</a>
+          <a class="is-current" href="/contact" aria-current="page">Contact</a>
+        </nav>
+        <p class="bar__state" id="link-state" data-state="idle">
+          <span class="dot" aria-hidden="true"></span><span id="link-label">checking</span>
+        </p>
+
+        <!-- The account menu, built by account.js and the same on every
+             page. In the bar because it is checked rarely and read never. -->
+        <div class="account" id="account" hidden></div>
+      </header>
+
+      <main>
+        <section class="hero hero--slim">
+          <h1 class="hero__title">Get in touch</h1>
+          <p class="hero__lede">
+            A cartridge that renders wrong, a save that will not load, an addon
+            you want written. This reaches a person, by email.
+          </p>
+        </section>
+
+        <!-- The panel is the page, so it is always drawn. What is inside it
+             depends on the server: a note when there is no key, a sign-in when
+             accounts are on and nobody is, and otherwise the form. -->
+        <section class="panel" id="contact-panel">
+          <p class="panel__eyebrow">
+            Message<span class="panel__note" id="contact-note"></span>
+          </p>
+
+          <p class="panel__lead" id="contact-off" hidden>
+            The contact form is switched off on this server. Whoever runs it can
+            turn it on by setting <code>TINYBIRD_CONTACT_KEY</code> in
+            <code>.env</code>. In the meantime the repository's issue tracker is
+            the way through.
+          </p>
+
+          <!-- The way to what was sent before. Hidden unless there is
+               something behind it: no key, no accounts, or nobody signed in
+               all mean the link would lead to a panel saying so. -->
+          <p class="contact__tickets" id="contact-tickets" hidden>
+            <a href="/support/tickets">Messages you have already sent</a>, and
+            whatever came back.
+          </p>
+
+          <!-- Shown instead of the form when accounts are configured and
+               nobody is signed in. Said up front rather than on submit:
+               finding out after writing a paragraph is the wrong time. The
+               sign-in itself is the account menu in the bar, the same one
+               every page carries — a second login box on this page would be
+               a second thing to keep in step for no reason. -->
+          <p class="contact__gate" id="contact-gate" hidden>
+            Sending a message needs an account — it is what the reply is
+            addressed to, and what stops the form becoming a relay for whoever
+            finds it. Sign in from the account menu, top right.
+          </p>
+
+          <form id="contact-form" class="contact" novalidate hidden>
+            <!-- Name is always asked for, signed in or not: a username is a
+                 handle, and the person answering a support message would
+                 rather have something to call you. It starts filled with the
+                 account's username, so leaving it alone is a valid answer.
+
+                 The address is different, and the email field goes away when
+                 signed in: it is where the reply lands, so it comes from the
+                 session and typing it would be typing something discarded. -->
+            <div class="contact__row">
+              <label class="contact__field">
+                <span>Name</span>
+                <input
+                  type="text"
+                  id="contact-name"
+                  autocomplete="name"
+                  maxlength="200"
+                  required
+                />
+              </label>
+              <label class="contact__field" id="contact-email-field">
+                <span>Email</span>
+                <input
+                  type="email"
+                  id="contact-email"
+                  autocomplete="email"
+                  maxlength="200"
+                  spellcheck="false"
+                  required
+                />
+              </label>
+            </div>
+            <p class="contact__as" id="contact-as" hidden></p>
+            <div class="contact__row">
+              <label class="contact__field">
+                <span>Subject</span>
+                <input type="text" id="contact-subject" maxlength="200" required />
+              </label>
+              <label class="contact__field contact__field--pick">
+                <span>About</span>
+                <select id="contact-category">
+                  <option value="support">Support</option>
+                  <option value="bug">Something is broken</option>
+                  <option value="feature">A request</option>
+                  <option value="other">Anything else</option>
+                </select>
+              </label>
+            </div>
+            <label class="contact__field">
+              <span>Message</span>
+              <textarea id="contact-message" rows="7" maxlength="4000" required></textarea>
+            </label>
+            <!-- The honeypot. A person never sees it, so anything in it came
+                 from a script filling every field it found. Positioned off
+                 screen rather than `hidden`, which the cruder scripts skip,
+                 and out of the tab order so a keyboard never lands in it. -->
+            <div class="contact__trap" aria-hidden="true">
+              <label>
+                Website
+                <input
+                  type="text"
+                  id="contact-website"
+                  name="website"
+                  tabindex="-1"
+                  autocomplete="off"
+                />
+              </label>
+            </div>
+            <div class="contact__send">
+              <button class="key key--slim" id="contact-send" type="submit">Send</button>
+              <p class="contact__hint" id="contact-hint">
+                Ten characters or more, so there is something to answer.
+              </p>
+            </div>
+          </form>
+
+          <p class="panel__foot">
+            The form key stays on the server, the same as the vault key. This
+            page posts to it and it talks to the contact service. One message a
+            minute, three an hour.
+          </p>
+        </section>
+
+        <section class="panel">
+          <p class="panel__eyebrow">Before you write</p>
+          <p class="panel__lead">
+            Two of the most common reports already have answers on the
+            <a href="/info">info page</a>: trading stops short of a Pokémon
+            actually changing hands, and the stream overlay is switched off on
+            purpose. Neither is a bug in your copy.
+          </p>
+          <p class="panel__foot">
+            A ROM that renders wrong is worth reporting either way — say which
+            cartridge and whether <code>gba_bios.bin</code> is in place, because
+            a missing BIOS dump accounts for most of them.
+          </p>
+        </section>
+      </main>
+
+      <footer class="foot">
+        <span>tinyBird · MIT</span>
+        <span id="foot-msg"></span>
+      </footer>
+    </div>
+
+    <script type="module" src="/contact.js"></script>
+  </body>
+</html>

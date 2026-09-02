@@ -8,7 +8,7 @@ data. tinyBird ships three:
 | Addon | Game | Reports |
 |---|---|---|
 | `pokemon_frlg_party` | Pokemon FireRed / LeafGreen | party, area encounters, active battle |
-| `ffta_clan` | Final Fantasy Tactics Advance (USA) | player name, unit HP/MP |
+| `ffta_clan` | Final Fantasy Tactics Advance (USA) | full clan with race/job portraits out of battle; deployed party with live fight HP/MP in battle |
 | `cartridge` | anything | ROM header, region, checksum, boot logo |
 
 `cartridge` is registered last and claims every ROM, so a game nobody has

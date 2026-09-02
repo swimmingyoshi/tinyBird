@@ -36,9 +36,9 @@ use std::ptr::addr_of_mut;
 
 // `Bus` is needed for the register read and write below; the rest of this
 // module works through `Gba` and never touches memory directly.
+use tinybird_addons::ManifestAddon;
 use tinybird_core::bus::Bus;
 use tinybird_core::{Gba, GbaButton, GbaState};
-use tinybird_addons::ManifestAddon;
 use tinybird_games::{capture_stream_snapshot, snapshot_to_json};
 
 /// GBA screen width in pixels.
@@ -316,6 +316,64 @@ pub extern "C" fn tb_reset() -> i32 {
                 TB_OK
             }
             None => TB_ERR_NOT_INITIALISED,
+        }
+    }
+}
+
+/// Take the cartridge out.
+///
+/// Distinct from a reset, which restarts the game that is in. After this there
+/// is no game in, and everything the cartridge brought with it — its save
+/// memory, its backup type, its clock — has gone with it.
+#[no_mangle]
+pub extern "C" fn tb_eject() -> i32 {
+    unsafe {
+        match emulator() {
+            Some(emu) => {
+                emu.gba.eject();
+                TB_OK
+            }
+            None => TB_ERR_NOT_INITIALISED,
+        }
+    }
+}
+
+/// 1 while a cartridge is in the machine.
+#[no_mangle]
+pub extern "C" fn tb_has_rom() -> i32 {
+    unsafe {
+        match emulator() {
+            Some(emu) => i32::from(emu.gba.bus.has_rom()),
+            None => 0,
+        }
+    }
+}
+
+/// Tell the cartridge clock what the time is, in seconds since the epoch.
+///
+/// The core cannot ask: `SystemTime::now` panics on this target. Only Ruby,
+/// Sapphire and Emerald have a clock to tell, so on anything else this is a
+/// no-op and the page need not care which game is loaded.
+#[no_mangle]
+pub extern "C" fn tb_set_wall_clock(unix_seconds: f64) -> i32 {
+    unsafe {
+        match emulator() {
+            Some(emu) => {
+                emu.gba.set_wall_clock(unix_seconds as i64);
+                TB_OK
+            }
+            None => TB_ERR_NOT_INITIALISED,
+        }
+    }
+}
+
+/// 1 when the cartridge in the machine has a clock chip on it.
+#[no_mangle]
+pub extern "C" fn tb_has_cartridge_clock() -> i32 {
+    unsafe {
+        match emulator() {
+            Some(emu) => i32::from(emu.gba.has_cartridge_clock()),
+            None => 0,
         }
     }
 }

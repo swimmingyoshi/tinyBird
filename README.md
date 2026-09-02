@@ -151,7 +151,7 @@ data.
 | Addon | Game | Reports |
 |---|---|---|
 | `pokemon_frlg_party` | Pokemon FireRed / LeafGreen | party, area encounters, active battle |
-| `ffta_clan` | Final Fantasy Tactics Advance (USA) | player name, unit HP/MP |
+| `ffta_clan` | Final Fantasy Tactics Advance (USA) | full clan with race/job portraits out of battle; deployed party with live fight HP/MP in battle |
 | `cartridge` | any ROM | header, region, maker, checksum, boot logo |
 
 The `cartridge` addon claims every ROM and runs last, so an unrecognised game
@@ -236,6 +236,24 @@ a key everything still works from local files.
 **Vault reads are public to anyone with the URL.** That is the right trade for
 save states and artwork; the local `roms/` folder exists for anything you would
 rather not publish.
+
+### Contact form
+
+Optional. Backed by the [0xstash contact API](https://contact.0xstash.dev/api/help).
+
+```bash
+cp .env.example .env    # then set TINYBIRD_CONTACT_KEY
+```
+
+Adds a "get in touch" panel to the home page. Without a key the panel stays
+hidden, because a form that cannot send is worse than no form. The key stays on
+the server: the page posts to `/api/contact` and the server talks to the
+service, the same arrangement as the vault key above.
+
+With accounts configured, sending requires signing in — the account menu is in
+the bar on every page — and the reply address comes from the session rather than
+the form. The name is still asked for, prefilled with the account's username.
+Each account gets three messages an hour with a minute between them.
 
 ## Web Overlay
 

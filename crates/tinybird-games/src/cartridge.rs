@@ -57,6 +57,11 @@ impl GameAddon<AddonData> for CartridgeAddon {
             field("Region", rom.region_name()),
             field("Maker", maker_label(&rom.maker_code)),
             field("Revision", &format!("{}", rom.revision)),
+            // Which build this is, where the five rows above only say which
+            // game. A ROM hack matches its base game in every one of them, so
+            // this is the only row on the panel that would tell two apart.
+            field("Dump", &format!("{:016x}", rom.fingerprint))
+                .with_hint("a hash of bytes sampled across the cartridge"),
         ];
 
         // Two integrity checks the real hardware also makes. Toning them means
@@ -87,15 +92,19 @@ impl GameAddon<AddonData> for CartridgeAddon {
         let sections = vec![
             AddonSection::key_value("cartridge", "Cartridge", fields)
                 .with_note("Read from the 192-byte ROM header"),
-            // This addon cannot tell "no addon exists" from "the addon has
-            // nothing yet", so the wording covers both and points at the view
-            // that does know.
+            // Named, because "no game data" beside a game that is plainly
+            // running reads as a fault. It is not: nothing here has failed,
+            // there is simply no addon that knows how to read this cartridge.
+            //
+            // The pointer that used to be here named a desktop menu. This
+            // addon is drawn by the web page and the stream overlay too, and
+            // neither has a Tools menu to send anyone to.
             AddonSection::list(
                 "addon_status",
                 "Addon",
                 vec![
-                    "No game data available yet.".to_string(),
-                    "See Tools > Addon Status.".to_string(),
+                    format!("Nothing reads {title} yet, so the header above is all there is."),
+                    "The game itself runs normally; only the live read-out is missing.".to_string(),
                 ],
             )
             .with_note("No game-specific addon claimed this ROM"),
@@ -182,6 +191,8 @@ mod tests {
             game_code: code.to_string(),
             maker_code: "01".to_string(),
             revision: 0,
+            // Not a real dump; nothing here reads the fingerprint.
+            fingerprint: 0,
         }
     }
 
@@ -227,7 +238,9 @@ mod tests {
     fn it_reports_the_header_fields() {
         let memory = SparseMemory::new().with_rom_header("FFTA_USVER.", "AFXE", "01", 2);
         let identity = read_rom_identity(&memory).expect("header");
-        let snapshot = CartridgeAddon.snapshot(&memory, &identity).expect("snapshot");
+        let snapshot = CartridgeAddon
+            .snapshot(&memory, &identity)
+            .expect("snapshot");
         let cartridge = sections_of(&snapshot, "cartridge");
 
         assert_eq!(value_of(&cartridge, "Title"), "FFTA_USVER.");
@@ -241,17 +254,27 @@ mod tests {
     fn an_untitled_rom_is_labelled_rather_than_left_blank() {
         let memory = SparseMemory::new().with_rom_header("", "ZZZE", "", 0);
         let identity = read_rom_identity(&memory).expect("game code alone is enough");
-        let snapshot = CartridgeAddon.snapshot(&memory, &identity).expect("snapshot");
+        let snapshot = CartridgeAddon
+            .snapshot(&memory, &identity)
+            .expect("snapshot");
 
-        assert_eq!(value_of(&sections_of(&snapshot, "cartridge"), "Title"), "(untitled)");
-        assert_eq!(value_of(&sections_of(&snapshot, "cartridge"), "Maker"), "(none)");
+        assert_eq!(
+            value_of(&sections_of(&snapshot, "cartridge"), "Title"),
+            "(untitled)"
+        );
+        assert_eq!(
+            value_of(&sections_of(&snapshot, "cartridge"), "Maker"),
+            "(none)"
+        );
     }
 
     #[test]
     fn a_missing_boot_logo_is_reported() {
         let memory = SparseMemory::new().with_rom_header("HOMEBREW", "ZZZE", "01", 0);
         let identity = read_rom_identity(&memory).expect("header");
-        let snapshot = CartridgeAddon.snapshot(&memory, &identity).expect("snapshot");
+        let snapshot = CartridgeAddon
+            .snapshot(&memory, &identity)
+            .expect("snapshot");
 
         assert_eq!(
             value_of(&sections_of(&snapshot, "cartridge"), "Boot Logo"),
@@ -265,7 +288,9 @@ mod tests {
             .with_rom_header("REAL GAME", "ZZZE", "01", 0)
             .with(ROM_BASE + HEADER_LOGO, LOGO_SIGNATURE.to_vec());
         let identity = read_rom_identity(&memory).expect("header");
-        let snapshot = CartridgeAddon.snapshot(&memory, &identity).expect("snapshot");
+        let snapshot = CartridgeAddon
+            .snapshot(&memory, &identity)
+            .expect("snapshot");
 
         assert_eq!(
             value_of(&sections_of(&snapshot, "cartridge"), "Boot Logo"),
@@ -282,7 +307,9 @@ mod tests {
         memory.write(ROM_BASE + HEADER_CHECKSUM, vec![expected]);
 
         let identity = read_rom_identity(&memory).expect("header");
-        let snapshot = CartridgeAddon.snapshot(&memory, &identity).expect("snapshot");
+        let snapshot = CartridgeAddon
+            .snapshot(&memory, &identity)
+            .expect("snapshot");
         assert_eq!(
             value_of(&sections_of(&snapshot, "cartridge"), "Header"),
             "valid"
@@ -296,7 +323,9 @@ mod tests {
         memory.write(ROM_BASE + HEADER_CHECKSUM, vec![wrong]);
 
         let identity = read_rom_identity(&memory).expect("header");
-        let snapshot = CartridgeAddon.snapshot(&memory, &identity).expect("snapshot");
+        let snapshot = CartridgeAddon
+            .snapshot(&memory, &identity)
+            .expect("snapshot");
         assert_eq!(
             value_of(&sections_of(&snapshot, "cartridge"), "Header"),
             "checksum mismatch"
@@ -307,7 +336,9 @@ mod tests {
     fn the_payload_is_generic_so_the_dashboard_uses_the_section_renderer() {
         let memory = SparseMemory::new().with_rom_header("ANY", "ZZZE", "01", 0);
         let identity = read_rom_identity(&memory).expect("header");
-        let snapshot = CartridgeAddon.snapshot(&memory, &identity).expect("snapshot");
+        let snapshot = CartridgeAddon
+            .snapshot(&memory, &identity)
+            .expect("snapshot");
         assert_eq!(snapshot.data, AddonData::Generic);
     }
 }

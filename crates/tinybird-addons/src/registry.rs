@@ -32,6 +32,14 @@ pub struct RomIdentity {
     pub game_code: String,
     pub maker_code: String,
     pub revision: u8,
+    /// Which dump of the game this is. See [`rom_fingerprint`].
+    ///
+    /// The four fields above all come from the 192-byte header, and a ROM hack
+    /// inherits every one of them from whatever it was built on: Pokemon Ultra
+    /// Violet reports itself as `BPRE`, "POKEMON FIRE", maker 01, revision 0,
+    /// in 16MB — the same as the original, in every field a header has. An
+    /// addon that hardcodes addresses or tables needs to know the difference.
+    pub fingerprint: u64,
 }
 
 impl RomIdentity {
@@ -83,7 +91,41 @@ pub fn read_rom_identity(memory: &dyn MemoryView) -> Option<RomIdentity> {
         game_code,
         maker_code: read_ascii(memory, ROM_BASE + HEADER_MAKER_CODE, HEADER_MAKER_CODE_LEN),
         revision: memory.read_u8(ROM_BASE + HEADER_REVISION),
+        fingerprint: rom_fingerprint(memory),
     })
+}
+
+/// Where the fingerprint looks, and how much it reads at each place.
+///
+/// The stride is prime so the probes do not fall in step with the structures
+/// they are sampling, and 256 of them reach 15MB — inside every 16MB
+/// cartridge, which is what every Generation 3 Pokemon game is.
+const FINGERPRINT_PROBES: u32 = 256;
+const FINGERPRINT_STRIDE: u32 = 61441;
+const FINGERPRINT_START: u32 = 0x1000;
+const FINGERPRINT_WIDTH: usize = 16;
+
+/// A cheap hash of bytes scattered through the cartridge, identifying the dump.
+///
+/// Deliberately not a checksum of the whole ROM: 16MB read through the bus,
+/// several times a second, is not a thing to spend on a label. Four kilobytes
+/// sampled across the image is enough for the one question this answers —
+/// which build is loaded — because the header cannot answer it and two builds
+/// of the same game differ in far more than 4KB.
+///
+/// Two dumps differing only past 15MB would collide. No Generation 3 cartridge
+/// does. Cartridges smaller than that read open bus for the probes past their
+/// end, which is stable for a given image and so still identifies it.
+fn rom_fingerprint(memory: &dyn MemoryView) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for probe in 0..FINGERPRINT_PROBES {
+        let at = ROM_BASE + FINGERPRINT_START + probe * FINGERPRINT_STRIDE;
+        for byte in memory.read_bytes(at, FINGERPRINT_WIDTH) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
 }
 
 /// Static metadata describing an addon.
@@ -168,10 +210,9 @@ impl<T> Detection<T> {
                     )
                 }
             }
-            Detection::Idle { info } => format!(
-                "{} matched but has no data yet",
-                info.display_name
-            ),
+            Detection::Idle { info } => {
+                format!("{} matched but has no data yet", info.display_name)
+            }
             Detection::Unsupported => "No addon claims this ROM".to_string(),
         }
     }
@@ -265,6 +306,8 @@ mod tests {
             game_code: "AFXE".to_string(),
             maker_code: "01".to_string(),
             revision: 0,
+            // Not a real dump; nothing here reads the fingerprint.
+            fingerprint: 0,
         }
     }
 
@@ -290,7 +333,11 @@ mod tests {
             rom.code_prefix() == self.prefix
         }
 
-        fn snapshot(&self, _memory: &dyn MemoryView, _rom: &RomIdentity) -> Option<AddonSnapshot<u32>> {
+        fn snapshot(
+            &self,
+            _memory: &dyn MemoryView,
+            _rom: &RomIdentity,
+        ) -> Option<AddonSnapshot<u32>> {
             self.yields_data
                 .then(|| AddonSnapshot::new(self.id, self.id, Vec::new(), 7))
         }

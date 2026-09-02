@@ -152,7 +152,6 @@ impl Sessions {
             }
         }
     }
-
 }
 
 /// Why an auth operation failed, in terms the UI can act on.
@@ -268,9 +267,10 @@ fn now_plus(seconds: u64) -> SystemTime {
 /// The service reports an absolute epoch time; falling back to a short window
 /// keeps a surprising shape from producing a token we believe in forever.
 fn expiry_from(value: &serde_json::Value) -> SystemTime {
-    let seconds = value
-        .get("expiresAt")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+    let seconds = value.get("expiresAt").and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    });
 
     match seconds {
         // Tolerate milliseconds as well as seconds.
@@ -328,7 +328,9 @@ pub fn parse_claims(value: &serde_json::Value, project: &str) -> Result<Claims, 
         return Err(reject("That session is no longer active."));
     }
 
-    let claims = value.get("claims").ok_or_else(|| reject("Malformed token."))?;
+    let claims = value
+        .get("claims")
+        .ok_or_else(|| reject("Malformed token."))?;
     let text = |key: &str| {
         claims
             .get(key)
@@ -457,14 +459,60 @@ pub async fn current_user(
     sessions: &Sessions,
     session_id: Option<&str>,
 ) -> Result<User, AuthError> {
+    current_session(config, sessions, session_id)
+        .await
+        .map(|(user, _)| user)
+}
+
+/// The signed-in user *and* a usable access token for them.
+///
+/// The token is what the contact service introspects to decide whose tickets a
+/// request may read, so anything calling another 0xstash service on a person's
+/// behalf needs it. It stays on this side of the wire: handlers pass it
+/// straight to the service and never put it in a response, which is what keeps
+/// it out of `localStorage`, out of URLs, and out of anything the page can
+/// read. Same reason the session id is `HttpOnly`.
+pub async fn current_session(
+    config: &AuthConfig,
+    sessions: &Sessions,
+    session_id: Option<&str>,
+) -> Result<(User, String), AuthError> {
     let id = session_id.ok_or(AuthError::NoSession)?;
     let session = sessions.get(id).ok_or(AuthError::NoSession)?;
 
     if SystemTime::now() + REFRESH_MARGIN < session.access_expires_at {
-        return Ok(session.user);
+        return Ok((session.user, session.access_token));
     }
 
-    match refresh(config, &session).await {
+    renew(config, sessions, id, &session).await
+}
+
+/// Force a new access token for a session, whatever the stored one's clock says.
+///
+/// For the one case the expiry cannot answer: the service refused a token this
+/// server still believed in. That happens when a token is revoked early, or
+/// when the clocks disagree by more than [`REFRESH_MARGIN`]. Callers use it
+/// once and then give up — see the retry rule in [`crate::contact`].
+pub async fn renew_access_token(
+    config: &AuthConfig,
+    sessions: &Sessions,
+    session_id: Option<&str>,
+) -> Result<String, AuthError> {
+    let id = session_id.ok_or(AuthError::NoSession)?;
+    let session = sessions.get(id).ok_or(AuthError::NoSession)?;
+    renew(config, sessions, id, &session)
+        .await
+        .map(|(_, token)| token)
+}
+
+/// Refresh one session and store what comes back.
+async fn renew(
+    config: &AuthConfig,
+    sessions: &Sessions,
+    id: &str,
+    session: &Session,
+) -> Result<(User, String), AuthError> {
+    match refresh(config, session).await {
         Ok(mut fresh) => {
             // Re-introspect the new token rather than carrying the old user
             // forward. A refresh only proves the browser still holds the
@@ -487,8 +535,9 @@ pub async fn current_user(
                 }
             }
             let user = fresh.user.clone();
+            let token = fresh.access_token.clone();
             sessions.update(id, fresh);
-            Ok(user)
+            Ok((user, token))
         }
         Err(err) => {
             // A refresh that fails is a session that is over; leaving it in the
@@ -609,16 +658,22 @@ mod tests {
 
     #[test]
     fn a_live_token_for_this_project_is_accepted() {
-        let claims = parse_claims(&claims_json(true, "abc-123", "tinybird", "tinybird"), "tinybird")
-            .expect("should be accepted");
+        let claims = parse_claims(
+            &claims_json(true, "abc-123", "tinybird", "tinybird"),
+            "tinybird",
+        )
+        .expect("should be accepted");
         assert_eq!(claims.sub, "abc-123");
         assert_eq!(claims.role, "user");
     }
 
     #[test]
     fn an_inactive_token_is_refused() {
-        let err = parse_claims(&claims_json(false, "abc", "tinybird", "tinybird"), "tinybird")
-            .unwrap_err();
+        let err = parse_claims(
+            &claims_json(false, "abc", "tinybird", "tinybird"),
+            "tinybird",
+        )
+        .unwrap_err();
         assert_eq!(err.status(), 401);
     }
 
@@ -626,8 +681,16 @@ mod tests {
     /// not be able to own saves here.
     #[test]
     fn a_token_from_another_project_is_refused() {
-        assert!(parse_claims(&claims_json(true, "abc", "someone-else", "tinybird"), "tinybird").is_err());
-        assert!(parse_claims(&claims_json(true, "abc", "tinybird", "someone-else"), "tinybird").is_err());
+        assert!(parse_claims(
+            &claims_json(true, "abc", "someone-else", "tinybird"),
+            "tinybird"
+        )
+        .is_err());
+        assert!(parse_claims(
+            &claims_json(true, "abc", "tinybird", "someone-else"),
+            "tinybird"
+        )
+        .is_err());
     }
 
     #[test]
@@ -653,7 +716,10 @@ mod tests {
     #[test]
     fn the_session_cookie_is_read_back_from_a_header() {
         let header = format!("theme=dark; {SESSION_COOKIE}=abc123; other=1");
-        assert_eq!(session_from_cookies(Some(&header)), Some("abc123".to_string()));
+        assert_eq!(
+            session_from_cookies(Some(&header)),
+            Some("abc123".to_string())
+        );
         assert_eq!(session_from_cookies(Some("theme=dark")), None);
         assert_eq!(session_from_cookies(None), None);
     }
@@ -688,7 +754,10 @@ mod tests {
     fn an_error_body_is_read_whatever_shape_it_takes() {
         assert_eq!(error_message(r#"{"detail":"nope"}"#, 400), "nope");
         assert_eq!(error_message(r#"{"message":"nope"}"#, 400), "nope");
-        assert_eq!(error_message(r#"{"detail":{"message":"deep"}}"#, 400), "deep");
+        assert_eq!(
+            error_message(r#"{"detail":{"message":"deep"}}"#, 400),
+            "deep"
+        );
         // No body: fall back to something a person can act on.
         assert!(error_message("", 409).contains("already registered"));
         assert!(error_message("", 403).contains("Registration is closed"));
@@ -712,8 +781,14 @@ mod tests {
         sessions.insert("one".into(), make("t1", "r=1"));
         sessions.insert("two".into(), make("t2", "r=2"));
 
-        assert_eq!(sessions.get("one").unwrap().cookies, vec!["r=1".to_string()]);
-        assert_eq!(sessions.get("two").unwrap().cookies, vec!["r=2".to_string()]);
+        assert_eq!(
+            sessions.get("one").unwrap().cookies,
+            vec!["r=1".to_string()]
+        );
+        assert_eq!(
+            sessions.get("two").unwrap().cookies,
+            vec!["r=2".to_string()]
+        );
 
         sessions.remove("one");
         assert!(sessions.get("one").is_none());

@@ -28,90 +28,18 @@
         <nav class="bar__nav">
           <a href="/">Home</a>
           <a class="is-current" href="/play" aria-current="page">Play</a>
+          <a href="/info">Info</a>
+          <a href="/contact">Contact</a>
         </nav>
         <p class="bar__state" id="link-state" data-state="idle">
           <span class="dot" aria-hidden="true"></span><span id="link-label">no cartridge</span>
         </p>
 
-        <!-- Account. In the bar rather than the rail: it is checked rarely and
-             read never, so it should cost no vertical space and should not
-             leave an email address on screen while someone is streaming. -->
-        <div class="account" id="account" hidden>
-          <button
-            class="account__toggle"
-            id="account-toggle"
-            type="button"
-            aria-expanded="false"
-            aria-controls="account-menu"
-          >
-            <span class="account__dot" aria-hidden="true"></span>
-            <span id="account-label">Sign in</span>
-          </button>
-
-          <div class="account__menu" id="account-menu" hidden>
-            <div id="account-in" hidden>
-              <p class="account__who" id="account-who">—</p>
-              <div class="account__row">
-                <button class="key key--slim" id="btn-signout" type="button">Sign out</button>
-                <button class="key key--slim" id="btn-claim" type="button" hidden>
-                  Claim old saves
-                </button>
-              </div>
-            </div>
-
-            <!-- One form, two modes. Signing in wants two fields; creating an
-                 account wants four, and showing all four to someone who just
-                 wants to sign in is how a login form starts feeling like
-                 paperwork. `data-mode` decides which are on screen. -->
-            <form id="account-form" class="account__form" data-mode="signin">
-              <label class="account__field account__field--new">
-                <span>Username</span>
-                <input
-                  type="text"
-                  id="account-username"
-                  autocomplete="nickname"
-                  maxlength="32"
-                  spellcheck="false"
-                />
-              </label>
-              <label class="account__field">
-                <span>Email</span>
-                <input type="email" id="account-email" autocomplete="username" required />
-              </label>
-              <label class="account__field">
-                <span>Password</span>
-                <input
-                  type="password"
-                  id="account-password"
-                  autocomplete="current-password"
-                  minlength="12"
-                  required
-                />
-              </label>
-              <label class="account__field account__field--new">
-                <span>Repeat password</span>
-                <input
-                  type="password"
-                  id="account-password2"
-                  autocomplete="new-password"
-                  minlength="12"
-                />
-              </label>
-              <div class="account__row">
-                <button class="key key--slim" id="btn-signin" type="submit">Sign in</button>
-                <button class="key key--slim" id="btn-signup" type="button">
-                  Create account
-                </button>
-                <button class="key key--slim" id="btn-signup-back" type="button" hidden>
-                  Back
-                </button>
-              </div>
-              <p class="account__hint" id="account-hint">
-                Saves are kept per account. 12 characters or more.
-              </p>
-            </form>
-          </div>
-        </div>
+        <!-- Account. In the bar rather than the rail: it is checked rarely
+             and read never, so it should cost no vertical space and should
+             not leave an email address on screen while someone is streaming.
+             The menu itself is built by account.js, which every page uses. -->
+        <div class="account" id="account" hidden></div>
       </header>
 
       <!-- Frame rate and the last thing that happened. Above the deck rather
@@ -195,6 +123,15 @@
                 </button>
                 <button
                   class="key"
+                  id="btn-eject"
+                  type="button"
+                  disabled
+                  title="Take the cartridge out and clear the machine"
+                >
+                  Eject
+                </button>
+                <button
+                  class="key"
                   id="btn-ff"
                   type="button"
                   disabled
@@ -229,9 +166,20 @@
                 >
                   Save to file
                 </button>
-                <label class="key key--file" title="Open a save state from this computer">
+                <!-- Starts disabled, like the buttons around it: a save
+                     state is a picture of a machine *around* a cartridge and
+                     does not carry one, so there is nothing to restore into
+                     until a ROM is in. A label cannot be `:disabled`, so the
+                     input inside it is what stops the click and the attribute
+                     is what makes it look stopped. -->
+                <label
+                  class="key key--file"
+                  id="load-state"
+                  data-disabled="true"
+                  title="Load a game first — a save state does not carry one"
+                >
                   Load from file
-                  <input type="file" id="file-state" accept=".state,.bin" hidden />
+                  <input type="file" id="file-state" accept=".state,.bin" hidden disabled />
                 </label>
                 <button
                   class="key"

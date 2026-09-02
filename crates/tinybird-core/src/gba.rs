@@ -782,7 +782,44 @@ impl Gba {
         // is not a bug anyone would enjoy finding.
         self.settle_audio();
 
-        self.total_cycles - start_cycles
+        let ran = self.total_cycles - start_cycles;
+        // The cartridge clock keeps its own time. A host that pushes the wall
+        // clock in every frame overrides this immediately; one that pushes
+        // once gets a clock that runs with the emulation, which is what a
+        // cartridge being fast forwarded should experience.
+        self.bus.step_rtc(ran);
+        ran
+    }
+
+    /// Take the cartridge out and stop the machine.
+    ///
+    /// A reset restarts the game that is in; this is the other thing — there is
+    /// no game in any more. Everything the cartridge brought with it goes with
+    /// it: its save memory, its backup type, its clock. The state is `Stopped`
+    /// rather than `Paused`, because paused is a game you can resume.
+    pub fn eject(&mut self) {
+        self.reset();
+        self.bus.eject_rom();
+        self.state = GbaState::Stopped;
+        self.ppu.framebuffer.clear();
+    }
+
+    /// Tell the cartridge clock what the time is, in seconds since the epoch.
+    ///
+    /// Only Ruby, Sapphire and Emerald have a clock to tell; on anything else
+    /// this does nothing. Call it as often as the host likes — every frame
+    /// keeps the cartridge on true wall-clock time, which is what berry growth
+    /// and the tides in Shoal Cave are counting.
+    ///
+    /// The core cannot read the clock itself: it runs on
+    /// `wasm32-unknown-unknown`, where `SystemTime::now` panics.
+    pub fn set_wall_clock(&mut self, unix_seconds: i64) {
+        self.bus.set_wall_clock(unix_seconds);
+    }
+
+    /// Whether the cartridge in the machine has a clock chip on it.
+    pub fn has_cartridge_clock(&self) -> bool {
+        self.bus.has_clock()
     }
 
     /// Run for one frame, stopping if the cartridge fails to reach a frame boundary.
@@ -808,7 +845,11 @@ impl Gba {
             }
         }
 
-        Some(self.total_cycles - start_cycles)
+        let ran = self.total_cycles - start_cycles;
+        // As in `run_frame`: the cartridge clock keeps its own time, and a
+        // host that never pushes the wall clock still gets a clock that runs.
+        self.bus.step_rtc(ran);
+        Some(ran)
     }
 
     /// Run for multiple frames
@@ -859,8 +900,7 @@ impl Gba {
             );
             return match version {
                 4 => {
-                    let mut state: Savestate =
-                        bincode::deserialize(&bytes[version_offset + 4..])?;
+                    let mut state: Savestate = bincode::deserialize(&bytes[version_offset + 4..])?;
                     // The state carries no cartridge, so it comes from the
                     // machine. Loading one without a game in is the one case
                     // this format cannot serve, and it is worth saying so
@@ -868,8 +908,7 @@ impl Gba {
                     let rom = self.bus.take_rom();
                     if rom.is_empty() {
                         return Err(Box::new(bincode::ErrorKind::Custom(
-                            "load the cartridge before restoring one of its savestates"
-                                .to_string(),
+                            "load the cartridge before restoring one of its savestates".to_string(),
                         )));
                     }
                     state.bus.restore_rom(rom);
@@ -1612,12 +1651,52 @@ impl Gba {
             return;
         }
 
-        if (self.pending_enabled_irq_bits() & mask) != 0 {
+        let pending = self.pending_enabled_irq_bits();
+
+        if (pending & mask) != 0 {
             self.consume_bios_intr_wait(mask);
             self.cpu.halted = false;
-        } else {
-            self.cpu.halted = true;
+            return;
         }
+
+        // Another interrupt is pending, and it is not the one being waited on.
+        //
+        // Hardware still runs its handler: `IntrWait` halts, *any* enabled
+        // interrupt wakes the CPU, the BIOS dispatcher calls the game's own
+        // handler, and only then does the wait look again at the flag it cares
+        // about. Re-halting here instead meant a game sitting in
+        // `VBlankIntrWait` could never service anything else.
+        //
+        // For a linked game that is fatal rather than slow: the serial
+        // interrupt is how a console reads what came off the cable, so a child
+        // that opened a menu which waits on VBlank stopped answering the cable
+        // entirely, and the game reported a communication error at once.
+        //
+        // The interrupt is *taken* here, not merely woken from. Clearing
+        // `halted` on its own would let the waiting thread run its next
+        // instruction — the one after `IntrWait` — so the wait would have
+        // returned without its flag ever being set. Entering the handler puts
+        // the program counter on the IRQ vector instead, which is where
+        // hardware puts it.
+        //
+        // Nothing spins. The handler acknowledges its interrupt, `IF` clears,
+        // and once it returns the gate finds nothing pending and halts again,
+        // which is what the hardware does between interrupts.
+        if pending != 0 {
+            let ime = self.bus.read_io_direct_u16(0x208);
+            if ime != 0 {
+                // `Cpu::irq` checks the I flag itself and does nothing when
+                // interrupts are masked, so a game inside a critical section
+                // still gets to finish it.
+                self.cpu.irq();
+                if self.cpu.registers.mode() == CpuMode::IRQ {
+                    self.cpu.halted = false;
+                    return;
+                }
+            }
+        }
+
+        self.cpu.halted = true;
     }
 
     fn current_hle_swi_comment(&self, pc: u32) -> Option<u8> {
@@ -1884,9 +1963,17 @@ mod tests {
 
         assert_eq!(gba.read_u16(0x0200_0000), 0, "EWRAM carried over");
         assert_eq!(gba.read_u16(0x0300_0000), 0, "IWRAM carried over");
-        assert_eq!(gba.read_u16(0x0600_0000), 0, "the old game is still on screen");
+        assert_eq!(
+            gba.read_u16(0x0600_0000),
+            0,
+            "the old game is still on screen"
+        );
         assert_eq!(gba.read_u16(0x0500_0000), 0, "palette carried over");
-        assert_eq!(gba.read_u16(0x0400_0000) & 0x0407, 0, "DISPCNT carried over");
+        assert_eq!(
+            gba.read_u16(0x0400_0000) & 0x0407,
+            0,
+            "DISPCNT carried over"
+        );
     }
 
     /// The same run of frames must produce the same machine, cold or switched.
@@ -1918,7 +2005,13 @@ mod tests {
         }
 
         assert_eq!(switched.pc(), cold.pc(), "CPU diverged after a ROM switch");
-        for addr in [0x0200_0000u32, 0x0300_0000, 0x0500_0000, 0x0600_0000, 0x0700_0000] {
+        for addr in [
+            0x0200_0000u32,
+            0x0300_0000,
+            0x0500_0000,
+            0x0600_0000,
+            0x0700_0000,
+        ] {
             assert_eq!(
                 switched.read_u16(addr),
                 cold.read_u16(addr),
@@ -2023,6 +2116,15 @@ mod tests {
         assert_eq!(gba.cpu.fetch_addr(), 0x0300_0008);
     }
 
+    /// A console with interrupts actually enabled: `IME` on and the CPSR I
+    /// flag clear. `IntrWait` does nothing useful without both, so a test that
+    /// leaves them out is testing a console that could never take an interrupt.
+    fn enable_interrupts(gba: &mut Gba) {
+        gba.bus.write_io_direct_u16(0x208, 1);
+        let cpsr = gba.cpu.registers.cpsr() & !(1 << 7);
+        gba.cpu.registers.set_cpsr(cpsr, false);
+    }
+
     #[test]
     fn test_intr_wait_ignores_unrelated_irq_bits() {
         let mut gba = Gba::new();
@@ -2039,6 +2141,7 @@ mod tests {
         gba.bus.write_u32(0x0300_0004, 0xE1A0_0000);
 
         gba.bus.write_io_direct_u16(0x200, 0x0009); // IE: VBlank + Timer0
+        enable_interrupts(&mut gba);
 
         gba.step();
 
@@ -2048,10 +2151,111 @@ mod tests {
         gba.request_irq(0x0008); // Timer0 only
         gba.step();
 
-        assert!(gba.cpu.halted);
+        // The wait is not satisfied: it is still outstanding, still waiting on
+        // VBlank, and it has not consumed Timer0's flag.
         assert_eq!(gba.bios_intr_wait_mask, Some(0x0001));
-        assert_eq!(gba.cpu.fetch_addr(), 0x0300_0004);
         assert_eq!(gba.bus.read_io_direct_u16(0x202) & 0x0008, 0x0008);
+
+        // But the console is awake, because Timer0's own handler has to run.
+        //
+        // This assertion used to be the opposite, and that was the bug. On
+        // hardware `IntrWait` halts and *any* enabled interrupt wakes the CPU:
+        // the BIOS dispatcher calls the game's handler, and only then does the
+        // wait look again at the flag it wants. Staying halted through an
+        // unrelated interrupt means its handler never runs at all.
+        //
+        // For a linked game that is fatal. The serial interrupt is how a
+        // console reads what came off the cable, so a game sitting in
+        // `VBlankIntrWait` — which is most menus — stopped answering the cable
+        // the moment it got there.
+        assert!(
+            !gba.cpu.halted,
+            "an unrelated interrupt still has a handler to run"
+        );
+    }
+
+    /// The link-cable case, which is what made the bug visible.
+    ///
+    /// A console waiting on VBlank has to keep servicing the cable, or the
+    /// game on the other end sees a partner that has stopped answering.
+    #[test]
+    fn a_serial_interrupt_is_serviced_while_waiting_for_vblank() {
+        const VBLANK: u16 = 0x0001;
+        const SERIAL: u16 = 0x0080;
+
+        let mut gba = Gba::new();
+        gba.start();
+
+        gba.cpu.set_thumb_mode(false);
+        gba.cpu.pipeline.set_fetch_addr(0x0300_0000);
+        gba.cpu.registers.set_pc(0x0300_0000);
+        gba.cpu.registers.set_reg(0, 0);
+        gba.cpu.registers.set_reg(1, u32::from(VBLANK));
+
+        // SWI 0x04 (IntrWait), then ARM NOP.
+        gba.bus.write_u32(0x0300_0000, 0xEF00_0004);
+        gba.bus.write_u32(0x0300_0004, 0xE1A0_0000);
+        gba.bus.write_io_direct_u16(0x200, VBLANK | SERIAL);
+        enable_interrupts(&mut gba);
+
+        gba.step();
+        assert!(gba.cpu.halted, "the wait starts by halting");
+
+        // The cable delivers, and the console has to wake up for it.
+        gba.request_irq(SERIAL);
+        gba.step();
+
+        assert!(
+            !gba.cpu.halted,
+            "a console that sleeps through the cable is a console the other end gives up on"
+        );
+
+        // In the handler, not back in the waiting thread. Merely waking would
+        // have run the instruction after `IntrWait`, which is the wait
+        // returning without its flag ever being set.
+        assert_eq!(gba.cpu.registers.mode(), CpuMode::IRQ);
+        // At the vector, having already run its first instruction — the step
+        // that took the interrupt also executed one. What matters is that it
+        // is here and not at 0x03000004, which is where the waiting thread
+        // would have carried on.
+        assert!(
+            (0x18..0x20).contains(&gba.cpu.fetch_addr()),
+            "expected the IRQ vector, got {:#x}",
+            gba.cpu.fetch_addr()
+        );
+
+        // And the wait itself is untouched: still outstanding, still on VBlank.
+        assert_eq!(gba.bios_intr_wait_mask, Some(VBLANK));
+        assert_eq!(gba.bus.read_io_direct_u16(0x202) & SERIAL, SERIAL);
+    }
+
+    /// With nothing pending at all, the wait still halts. Otherwise the fix
+    /// above would turn every `IntrWait` into a spin.
+    #[test]
+    fn an_intr_wait_with_nothing_pending_stays_halted() {
+        let mut gba = Gba::new();
+        gba.start();
+
+        gba.cpu.set_thumb_mode(false);
+        gba.cpu.pipeline.set_fetch_addr(0x0300_0000);
+        gba.cpu.registers.set_pc(0x0300_0000);
+        gba.cpu.registers.set_reg(0, 0);
+        gba.cpu.registers.set_reg(1, 0x0001);
+
+        gba.bus.write_u32(0x0300_0000, 0xEF00_0004);
+        gba.bus.write_u32(0x0300_0004, 0xE1A0_0000);
+        gba.bus.write_io_direct_u16(0x200, 0x0001);
+        enable_interrupts(&mut gba);
+
+        gba.step();
+        for _ in 0..8 {
+            gba.step();
+            assert!(
+                gba.cpu.halted,
+                "nothing is pending, so there is nothing to wake for"
+            );
+        }
+        assert_eq!(gba.bios_intr_wait_mask, Some(0x0001));
     }
 
     #[test]
@@ -2251,7 +2455,9 @@ mod tests {
         // the page and picks the game before restoring.
         let mut restored = Gba::new();
         restored.load_rom(cartridge(4 * 1024 * 1024));
-        restored.load_state_bytes(&bytes).expect("deserialize savestate");
+        restored
+            .load_state_bytes(&bytes)
+            .expect("deserialize savestate");
 
         assert_eq!(restored.read_u32(0x0300_0000), 0xFEED_FACE);
         assert_eq!(restored.speed, EmulationSpeed::Turbo);
@@ -2322,8 +2528,16 @@ mod tests {
         let mut consoles = vec![linked_console(0, 2, 0x1234), linked_console(1, 2, 0xABCD)];
 
         // Both know which end of the cable they are on before anything moves.
-        assert_eq!(consoles[0].bus.read_io_direct_u16(0x128) & 0x0004, 0, "parent");
-        assert_eq!(consoles[1].bus.read_io_direct_u16(0x128) & 0x0004, 4, "child");
+        assert_eq!(
+            consoles[0].bus.read_io_direct_u16(0x128) & 0x0004,
+            0,
+            "parent"
+        );
+        assert_eq!(
+            consoles[1].bus.read_io_direct_u16(0x128) & 0x0004,
+            4,
+            "child"
+        );
         assert_eq!(
             (consoles[1].bus.read_io_direct_u16(0x128) >> 4) & 0b11,
             1,
@@ -2686,7 +2900,10 @@ mod tests {
         run_until_idle(&mut consoles, 20_000);
 
         for console in consoles.iter() {
-            assert_eq!(console.bus.read_io_direct_u16(0x202) & crate::sio::IRQ_BIT, 0);
+            assert_eq!(
+                console.bus.read_io_direct_u16(0x202) & crate::sio::IRQ_BIT,
+                0
+            );
         }
     }
 
@@ -2780,7 +2997,10 @@ mod tests {
 
         console.bus.write_u16(SIOCNT_ADDR, MULTI_115200 | START);
         console.step();
-        assert!(!console.sio.busy(), "an unplugged console transfers nothing");
+        assert!(
+            !console.sio.busy(),
+            "an unplugged console transfers nothing"
+        );
     }
 
     /// States written before version 4 still have the cartridge inside them,
@@ -2798,7 +3018,9 @@ mod tests {
 
         // No cartridge in this machine: a version 3 state brought its own.
         let mut restored = Gba::new();
-        restored.load_state_bytes(&bytes).expect("deserialize v3 savestate");
+        restored
+            .load_state_bytes(&bytes)
+            .expect("deserialize v3 savestate");
 
         assert_eq!(restored.read_u32(0x0300_0000), 0x0BAD_F00D);
         assert_eq!(restored.read_u32(0x0800_00AC), u32::from_le_bytes(*b"BPRE"));
@@ -2884,4 +3106,3 @@ mod headless_tests {
         );
     }
 }
-

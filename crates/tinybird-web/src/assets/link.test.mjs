@@ -1,226 +1,213 @@
-// Two consoles on one cable, through the real WebAssembly ABI.
+// The lockstep session, without a browser.
 //
-// The core has its own link tests in Rust. These exist because the ABI is a
-// separate surface with its own way of being wrong — an argument in the wrong
-// order, a halfword truncated on the way through, a slot that should read as
-// absent arriving as zero — and because this is the exact code path the page
-// uses. Two module instances in one process is the cheapest honest stand-in
-// for two browsers: everything is real except the network.
+// What is worth testing here is the part that decides *whether* a frame may
+// run and *what it runs on*: the input ring, the delay, and the rule that a
+// transfer is carried between consoles rather than sent anywhere. The consoles
+// themselves are stand-ins — the real ones are WebAssembly and are covered by
+// the core's own tests.
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const WASM = fileURLToPath(
-  new URL("../../../../target/wasm32-unknown-unknown/release/tinybird_wasm.wasm", import.meta.url),
-);
+import { LinkSession, carryTransfer, delayForRoundTrip } from "./link.js";
 
-/** The registers a game writes to set up a link, and the values it writes. */
-const RCNT = 0x0400_0134;
-const SIOCNT = 0x0400_0128;
-const SIOMLT_SEND = 0x0400_012a;
-const SIOMULTI0 = 0x0400_0120;
-/** Multi-player mode at 115200 bps. */
-const MULTI_115200 = 0x2003;
-const START = 0x0080;
-/** What a slot reads when nobody is in it. */
-const ABSENT = 0xffff;
-
-let bytes = null;
-try {
-  bytes = await readFile(WASM);
-} catch {
-  // The module is built by a separate cargo invocation; without it there is
-  // nothing to test rather than something failing.
+/** A console that counts what was done to it. */
+function fakeConsole(seat) {
+  return {
+    seat,
+    frameCount: 0,
+    linkPending: false,
+    linkBusy: false,
+    linkSendValue: 0x1000 + seat,
+    linkTransferCycles: 5242,
+    buttons: -1,
+    joins: 0,
+    deliveries: [],
+    disconnected: false,
+    setButtons(bits) {
+      this.buttons = bits;
+    },
+    runSlice() {
+      // A slice stops at a transfer; otherwise it finishes the frame.
+      if (this.linkPending) return false;
+      this.frameCount += 1;
+      return true;
+    },
+    linkJoin() {
+      this.joins += 1;
+      return true;
+    },
+    linkDeliver(values, cycles) {
+      this.deliveries.push([values.slice(), cycles]);
+      this.linkPending = false;
+      return true;
+    },
+    linkDisconnect() {
+      this.disconnected = true;
+    },
+    takeAudio() {
+      return new Float32Array(0);
+    },
+    saveState() {
+      return new Uint8Array([this.seat, this.frameCount & 0xff, 0x5a]);
+    },
+  };
 }
 
-/** A console, with just enough of the ABI to drive a cable. */
-async function console_() {
-  const { instance } = await WebAssembly.instantiate(bytes, {});
-  const e = instance.exports;
-  e.tb_init();
-  // A cartridge, so the machine has something to be. The link path does not
-  // read it, but loading one is what puts the console into a running state.
-  const rom = new Uint8Array(0x200);
-  rom.set(new TextEncoder().encode("LINKTEST\0\0\0\0"), 0xa0);
-  rom.set(new TextEncoder().encode("ZZZE"), 0xac);
-  const ptr = e.tb_alloc(rom.length);
-  new Uint8Array(e.memory.buffer, ptr, rom.length).set(rom);
-  e.tb_load_rom(ptr, rom.length);
-  return e;
+function makeSession({ players = 2, mySeat = 0, delay = 3 } = {}) {
+  const consoles = [];
+  for (let seat = 0; seat < players; seat += 1) consoles.push(fakeConsole(seat));
+  return new LinkSession({ id: "s1", consoles, mySeat, delay });
 }
 
-/**
- * Write a halfword to a register, the way a game does.
- *
- * There is no ABI entry point for this and there should not be: the page never
- * pokes registers. The test needs to stand in for the game, so it reaches into
- * the module's memory the same way the CPU would.
- */
-function poke(e, addr, value) {
-  // The I/O array lives inside the module; the ABI does not expose it, so this
-  // drives the same path a game would by stepping with the register set.
-  // Instead of poking memory, ask the module to run the write for us.
-  e.tb_debug_write_u16(addr, value);
-}
-
-function peek(e, addr) {
-  return e.tb_debug_read_u16(addr);
-}
-
-test("the module is built", { skip: bytes ? false : "wasm not built" }, () => {
-  assert.ok(bytes.length > 0);
+test("the delay covers a one-way trip and never drops below two frames", () => {
+  // A round trip too small to measure still gets a frame of slack either side.
+  assert.equal(delayForRoundTrip(0), 2);
+  assert.equal(delayForRoundTrip(1), 2);
+  // 60ms round trip is 30ms one way, which is two frames, plus one for jitter.
+  assert.equal(delayForRoundTrip(60), 3);
+  // And a link bad enough to want more than the cap gets the cap, because
+  // beyond it the pad stops feeling connected to the game.
+  assert.equal(delayForRoundTrip(10_000), 12);
 });
 
-if (bytes) {
-  const probe = await WebAssembly.instantiate(bytes, {});
-  const hasDebugPokes =
-    typeof probe.instance.exports.tb_debug_write_u16 === "function" &&
-    typeof probe.instance.exports.tb_debug_read_u16 === "function";
+test("a transfer is carried between consoles rather than sent anywhere", () => {
+  const consoles = [fakeConsole(0), fakeConsole(1)];
+  assert.equal(carryTransfer(consoles), false, "nothing to carry while idle");
 
-  test(
-    "two consoles exchange a halfword",
-    { skip: hasDebugPokes ? false : "module lacks the register entry points" },
-    async () => {
-      const parent = await console_();
-      const child = await console_();
+  consoles[0].linkPending = true;
+  assert.equal(carryTransfer(consoles), true);
 
-      for (const [e, sends] of [
-        [parent, 0x1234],
-        [child, 0xabcd],
-      ]) {
-        poke(e, RCNT, 0x0000);
-        poke(e, SIOCNT, MULTI_115200);
-        poke(e, SIOMLT_SEND, sends);
-      }
-      parent.tb_link_connect(0, 2);
-      child.tb_link_connect(1, 2);
+  assert.equal(consoles[1].joins, 1, "the child is pulled in whether it was ready or not");
+  for (const console of consoles) {
+    const [values, cycles] = console.deliveries[0];
+    assert.deepEqual(values, [0x1000, 0x1001, 0xffff, 0xffff], "absent seats read as absent");
+    assert.equal(cycles, 5242, "the parent's baud rate is the cable's");
+  }
+});
 
-      assert.equal(parent.tb_link_connected(), 1);
-      assert.equal(child.tb_link_connected(), 1);
+test("a seat nobody is in reads as absent, not as having sent zero", () => {
+  const consoles = [fakeConsole(0), fakeConsole(1)];
+  consoles[0].linkPending = true;
+  carryTransfer(consoles);
+  const [values] = consoles[0].deliveries[0];
+  assert.equal(values[2], 0xffff);
+  assert.equal(values[3], 0xffff);
+});
 
-      // The game sets START; nothing else about a transfer is its business.
-      poke(parent, SIOCNT, MULTI_115200 | START);
-      parent.tb_run_frame();
-      assert.equal(parent.tb_link_pending(), 1, "the parent should want a transfer");
+test("the first frames run without waiting for input from before the session", () => {
+  const session = makeSession({ delay: 3 });
+  // Nothing was pressed before there was a session to press it in, so the
+  // frames the delay covers are already answered.
+  assert.equal(session.ready, true);
+  assert.equal(session.bufferedFrames, 3);
+});
 
-      // What the page does with that: pull everyone in, collect, hand back.
-      child.tb_link_join();
-      const values = [parent.tb_link_send_value(), child.tb_link_send_value(), ABSENT, ABSENT];
-      assert.deepEqual(values, [0x1234, 0xabcd, ABSENT, ABSENT]);
-      // The parent drives the clock line, so its transfer time is the one
-      // every console runs at.
-      const cycles = parent.tb_link_transfer_cycles();
-      parent.tb_link_deliver(...values, cycles);
-      child.tb_link_deliver(...values, cycles);
+test("a frame does not run until every player has said what they pressed", () => {
+  const session = makeSession({ delay: 1 });
 
-      // The cable still has to clock it out, so run until it lands.
-      for (let n = 0; n < 8 && (parent.tb_link_busy() || child.tb_link_busy()); n++) {
-        parent.tb_run_frame();
-        child.tb_run_frame();
-      }
-      assert.equal(parent.tb_link_busy(), 0, "the parent never finished");
-      assert.equal(child.tb_link_busy(), 0, "the child never finished");
+  // Pressing during frame 0 is a statement about frame 1: that is what the
+  // delay is. The frames it covers were answered when the session opened.
+  assert.equal(session.pushLocal(0x001), 1);
+  assert.equal(session.runFrame(), true, "frame 0 is covered by the delay");
+  assert.equal(session.frame, 1);
 
-      for (const [who, e] of [
-        ["parent", parent],
-        ["child", child],
-      ]) {
-        assert.deepEqual(
-          [0, 1, 2, 3].map((slot) => peek(e, SIOMULTI0 + slot * 2)),
-          [0x1234, 0xabcd, ABSENT, ABSENT],
-          `${who} saw the wrong cable`,
-        );
-        assert.equal(peek(e, SIOCNT) & START, 0, `${who} is still marked busy`);
-      }
-    },
-  );
+  // Frame 1 now has our mask, and is waiting on the other player's.
+  assert.equal(session.ready, false, "the other player has not said yet");
+  session.acceptInput(1, 1, 0x002);
+  assert.equal(session.ready, true);
+  assert.equal(session.runFrame(), true);
 
-  test(
-    "a pending transfer is what tells the page to stop running frames",
-    { skip: hasDebugPokes ? false : "module lacks the register entry points" },
-    async () => {
-      const parent = await console_();
-      const child = await console_();
-      for (const e of [parent, child]) {
-        poke(e, RCNT, 0x0000);
-        poke(e, SIOCNT, MULTI_115200);
-        poke(e, SIOMLT_SEND, 0x0001);
-      }
-      parent.tb_link_connect(0, 2);
-      child.tb_link_connect(1, 2);
+  assert.equal(session.consoles[0].buttons, 0x001, "seat 0 ran on what seat 0 pressed");
+  assert.equal(session.consoles[1].buttons, 0x002, "seat 1 ran on what seat 1 pressed");
+});
 
-      poke(parent, SIOCNT, MULTI_115200 | START);
-      parent.tb_run_frame();
-      assert.equal(parent.tb_link_pending(), 1);
+test("input is recorded for a frame the delay ahead of the one about to run", () => {
+  const session = makeSession({ delay: 4 });
+  assert.equal(session.pushLocal(0x0f0), 4, "pressed now, seen four frames from now");
+  assert.equal(session.pushLocal(0x0f0), null, "and only claimed once");
+});
 
-      // This is the rule the frame loop follows. If the page ignored it and
-      // ran anyway, the game would spend real frames inside a transfer that
-      // hardware finishes in a third of a scanline.
-      const before = parent.tb_frame_count();
-      assert.equal(parent.tb_link_pending(), 1, "still waiting on the other console");
-      assert.equal(
-        parent.tb_frame_count(),
-        before,
-        "no frame should have been run while a transfer is outstanding",
-      );
+test("a frame that has already run cannot be re-answered", () => {
+  const session = makeSession({ delay: 1 });
+  session.runFrame();
+  assert.equal(session.acceptInput(1, 0, 0x3ff), false, "frame 0 is spent");
+});
 
-      // Once the data arrives the console is free again.
-      child.tb_link_join();
-      const values = [0x0001, 0x0001, ABSENT, ABSENT];
-      const cycles = parent.tb_link_transfer_cycles();
-      parent.tb_link_deliver(...values, cycles);
-      child.tb_link_deliver(...values, cycles);
-      assert.equal(parent.tb_link_pending(), 0, "the wait is over once data lands");
-    },
-  );
+test("input further ahead than the ring holds is refused rather than wrapped", () => {
+  const session = makeSession();
+  assert.equal(session.acceptInput(1, 5, 0x001), true);
+  assert.equal(session.acceptInput(1, 100_000, 0x001), false);
+  assert.equal(session.acceptInput(1, -1, 0x001), false);
+});
 
-  test(
-    "an absent console reads as absent rather than as a zero",
-    { skip: hasDebugPokes ? false : "module lacks the register entry points" },
-    async () => {
-      const parent = await console_();
-      const child = await console_();
-      for (const e of [parent, child]) {
-        poke(e, RCNT, 0x0000);
-        poke(e, SIOCNT, MULTI_115200);
-      }
-      poke(parent, SIOMLT_SEND, 0x00ff);
-      poke(child, SIOMLT_SEND, 0x00ee);
-      parent.tb_link_connect(0, 2);
-      child.tb_link_connect(1, 2);
+test("a player cannot answer for somebody else's seat", () => {
+  const session = makeSession({ mySeat: 0 });
+  assert.equal(session.acceptInput(0, 9, 0x001), false, "not our own seat");
+  assert.equal(session.acceptInput(7, 9, 0x001), false, "not a seat at all");
+});
 
-      poke(parent, SIOCNT, MULTI_115200 | START);
-      parent.tb_run_frame();
-      child.tb_link_join();
+test("running a frame carries every transfer the parent raises", () => {
+  const session = makeSession({ delay: 2 });
+  const [parent, child] = session.consoles;
 
-      // Slots 2 and 3 have nobody in them. The wrapper defaults them, but the
-      // ABI has to carry them as 0xFFFF: a game reading 0 there would take it
-      // for a third player who sent it a zero.
-      const cycles = parent.tb_link_transfer_cycles();
-      parent.tb_link_deliver(0x00ff, 0x00ee, ABSENT, ABSENT, cycles);
-      child.tb_link_deliver(0x00ff, 0x00ee, ABSENT, ABSENT, cycles);
-      for (let n = 0; n < 8 && parent.tb_link_busy(); n++) {
-        parent.tb_run_frame();
-        child.tb_run_frame();
-      }
+  // The parent stops part-way through the frame asking for a transfer, which
+  // is what a linked frame looks like nine times over.
+  parent.linkPending = true;
 
-      assert.equal(peek(parent, SIOMULTI0 + 4), ABSENT);
-      assert.equal(peek(parent, SIOMULTI0 + 6), ABSENT);
-    },
-  );
+  assert.equal(session.runFrame(), true);
+  assert.equal(child.joins, 1, "the child was clocked");
+  assert.equal(parent.deliveries.length, 1);
+  assert.equal(child.deliveries.length, 1);
+  assert.equal(parent.frameCount, 1, "and the frame still finished");
+});
 
-  test("a cable needs at least two consoles and a valid seat", async () => {
-    const e = await console_();
-    // Bad seats are refused rather than silently clamped: a page that got the
-    // arithmetic wrong should find out here, not by desyncing a trade.
-    assert.notEqual(e.tb_link_connect(0, 1), 0, "one console is not a cable");
-    assert.notEqual(e.tb_link_connect(4, 4), 0, "seat 4 of 4 does not exist");
-    assert.notEqual(e.tb_link_connect(0, 5), 0, "five consoles is beyond the cable");
-    assert.equal(e.tb_link_connect(0, 2), 0);
-    assert.equal(e.tb_link_connected(), 1);
-    e.tb_link_disconnect();
-    assert.equal(e.tb_link_connected(), 0);
-  });
-}
+test("a cable that cannot be carried stops the session rather than spinning", () => {
+  const session = makeSession({ delay: 2 });
+  const [parent] = session.consoles;
+  // Pending, and delivery does not clear it: a console the loop cannot free.
+  parent.linkPending = true;
+  parent.linkDeliver = () => true;
+
+  assert.equal(session.runFrame(), false);
+  assert.equal(session.wedged, true);
+  assert.equal(session.ready, false, "and it does not try to run another");
+});
+
+test("the two browsers compare states, in whichever order they arrive", () => {
+  const ours = makeSession();
+  assert.equal(ours.recordHash(300, 0xabc), null, "nothing to compare against yet");
+  assert.equal(ours.acceptHash(300, 0xabc), null, "and they agree");
+
+  const other = makeSession();
+  assert.equal(other.acceptHash(300, 0xabc), null, "peer first is the same question");
+  assert.equal(other.recordHash(300, 0xdef), 300, "a disagreement names the frame");
+});
+
+test("a session that has diverged will not run another frame", () => {
+  const session = makeSession({ delay: 4 });
+  session.acceptHash(300, 1);
+  session.recordHash(300, 2);
+  assert.equal(session.desyncedAt, 300);
+  assert.equal(session.ready, false);
+});
+
+test("states are only compared every so often, not every frame", () => {
+  const session = makeSession({ delay: 2 });
+  assert.equal(session.hashDue, false);
+  for (let frame = 0; frame < 300; frame += 1) {
+    session.pushLocal(0);
+    session.acceptInput(1, session.frame, 0);
+    session.runFrame();
+  }
+  assert.equal(session.frame, 300);
+  assert.equal(session.hashDue, true, "300 frames is five seconds");
+});
+
+test("detaching unplugs every console and keeps the player's own", () => {
+  const session = makeSession({ players: 2, mySeat: 1 });
+  const mine = session.local;
+  session.detach();
+  for (const console of [mine]) assert.equal(console.disconnected, true);
+  assert.deepEqual(session.consoles, [mine], "the other seat is let go of");
+});

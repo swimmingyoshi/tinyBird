@@ -168,6 +168,39 @@ export class TinyBird {
     this.#exports.tb_reset();
   }
 
+  /**
+   * Take the cartridge out.
+   *
+   * Not a reset: a reset restarts the game that is in. After this there is no
+   * game in, and the save memory, backup type and clock that came with the
+   * cartridge have gone with it.
+   */
+  eject() {
+    this.#exports.tb_eject();
+  }
+
+  /** Whether a cartridge is in the machine. */
+  get hasRom() {
+    return this.#exports.tb_has_rom() === 1;
+  }
+
+  /**
+   * Tell the cartridge clock what the time is.
+   *
+   * Only Ruby, Sapphire and Emerald have one; on every other cartridge this
+   * goes nowhere, so the caller does not have to know which game is loaded.
+   * The core cannot read the clock itself — `SystemTime::now` panics on
+   * `wasm32-unknown-unknown` — so somebody on this side has to say.
+   */
+  setWallClock(unixSeconds) {
+    this.#exports.tb_set_wall_clock(unixSeconds);
+  }
+
+  /** Whether the cartridge in the machine has a clock chip on it. */
+  get hasCartridgeClock() {
+    return this.#exports.tb_has_cartridge_clock() === 1;
+  }
+
   setPaused(paused) {
     this.#exports.tb_set_paused(paused ? 1 : 0);
   }
