@@ -21,6 +21,7 @@ pub mod gba;
 pub mod input;
 pub mod memory_map;
 pub mod ppu;
+pub mod rtc;
 pub mod scheduler;
 pub mod sio;
 pub mod timers;

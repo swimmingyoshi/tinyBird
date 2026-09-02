@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tinyBird · Tickets</title>
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="Messages you have sent tinyBird, and whatever came back."
+    />
+    <!-- A ticket is somebody's own support history. Nothing here should turn
+         up in a search result, whoever links to it. -->
+    <meta name="robots" content="noindex, nofollow" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/console.css" />
+  </head>
+  <body>
+    <div class="rig">
+      <header class="bar">
+        <a class="bar__mark" href="/">
+          <span class="bar__glyph" aria-hidden="true"></span>
+          tinyBird
+        </a>
+        <!-- Tickets sit under Contact rather than beside it: the page only
+             exists once you have written something, and the way to it is the
+             link on that page. Named here anyway, because this is where you
+             are. -->
+        <nav class="bar__nav">
+          <a href="/">Home</a>
+          <a href="/play">Play</a>
+          <a href="/info">Info</a>
+          <a href="/contact">Contact</a>
+          <a class="is-current" href="/support/tickets" aria-current="page">Tickets</a>
+        </nav>
+        <p class="bar__state" id="link-state" data-state="idle">
+          <span class="dot" aria-hidden="true"></span><span id="link-label">checking</span>
+        </p>
+
+        <div class="account" id="account" hidden></div>
+      </header>
+
+      <main>
+        <section class="hero hero--slim">
+          <h1 class="hero__title">Your tickets</h1>
+          <p class="hero__lede">
+            Everything you have sent through the contact form, and whatever came
+            back. Only your own: the server asks the contact service as you, and
+            it answers about the account the message was sent from.
+          </p>
+        </section>
+
+        <section class="panel" id="ticket-panel">
+          <p class="panel__eyebrow">
+            <span id="ticket-heading">Tickets</span
+            ><span class="panel__note" id="ticket-note"></span>
+          </p>
+
+          <!-- Every way this panel can be empty, each said in its own words.
+               "Nothing here" and "we could not ask" look identical if they
+               share a sentence, and they call for different things. -->
+
+          <p class="panel__lead" id="ticket-off" hidden>
+            The contact form is switched off on this server, so there are no
+            tickets to read. Whoever runs it can turn it on by setting
+            <code>TINYBIRD_CONTACT_KEY</code> in <code>.env</code>.
+          </p>
+
+          <p class="panel__lead" id="ticket-accounts" hidden>
+            This server has accounts switched off, so nothing sent from it is
+            filed under anyone and there is no history to show. Messages still
+            go from the <a href="/contact">contact page</a> and the reply comes
+            by email. Whoever runs it can turn accounts on by setting
+            <code>TINYBIRD_AUTH_PROJECT_SECRET</code> in <code>.env</code>.
+          </p>
+
+          <p class="contact__gate" id="ticket-gate" hidden>
+            A ticket belongs to the account that opened it, so this needs you
+            signed in. The account menu is top right.
+          </p>
+
+          <p class="panel__lead" id="ticket-loading" hidden>Asking…</p>
+
+          <p class="panel__lead" id="ticket-empty" hidden>
+            Nothing yet. A message sent from the
+            <a href="/contact">contact page</a> while signed in shows up here,
+            with the reply under it.
+          </p>
+
+          <div class="ticket-fail" id="ticket-error" hidden>
+            <p class="contact__hint" data-tone="bad" id="ticket-error-text"></p>
+            <button class="key key--slim" id="ticket-retry" type="button">
+              Try again
+            </button>
+          </div>
+
+          <!-- The list. -->
+          <ul class="tickets" id="ticket-list" hidden></ul>
+
+          <!-- One conversation. Same document, different path. -->
+          <div class="ticket" id="ticket-detail" hidden>
+            <p class="ticket__back">
+              <a href="/support/tickets" id="ticket-back">All tickets</a>
+            </p>
+            <h2 class="ticket__subject" id="ticket-subject"></h2>
+            <dl class="facts ticket__facts" id="ticket-facts"></dl>
+
+            <ol class="thread" id="ticket-thread"></ol>
+
+            <form class="reply" id="ticket-reply" novalidate hidden>
+              <label class="contact__field">
+                <span>Reply</span>
+                <!-- What is typed here survives a reload, a mistimed sign-out,
+                     and a send that failed. Nobody should have to write a
+                     paragraph twice because a network dropped. -->
+                <textarea
+                  id="reply-message"
+                  rows="5"
+                  maxlength="10000"
+                  placeholder="Anything to add?"
+                ></textarea>
+              </label>
+              <div class="contact__send">
+                <button class="key key--slim" id="reply-send" type="submit">
+                  Send reply
+                </button>
+                <p class="contact__hint" id="reply-hint">
+                  Goes onto this ticket and reaches the same person by email.
+                </p>
+              </div>
+            </form>
+          </div>
+
+          <p class="panel__foot">
+            Neither key is in this page. The browser asks this server, this
+            server asks the contact service holding your session's token, and
+            the service decides what is yours to read.
+          </p>
+        </section>
+      </main>
+
+      <footer class="foot">
+        <span>tinyBird · MIT</span>
+        <span id="foot-msg"></span>
+      </footer>
+    </div>
+
+    <script type="module" src="/tickets.js"></script>
+  </body>
+</html>

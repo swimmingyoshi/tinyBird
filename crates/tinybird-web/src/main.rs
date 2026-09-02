@@ -12,12 +12,14 @@ use tinybird_addons::SNAPSHOT_SCHEMA_VERSION;
 use tokio::net::TcpListener;
 
 mod auth;
+mod contact;
 mod dotenv;
 mod lobby;
 mod media;
 mod sprites;
 
 use auth::{AuthConfig, AuthError, Sessions};
+use contact::ContactConfig;
 use lobby::Lobby;
 use media::MediaConfig;
 
@@ -56,16 +58,77 @@ const OVERLAY_OFF_HTML: &str = concat!(
     "<p>To switch it on anyway, start the server with <code>TINYBIRD_WEB_OVERLAY=1</code>.</p></div>",
 );
 const PLAY_HTML: &str = include_str!("assets/play.html");
+const CONTACT_HTML: &str = include_str!("assets/contact.html");
+const TICKETS_HTML: &str = include_str!("assets/tickets.html");
+const INFO_HTML: &str = include_str!("assets/info.html");
 const APP_JS: &str = include_str!("assets/app.js");
 const PLAY_JS: &str = include_str!("assets/play.js");
 const HOME_JS: &str = include_str!("assets/home.js");
+const CONTACT_PAGE_JS: &str = include_str!("assets/contact.js");
+const TICKETS_JS: &str = include_str!("assets/tickets.js");
+/// The account menu, imported by every page's own module.
+const ACCOUNT_JS: &str = include_str!("assets/account.js");
+/// The shared header wiring: the account menu and the server-up dot.
+const CHROME_JS: &str = include_str!("assets/chrome.js");
+const INFO_JS: &str = include_str!("assets/info.js");
 const TINYBIRD_JS: &str = include_str!("assets/tinybird.js");
 const SAVEFORMAT_JS: &str = include_str!("assets/saveformat.js");
 const PACING_JS: &str = include_str!("assets/pacing.js");
 const LOBBY_JS: &str = include_str!("assets/lobby.js");
+const LINK_JS: &str = include_str!("assets/link.js");
 const CONTROLS_JS: &str = include_str!("assets/controls.js");
 const STYLES_CSS: &str = include_str!("assets/styles.css");
 const CONSOLE_CSS: &str = include_str!("assets/console.css");
+const FFTA_HUMAN_PNG: &[u8] = include_bytes!("assets/ffta-races/human.png");
+const FFTA_BANGAA_PNG: &[u8] = include_bytes!("assets/ffta-races/bangaa.png");
+const FFTA_NU_MOU_PNG: &[u8] = include_bytes!("assets/ffta-races/nu-mou.png");
+const FFTA_VIERA_PNG: &[u8] = include_bytes!("assets/ffta-races/viera.png");
+const FFTA_MOOGLE_PNG: &[u8] = include_bytes!("assets/ffta-races/moogle.png");
+/// The 42 playable job labels, in FFTA's job-id order (0x02 through 0x2b).
+const FFTA_JOB_PNGS: [&[u8]; 42] = [
+    include_bytes!("assets/ffta-jobs/02.png"),
+    include_bytes!("assets/ffta-jobs/03.png"),
+    include_bytes!("assets/ffta-jobs/04.png"),
+    include_bytes!("assets/ffta-jobs/05.png"),
+    include_bytes!("assets/ffta-jobs/06.png"),
+    include_bytes!("assets/ffta-jobs/07.png"),
+    include_bytes!("assets/ffta-jobs/08.png"),
+    include_bytes!("assets/ffta-jobs/09.png"),
+    include_bytes!("assets/ffta-jobs/0a.png"),
+    include_bytes!("assets/ffta-jobs/0b.png"),
+    include_bytes!("assets/ffta-jobs/0c.png"),
+    include_bytes!("assets/ffta-jobs/0d.png"),
+    include_bytes!("assets/ffta-jobs/0e.png"),
+    include_bytes!("assets/ffta-jobs/0f.png"),
+    include_bytes!("assets/ffta-jobs/10.png"),
+    include_bytes!("assets/ffta-jobs/11.png"),
+    include_bytes!("assets/ffta-jobs/12.png"),
+    include_bytes!("assets/ffta-jobs/13.png"),
+    include_bytes!("assets/ffta-jobs/14.png"),
+    include_bytes!("assets/ffta-jobs/15.png"),
+    include_bytes!("assets/ffta-jobs/16.png"),
+    include_bytes!("assets/ffta-jobs/17.png"),
+    include_bytes!("assets/ffta-jobs/18.png"),
+    include_bytes!("assets/ffta-jobs/19.png"),
+    include_bytes!("assets/ffta-jobs/1a.png"),
+    include_bytes!("assets/ffta-jobs/1b.png"),
+    include_bytes!("assets/ffta-jobs/1c.png"),
+    include_bytes!("assets/ffta-jobs/1d.png"),
+    include_bytes!("assets/ffta-jobs/1e.png"),
+    include_bytes!("assets/ffta-jobs/1f.png"),
+    include_bytes!("assets/ffta-jobs/20.png"),
+    include_bytes!("assets/ffta-jobs/21.png"),
+    include_bytes!("assets/ffta-jobs/22.png"),
+    include_bytes!("assets/ffta-jobs/23.png"),
+    include_bytes!("assets/ffta-jobs/24.png"),
+    include_bytes!("assets/ffta-jobs/25.png"),
+    include_bytes!("assets/ffta-jobs/26.png"),
+    include_bytes!("assets/ffta-jobs/27.png"),
+    include_bytes!("assets/ffta-jobs/28.png"),
+    include_bytes!("assets/ffta-jobs/29.png"),
+    include_bytes!("assets/ffta-jobs/2a.png"),
+    include_bytes!("assets/ffta-jobs/2b.png"),
+];
 
 #[derive(Clone, Debug)]
 struct AppState {
@@ -80,6 +143,10 @@ struct AppState {
     addon_dir: PathBuf,
     media: MediaConfig,
     auth: AuthConfig,
+    contact: ContactConfig,
+    /// How much of the contact form's budget this process has spent. Shared,
+    /// or every request would get a fresh allowance.
+    contact_throttle: Arc<contact::Throttle>,
     /// Signed-in browsers. Shared, because the state is cloned per request.
     sessions: Arc<Sessions>,
     /// Open rooms. Shared for the same reason.
@@ -102,6 +169,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config::from_env_and_args(env::args().skip(1).collect());
     let media = MediaConfig::from_env();
+    let contact = ContactConfig::from_env();
+    let contact_configured = contact.is_configured();
+    let contact_label = contact.base_url.clone();
     let storage_configured = media.is_configured();
     let storage_label = format!("{} vault \"{}\"", media.base_url, media.vault);
     let save_project = media.project.clone();
@@ -115,11 +185,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sprite_dir: config.sprite_dir,
         overlay_enabled: config.overlay_enabled,
         addon_dir: config.addon_dir,
-        wasm_path: config.wasm_path,
+        wasm_path: config.wasm_path.clone(),
         rom_dir: config.rom_dir,
         bios_path: config.bios_path,
         media,
         auth: AuthConfig::from_env(),
+        contact,
+        contact_throttle: Arc::new(contact::Throttle::new()),
         sessions: Arc::new(Sessions::new()),
         lobby: Arc::new(Lobby::new()),
         serve_local_roms: local_roms_enabled(),
@@ -133,10 +205,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/play", get(play))
         .route("/play.js", get(play_js))
         .route("/home.js", get(home_js))
+        .route("/account.js", get(account_js))
+        .route("/chrome.js", get(chrome_js))
+        .route("/contact", get(contact_page))
+        .route("/contact.js", get(contact_page_js))
+        // Both the list and one conversation, because both are the same
+        // document; the path is what it draws from. The ticket URL is the
+        // one the contact service is told about when its portal moves off
+        // hosted mode, so its shape is not ours to vary.
+        .route("/support/tickets", get(tickets_page))
+        .route("/support/tickets/{ticket_id}", get(tickets_page))
+        .route("/tickets.js", get(tickets_js))
+        .route("/info", get(info_page))
+        .route("/info.js", get(info_js))
         .route("/tinybird.js", get(tinybird_js))
         .route("/saveformat.js", get(saveformat_js))
         .route("/pacing.js", get(pacing_js))
         .route("/lobby.js", get(lobby_js))
+        .route("/link.js", get(link_js))
         .route("/controls.js", get(controls_js))
         .route("/console.css", get(console_css))
         .route("/tinybird.wasm", get(wasm_module))
@@ -150,21 +236,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route(
             "/api/saves",
-            get(list_saves).post(upload_save).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+            get(list_saves)
+                .post(upload_save)
+                .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
         .route("/api/saves/claim", axum::routing::post(claim_saves))
-        .route("/api/saves/{filename}", axum::routing::delete(delete_save))
+        .route(
+            "/api/saves/{filename}",
+            axum::routing::delete(delete_save).patch(rename_save),
+        )
         .route("/api/auth/register", axum::routing::post(auth_register))
         .route("/api/auth/login", axum::routing::post(auth_login))
         .route("/api/auth/logout", axum::routing::post(auth_logout))
         .route("/api/auth/me", get(auth_me))
+        .route(
+            "/api/contact",
+            get(contact_state).post(contact_submit).layer(
+                // A form is text, and the longest field in it is four thousand
+                // characters. Anything past this is not a message.
+                DefaultBodyLimit::max(64 * 1024),
+            ),
+        )
+        .route("/api/tickets", get(ticket_list))
+        .route("/api/tickets/{ticket_id}", get(ticket_detail))
+        .route(
+            "/api/tickets/{ticket_id}/messages",
+            get(ticket_history).post(ticket_send).layer(
+                // A reply is ten thousand characters at the outside, which
+                // is well under this even spelled in four-byte runes.
+                DefaultBodyLimit::max(64 * 1024),
+            ),
+        )
         .route("/api/lobby", axum::routing::post(create_room))
         .route("/api/lobby/ws", get(lobby_socket))
         .route("/api/proxy", get(storage_proxy))
         .route("/api/health", get(health))
         .route("/api/snapshot", get(snapshot))
         .route("/api/addons", get(addon_manifests))
+        .route("/api/shots", get(list_shots).post(upload_shot))
         .route("/sprites/{species_id}", get(sprite_png))
+        .route("/ffta/races/{race}", get(ffta_race_png))
+        .route("/ffta/jobs/{job}", get(ffta_job_png))
         .with_state(state);
 
     let addr = SocketAddr::new(config.host, config.port);
@@ -199,9 +311,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  battle:     http://{addr}/overlay/battle");
     if storage_configured {
         println!("  storage:    {storage_label}");
-        println!("  saves:      project \"{save_project}\", {} per game", media::MAX_SAVES_PER_GAME);
+        println!(
+            "  saves:      project \"{save_project}\", {} per game",
+            media::MAX_SAVES_PER_GAME
+        );
     } else {
         println!("  storage:    off (set TINYBIRD_MEDIA_KEY in .env to enable the vault)");
+    }
+    if contact_configured {
+        println!("  contact:    {contact_label}");
+    } else {
+        println!("  contact:    off (set TINYBIRD_CONTACT_KEY in .env to show the form)");
+    }
+    if let Some(age) = wasm_is_behind(&config.wasm_path) {
+        println!();
+        println!("  The emulator module is {age} older than this server.");
+        println!("  Every addon and the emulator itself run inside it, so a fix built");
+        println!("  with `cargo build` alone is not on the page. Rebuild it with:");
+        println!("    cargo build -p tinybird-wasm --target wasm32-unknown-unknown --release");
     }
     if !bios_ready {
         println!();
@@ -352,6 +479,52 @@ async fn home_js() -> Response {
     static_text(HOME_JS, "application/javascript; charset=utf-8")
 }
 
+/// The contact form, on a page of its own.
+///
+/// It used to be a panel at the bottom of the home page, which put a form
+/// nobody had come for under everything they had. Its own page also gives the
+/// sign-in room to be a sign-in rather than a gate.
+async fn contact_page() -> Html<&'static str> {
+    Html(CONTACT_HTML)
+}
+
+async fn contact_page_js() -> Response {
+    static_text(CONTACT_PAGE_JS, "application/javascript; charset=utf-8")
+}
+
+/// The ticket pages: a list, and one conversation.
+///
+/// One document for both. Which it draws it reads off the path, so a link
+/// to a ticket survives being mailed, pasted, and reloaded — see
+/// `tickets.js`.
+async fn tickets_page() -> Html<&'static str> {
+    Html(TICKETS_HTML)
+}
+
+async fn tickets_js() -> Response {
+    static_text(TICKETS_JS, "application/javascript; charset=utf-8")
+}
+
+async fn account_js() -> Response {
+    static_text(ACCOUNT_JS, "application/javascript; charset=utf-8")
+}
+
+async fn chrome_js() -> Response {
+    static_text(CHROME_JS, "application/javascript; charset=utf-8")
+}
+
+/// What works, what is being worked on, and what is knowingly missing.
+///
+/// Static prose, kept in step with `PROGRESS.md` by hand. It is the honest
+/// answer to "is this thing finished", which an emulator is never quite.
+async fn info_page() -> Html<&'static str> {
+    Html(INFO_HTML)
+}
+
+async fn info_js() -> Response {
+    static_text(INFO_JS, "application/javascript; charset=utf-8")
+}
+
 async fn tinybird_js() -> Response {
     static_text(TINYBIRD_JS, "application/javascript; charset=utf-8")
 }
@@ -372,8 +545,84 @@ async fn lobby_js() -> Response {
     static_text(LOBBY_JS, "application/javascript; charset=utf-8")
 }
 
+async fn link_js() -> Response {
+    static_text(LINK_JS, "application/javascript; charset=utf-8")
+}
+
 async fn console_css() -> Response {
     static_text(CONSOLE_CSS, "text/css; charset=utf-8")
+}
+
+/// Crates compiled into the emulator module.
+///
+/// A change to any of these is a change the page cannot see until the module
+/// is rebuilt. `tinybird-web` is deliberately not among them: this server's own
+/// sources do not go into the wasm, and treating them as if they did is what
+/// made the warning cry wolf through a week of front-end work.
+const WASM_SOURCES: [&str; 4] = [
+    "crates/tinybird-core/src",
+    "crates/tinybird-addons/src",
+    "crates/tinybird-games/src",
+    "crates/tinybird-wasm/src",
+];
+
+/// The newest modification time anywhere under `dir`, if it can be read.
+fn newest_file_in(dir: &FsPath) -> Option<std::time::SystemTime> {
+    let mut newest = None;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in std::fs::read_dir(&path).ok()?.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if let Ok(at) = entry.metadata().and_then(|m| m.modified()) {
+                newest = Some(newest.map_or(at, |best: std::time::SystemTime| best.max(at)));
+            }
+        }
+    }
+    newest
+}
+
+/// How far behind the emulator's sources the WebAssembly module is, if at all.
+///
+/// The addons and the emulator are compiled into that module, not into this
+/// binary, and `cargo build` does not build the wasm target. So a fix can be
+/// built, tested, and running in the server while the page carries on executing
+/// the version before it — with nothing to say so, because the page is not
+/// stale, only the module it loads.
+fn wasm_is_behind(wasm_path: &FsPath) -> Option<String> {
+    let wasm = std::fs::metadata(wasm_path).ok()?.modified().ok()?;
+
+    // Against the emulator's own sources, not against this binary.
+    //
+    // It used to compare the module with the server executable, on the theory
+    // that a recent `cargo build` meant recent emulator work. It does not: every
+    // edit to a page, a stylesheet, or a route rebuilds this binary and leaves
+    // the module correctly untouched, and the warning then claimed the page was
+    // running a stale core when nothing about the core had changed.
+    //
+    // Missing source directories mean this is not a checkout — a distributed
+    // binary, say — and there is nothing to compare, so nothing is claimed.
+    let newest_source = WASM_SOURCES
+        .iter()
+        .filter_map(|dir| newest_file_in(FsPath::new(dir)))
+        .max()?;
+
+    let behind = newest_source.duration_since(wasm).ok()?;
+    // A minute of slack: a build writes the two some seconds apart even when
+    // both are current.
+    if behind < std::time::Duration::from_secs(60) {
+        return None;
+    }
+
+    let minutes = behind.as_secs() / 60;
+    Some(match minutes {
+        0..=59 => format!("{minutes} minutes"),
+        60..=1439 => format!("{} hours", minutes / 60),
+        _ => format!("{} days", minutes / 1440),
+    })
 }
 
 /// Serve the emulator module.
@@ -395,8 +644,22 @@ async fn wasm_module(State(state): State<AppState>) -> Response {
 
 /// List the vault. The API key stays on this side; the page only ever receives
 /// public asset URLs.
+/// The playable cartridges in the vault.
+///
+/// **Cartridges only.** This route is not scoped to an account — a shared ROM
+/// library is the point of it — so anything it returns is visible to anyone who
+/// can reach the server. Listing the whole vault therefore advertised every
+/// screenshot in it, with a working URL, to every visitor.
+///
+/// The page has always filtered to ROM extensions before drawing anything, so
+/// filtering here as well costs nothing and is the difference between a
+/// private file being unlisted and being one `curl` away.
 async fn library(State(state): State<AppState>) -> Response {
-    let response = media::list_assets(&state.media).await;
+    let mut response = media::list_assets(&state.media).await;
+    response
+        .assets
+        .retain(|asset| media::is_rom_name(&asset.name));
+
     match serde_json::to_string(&response) {
         Ok(json) => text(StatusCode::OK, json, "application/json; charset=utf-8"),
         Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
@@ -434,7 +697,10 @@ async fn library_upload(State(state): State<AppState>, mut multipart: Multipart)
     }
 
     if bytes.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "The request had no file to upload.");
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "The request had no file to upload.",
+        );
     }
 
     let name = sanitize_filename(&filename);
@@ -533,7 +799,10 @@ async fn storage_proxy(
 /// owner otherwise so a server run by one person with no auth service keeps
 /// working. Never anything the browser sent: a caller who could name the owner
 /// could read and delete anyone's saves.
-async fn save_owner(state: &AppState, headers: &axum::http::HeaderMap) -> Result<String, AuthError> {
+async fn save_owner(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<String, AuthError> {
     if !state.auth.is_configured() {
         return Ok(state.media.default_owner.clone());
     }
@@ -686,6 +955,44 @@ async fn claim_saves(State(state): State<AppState>, headers: axum::http::HeaderM
 }
 
 /// Delete one stored save.
+/// Rename a stored save.
+///
+/// A PATCH on the save itself rather than a verb of its own: the save already
+/// has a URL, and this changes one field of it.
+async fn rename_save(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(filename): Path<String>,
+    body: String,
+) -> Response {
+    if !state.media.is_configured() {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "Storage is off.");
+    }
+    let owner = match save_owner(&state, &headers).await {
+        Ok(owner) => owner,
+        Err(err) => return auth_error(&err),
+    };
+
+    let label = serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("label")
+                .and_then(|l| l.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+
+    match media::rename_save(&state.media, &owner, &filename, &label).await {
+        Ok(entry) => text(
+            StatusCode::OK,
+            serde_json::to_string(&entry).unwrap_or_else(|_| "{}".to_string()),
+            "application/json; charset=utf-8",
+        ),
+        Err(err) => json_error(StatusCode::BAD_GATEWAY, &err),
+    }
+}
+
 async fn delete_save(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -798,7 +1105,12 @@ async fn sign_in_route(
 }
 
 async fn auth_logout(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    auth::sign_out(&state.auth, &state.sessions, session_id(&headers).as_deref()).await;
+    auth::sign_out(
+        &state.auth,
+        &state.sessions,
+        session_id(&headers).as_deref(),
+    )
+    .await;
 
     let mut response = text(
         StatusCode::OK,
@@ -824,7 +1136,13 @@ async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderMap) 
         );
     }
 
-    match auth::current_user(&state.auth, &state.sessions, session_id(&headers).as_deref()).await {
+    match auth::current_user(
+        &state.auth,
+        &state.sessions,
+        session_id(&headers).as_deref(),
+    )
+    .await
+    {
         Ok(user) => text(
             StatusCode::OK,
             serde_json::json!({ "configured": true, "user": user }).to_string(),
@@ -839,6 +1157,311 @@ async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderMap) 
         ),
         Err(err) => auth_error(&err),
     }
+}
+
+// -------------------------------------------------------------------- contact
+//
+// The page never sees the form key. It posts here and this server posts to the
+// contact service. See `contact.rs` for why.
+
+/// Who is sending, when accounts are configured.
+///
+/// `Ok(None)` means accounts are switched off — the server is one person's own
+/// machine, there is nobody to sign in as, and the form takes a name and an
+/// address the way it did before. With accounts on, being signed in is the
+/// price of the form and the session is where the sender's details come from.
+async fn contact_sender(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<(contact::Identity, String)>, AuthError> {
+    if !state.auth.is_configured() {
+        return Ok(None);
+    }
+
+    let (user, token) =
+        auth::current_session(&state.auth, &state.sessions, session_id(headers).as_deref()).await?;
+    // The same fallback the lobby uses, so one person is called one thing
+    // across the whole application.
+    let name = user
+        .display_name
+        .clone()
+        .unwrap_or_else(|| user.email.split('@').next().unwrap_or("player").to_string());
+    Ok(Some((
+        contact::Identity {
+            id: user.id,
+            name,
+            email: user.email,
+        },
+        token,
+    )))
+}
+
+async fn contact_state(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    let sender = contact_sender(&state, &headers).await;
+    let signed_in = matches!(sender, Ok(Some(_)));
+    let mut body = serde_json::json!({
+        "configured": state.contact.is_configured(),
+        "requiresAccount": state.auth.is_configured(),
+        "signedIn": signed_in,
+        "minMessage": contact::MIN_MESSAGE_LEN,
+        "maxMessage": contact::MAX_MESSAGE_LEN,
+        // Whether there is anything behind the ticket link. Tickets are read
+        // back as the sender, so they need all three: a key to name the
+        // project, accounts to have a sender at all, and somebody signed in.
+        "tickets": state.contact.is_configured() && state.auth.is_configured() && signed_in,
+        "maxReply": contact::MAX_REPLY_LEN,
+    });
+    // Shown back so the form can say who it is about to send as rather than
+    // offering fields whose contents it would ignore.
+    if let Ok(Some((who, _))) = sender {
+        body["name"] = serde_json::Value::String(who.name);
+        body["email"] = serde_json::Value::String(who.email);
+    }
+    text(
+        StatusCode::OK,
+        body.to_string(),
+        "application/json; charset=utf-8",
+    )
+}
+
+/// 202, the same answer the contact service gives.
+///
+/// `ticket` is the id the message was filed under, when there is one to give.
+/// It is what turns "sent" into a way through to the thing that was sent,
+/// rather than a sentence about it existing somewhere.
+fn accepted(ticket: Option<&str>) -> Response {
+    let body = match ticket {
+        Some(id) => serde_json::json!({ "accepted": true, "ticket": id }),
+        None => serde_json::json!({ "accepted": true }),
+    };
+    text(
+        StatusCode::ACCEPTED,
+        body.to_string(),
+        "application/json; charset=utf-8",
+    )
+}
+
+async fn contact_submit(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    if !state.contact.is_configured() {
+        return contact_error(&contact::ContactError::NotConfigured);
+    }
+
+    let sender = match contact_sender(&state, &headers).await {
+        Ok(sender) => sender,
+        // Not signed in is the ordinary way to arrive here without an account,
+        // so it is answered in the form's words rather than the auth service's.
+        Err(AuthError::NoSession) => return contact_error(&contact::ContactError::NeedsAccount),
+        Err(err) => return auth_error(&err),
+    };
+
+    // Split apart because the two halves are wanted in different places:
+    // parsing takes the identity, and the call to the service takes the token
+    // that proves it.
+    let (who, token) = sender.unzip();
+
+    // Checked here as well as at the service: a local answer is instant, says
+    // which field is wrong in this page's own words, and costs nobody a
+    // rate-limited attempt.
+    let message = match contact::parse(&body, who.as_ref()) {
+        Ok(contact::Submission::Message(message)) => message,
+        // A bot gets the same 202 a person does, and nothing is sent.
+        //
+        // Not quite the same shape any more: a real message from a signed-in
+        // sender comes back with a ticket id and this does not. Telling them
+        // apart needs a bot that has registered, verified an address, signed in,
+        // and then filled in a field it cannot see — at which point it is
+        // already inside the per-account quota, which is the limit that
+        // actually holds. Worth the link.
+        Ok(contact::Submission::Spam) => return accepted(None),
+        Err(why) => return json_error(StatusCode::UNPROCESSABLE_ENTITY, &why),
+    };
+
+    // After validation, so a malformed request cannot burn an allowance, and
+    // before the network, which is the thing being rationed. Without accounts
+    // there is one sender, which is the truth on a machine somebody runs for
+    // themselves.
+    let sender_id = who.as_ref().map_or("anonymous", |who| who.id.as_str());
+    if let Err(err) = state.contact_throttle.check(sender_id) {
+        return contact_error(&err);
+    }
+
+    match contact::submit(&state.contact, &message, token.as_deref()).await {
+        // Only offered with a session behind it. Without one the message was
+        // never bound to an account, so the ticket is not this sender's to read
+        // and the link would lead to a panel saying so.
+        Ok(ticket) if token.is_some() => accepted(ticket.as_deref()),
+        Ok(_) => accepted(None),
+        Err(err) => contact_error(&err),
+    }
+}
+
+fn contact_error(err: &contact::ContactError) -> Response {
+    let mut response = json_error(
+        StatusCode::from_u16(err.status()).unwrap_or(StatusCode::BAD_GATEWAY),
+        &err.message(),
+    );
+    // A 429 that says when is worth more than one that says no, and anything
+    // in front of this server — a proxy, a script — reads the header rather
+    // than the sentence.
+    if let Some(seconds) = err.retry_after() {
+        if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
+}
+
+// -------------------------------------------------------------------- tickets
+//
+// A sent message becomes a ticket, and this is how it is read back. The service
+// holds the conversation; these four relay it, the same way `/api/contact`
+// relays a submission and for the same reason — the credentials belong to this
+// machine, not to the page.
+//
+// What travels differs, though. A submission goes out under this server's form
+// key; a ticket read goes out under the *sender's* access token, which lives in
+// their session here and is what the service introspects to decide whose
+// tickets these are. So the browser is never given either credential, and the
+// answer it gets is only ever its own account's.
+
+/// Answer with whatever the service said, unchanged.
+fn ticket_answer(value: &serde_json::Value) -> Response {
+    text(
+        StatusCode::OK,
+        value.to_string(),
+        "application/json; charset=utf-8",
+    )
+}
+
+/// `limit` and `offset` out of a query string, if they are there and are numbers.
+fn page_bounds(query: &HashMap<String, String>) -> (Option<usize>, usize) {
+    let read = |key: &str| query.get(key).and_then(|value| value.parse::<usize>().ok());
+    (read("limit"), read("offset").unwrap_or(0))
+}
+
+/// Run one ticket-API call as the signed-in person, retrying once if their
+/// token turns out to be stale.
+///
+/// The retry is the contract's, and the "once" is the important half of it: the
+/// stored token looked current and the service disagreed, which a fresh one
+/// settles. A second refusal is an answer. Looping here would spend a refresh
+/// token per attempt and never stop.
+async fn ticket_call<F, Fut>(state: &AppState, headers: &axum::http::HeaderMap, call: F) -> Response
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<serde_json::Value, contact::ContactError>>,
+{
+    if !state.contact.is_configured() {
+        return contact_error(&contact::ContactError::NotConfigured);
+    }
+    // With accounts off there is nobody for the service to have filed a ticket
+    // under, so there is nothing to show rather than nothing configured. Said
+    // here rather than borrowing the form's `NeedsAccount`: that one tells you
+    // to sign in, and on a server with accounts switched off there is nothing
+    // to sign in to.
+    if !state.auth.is_configured() {
+        return json_error(
+            StatusCode::UNAUTHORIZED,
+            "This server has accounts switched off, so nothing sent from it is filed under one.",
+        );
+    }
+
+    let session = session_id(headers);
+    let token = match auth::current_session(&state.auth, &state.sessions, session.as_deref()).await
+    {
+        Ok((_, token)) => token,
+        Err(AuthError::NoSession) => {
+            return json_error(StatusCode::UNAUTHORIZED, "Sign in to read your tickets.")
+        }
+        Err(err) => return auth_error(&err),
+    };
+
+    match call(token).await {
+        Ok(value) => ticket_answer(&value),
+        Err(contact::ContactError::TokenRejected) => {
+            match auth::renew_access_token(&state.auth, &state.sessions, session.as_deref()).await {
+                Ok(fresh) => match call(fresh).await {
+                    Ok(value) => ticket_answer(&value),
+                    Err(err) => contact_error(&err),
+                },
+                // The refresh failed, which means the session is over. Said in
+                // those terms rather than the auth service's, because from the
+                // page's side this is one thing: sign in again.
+                Err(_) => contact_error(&contact::ContactError::TokenRejected),
+            }
+        }
+        Err(err) => contact_error(&err),
+    }
+}
+
+async fn ticket_list(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let (limit, offset) = page_bounds(&query);
+    ticket_call(&state, &headers, |token| {
+        let state = state.clone();
+        async move { contact::tickets(&state.contact, &token, limit, offset).await }
+    })
+    .await
+}
+
+async fn ticket_detail(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(ticket_id): Path<String>,
+) -> Response {
+    ticket_call(&state, &headers, |token| {
+        let state = state.clone();
+        let id = ticket_id.clone();
+        async move { contact::ticket(&state.contact, &token, &id).await }
+    })
+    .await
+}
+
+async fn ticket_history(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(ticket_id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let (limit, offset) = page_bounds(&query);
+    ticket_call(&state, &headers, |token| {
+        let state = state.clone();
+        let id = ticket_id.clone();
+        async move { contact::ticket_messages(&state.contact, &token, &id, limit, offset).await }
+    })
+    .await
+}
+
+async fn ticket_send(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(ticket_id): Path<String>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    // Read before anything is sent, so an empty box or a missing key costs
+    // nothing and says which it was.
+    let (message, key) = match contact::parse_reply(&body) {
+        Ok(reply) => reply,
+        Err(why) => return json_error(StatusCode::UNPROCESSABLE_ENTITY, &why),
+    };
+
+    ticket_call(&state, &headers, |token| {
+        let state = state.clone();
+        let id = ticket_id.clone();
+        let message = message.clone();
+        // Carried through the retry unchanged: that is what makes a second
+        // attempt land as the same message rather than a second one.
+        let key = key.clone();
+        async move { contact::ticket_reply(&state.contact, &token, &id, &message, &key).await }
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------- lobby
@@ -1017,9 +1640,7 @@ async fn run_lobby_member(
 
         match serde_json::from_str::<lobby::Incoming>(&text) {
             Ok(lobby::Incoming::Playing { playing, game_code }) => {
-                if let Some(members) =
-                    state.lobby.set_playing(&room, &me, playing, game_code)
-                {
+                if let Some(members) = state.lobby.set_playing(&room, &me, playing, game_code) {
                     state
                         .lobby
                         .broadcast(&room, &lobby::Outgoing::Members { members });
@@ -1061,10 +1682,9 @@ async fn run_lobby_member(
             }
             Ok(lobby::Incoming::LinkStart { seq, frame, offset }) => {
                 if state.lobby.is_link_parent(&room, &me) {
-                    state.lobby.broadcast(
-                        &room,
-                        &lobby::Outgoing::LinkStart { seq, frame, offset },
-                    );
+                    state
+                        .lobby
+                        .broadcast(&room, &lobby::Outgoing::LinkStart { seq, frame, offset });
                 }
             }
             Ok(lobby::Incoming::LinkData {
@@ -1092,6 +1712,104 @@ async fn run_lobby_member(
                         from: me.clone(),
                         seq,
                         value,
+                    },
+                );
+            }
+            // Lockstep. The server's job shrinks here rather than grows: it
+            // relays inputs and fingerprints and never sees a halfword, because
+            // in a lockstep session the cable is resolved inside each browser.
+            //
+            // The parent check is the same one as above and is here for the
+            // same reason. Opening a session decides which state every console
+            // in the room restores from, and letting a bystander do that would
+            // let them replace somebody's game with one of their choosing.
+            Ok(lobby::Incoming::LinkBegin {
+                session,
+                seed,
+                delay,
+                seats,
+            }) => {
+                if state.lobby.is_link_parent(&room, &me) {
+                    state.lobby.broadcast(
+                        &room,
+                        &lobby::Outgoing::LinkBegin {
+                            session,
+                            seed,
+                            delay,
+                            seats,
+                        },
+                    );
+                }
+            }
+            Ok(lobby::Incoming::LinkHello {
+                seat,
+                rom_hash,
+                rom_name,
+                game_code,
+                state: cartridge_state,
+            }) => {
+                // Anyone seated may describe their own console. Which seat they
+                // are is the room's to say, so the page checks the claim
+                // against the roster rather than trusting this field.
+                state.lobby.broadcast(
+                    &room,
+                    &lobby::Outgoing::LinkHello {
+                        from: me.clone(),
+                        seat,
+                        rom_hash,
+                        rom_name,
+                        game_code,
+                        state: cartridge_state,
+                    },
+                );
+            }
+            Ok(lobby::Incoming::LinkInput {
+                session,
+                frame,
+                keys,
+            }) => {
+                state.lobby.broadcast(
+                    &room,
+                    &lobby::Outgoing::LinkInput {
+                        from: me.clone(),
+                        session,
+                        frame,
+                        keys,
+                    },
+                );
+            }
+            Ok(lobby::Incoming::LinkHash {
+                session,
+                frame,
+                hash,
+            }) => {
+                state.lobby.broadcast(
+                    &room,
+                    &lobby::Outgoing::LinkHash {
+                        from: me.clone(),
+                        session,
+                        frame,
+                        hash,
+                    },
+                );
+            }
+            Ok(lobby::Incoming::LinkBye { session }) => {
+                state.lobby.broadcast(
+                    &room,
+                    &lobby::Outgoing::LinkBye {
+                        from: me.clone(),
+                        session,
+                    },
+                );
+            }
+            Ok(lobby::Incoming::LinkSkip { seq }) => {
+                // Relayed like an answer, and for the same reason: saying "not
+                // me" is something any console may do about its own seat.
+                state.lobby.broadcast(
+                    &room,
+                    &lobby::Outgoing::LinkSkip {
+                        from: me.clone(),
+                        seq,
                     },
                 );
             }
@@ -1322,6 +2040,103 @@ fn empty_snapshot_json() -> String {
 /// not, so the first run of a server populates itself and every run after it
 /// works offline. A miss is a plain 404: the page hides the picture and keeps
 /// the card, which is why the addon also sends the species name in words.
+/// This account's screenshots, newest first.
+///
+/// Scoped to the caller. `/api/library` lists the whole vault, which is right
+/// for ROMs — they are shared on purpose — and wrong for pictures of somebody
+/// else's game.
+async fn list_shots(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    let owner = match shot_owner(&state, &headers).await {
+        Ok(owner) => owner,
+        Err(err) => return auth_error(&err),
+    };
+
+    let listing = media::list_shots(&state.media, &owner).await;
+    match serde_json::to_string(&listing) {
+        Ok(json) => text(StatusCode::OK, json, "application/json; charset=utf-8"),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
+    }
+}
+
+/// Store a screenshot against the caller's account.
+///
+/// **The name is built here, not taken from the browser.** The owner is a
+/// field in the stored filename, so a caller that could choose the name could
+/// file a picture under somebody else's account — or, worse, read theirs by
+/// asking for a listing of it.
+async fn upload_shot(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
+    if !state.media.is_configured() {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Storage is off. Set TINYBIRD_MEDIA_KEY in .env and restart.",
+        );
+    }
+
+    let owner = match shot_owner(&state, &headers).await {
+        Ok(owner) => owner,
+        Err(err) => return auth_error(&err),
+    };
+
+    let mut game_code = String::new();
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        match field.name() {
+            Some("game") => {
+                game_code = field.text().await.unwrap_or_default();
+            }
+            Some("file") => {
+                bytes = match field.bytes().await {
+                    Ok(bytes) => bytes.to_vec(),
+                    Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
+                };
+            }
+            _ => continue,
+        }
+    }
+
+    if bytes.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "No picture in the request.");
+    }
+    // A screenshot is a PNG. Checking the signature stops the picture route
+    // being a way to put arbitrary files in the vault under a name that will
+    // later be served as an image.
+    if !bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return json_error(StatusCode::BAD_REQUEST, "That is not a PNG.");
+    }
+
+    let taken_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0);
+    let name = media::shot_name(&owner, &game_code, taken_at_ms);
+
+    match media::upload_asset(&state.media, &name, "image/png", bytes).await {
+        Ok(asset) => {
+            let url = escape_json_string(&asset.url);
+            let name = escape_json_string(&asset.name);
+            text(
+                StatusCode::OK,
+                format!("{{\"ok\":true,\"name\":\"{name}\",\"url\":\"{url}\"}}"),
+                "application/json; charset=utf-8",
+            )
+        }
+        Err(err) => json_error(StatusCode::BAD_GATEWAY, &err),
+    }
+}
+
+/// Whose screenshots these are. The same rule as saves, for the same reason:
+/// never anything the browser sent.
+async fn shot_owner(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<String, AuthError> {
+    save_owner(state, headers).await
+}
+
 /// Addon manifests, as one array the page can hand straight to the emulator.
 ///
 /// The browser has no filesystem, so this is how a manifest reaches it. One
@@ -1375,6 +2190,41 @@ async fn sprite_png(Path(species_id): Path<u16>, State(state): State<AppState>) 
     }
 }
 
+async fn ffta_race_png(Path(race): Path<String>) -> Response {
+    let bytes = match race.as_str() {
+        "human" => FFTA_HUMAN_PNG,
+        "bangaa" => FFTA_BANGAA_PNG,
+        "nu-mou" => FFTA_NU_MOU_PNG,
+        "viera" => FFTA_VIERA_PNG,
+        "moogle" => FFTA_MOOGLE_PNG,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let mut response = binary(StatusCode::OK, bytes.to_vec(), "image/png");
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    response
+}
+
+async fn ffta_job_png(Path(job): Path<String>) -> Response {
+    let Ok(job_id) = u8::from_str_radix(&job, 16) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(bytes) = job_id
+        .checked_sub(2)
+        .and_then(|index| FFTA_JOB_PNGS.get(index as usize))
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = binary(StatusCode::OK, bytes.to_vec(), "image/png");
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    response
+}
+
 fn static_text(body: &'static str, content_type: &'static str) -> Response {
     text(StatusCode::OK, body.to_string(), content_type)
 }
@@ -1419,6 +2269,61 @@ fn escape_json_string(value: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A scratch directory of our own, since the crate has no tempfile dep.
+    fn scratch(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = env::temp_dir().join(format!("tinybird-{name}-{nanos}"));
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        dir
+    }
+
+    #[test]
+    fn the_newest_file_is_found_through_subdirectories() {
+        let root = scratch("newest");
+        std::fs::write(root.join("old.rs"), "1").unwrap();
+        std::fs::create_dir_all(root.join("deep/deeper")).unwrap();
+        let buried = root.join("deep/deeper/new.rs");
+        // Written second, so it is the newer of the two whatever the clock's
+        // resolution: the check only has to prefer it, not date it.
+        std::fs::write(&buried, "2").unwrap();
+
+        let newest = newest_file_in(&root).expect("a file was found");
+        let buried_at = std::fs::metadata(&buried).unwrap().modified().unwrap();
+        assert!(newest >= buried_at);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_directory_that_is_not_there_yields_nothing() {
+        assert!(newest_file_in(FsPath::new("no/such/directory/anywhere")).is_none());
+    }
+
+    #[test]
+    fn nothing_is_claimed_when_the_emulator_sources_are_not_around() {
+        // The distributed-binary case: `WASM_SOURCES` are checkout-relative, so
+        // running from anywhere else finds none of them. Silence is the only
+        // honest answer there — and the tests run from the crate directory,
+        // which is exactly such a place.
+        let root = scratch("wasm");
+        let wasm = root.join("tinybird_wasm.wasm");
+        std::fs::write(&wasm, b"\0asm").unwrap();
+
+        assert_eq!(wasm_is_behind(&wasm), None);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_missing_module_is_not_reported_as_behind() {
+        // "Not built yet" is a different message, delivered by the route that
+        // serves it. This one only speaks about a module that exists.
+        assert_eq!(wasm_is_behind(FsPath::new("no/such/module.wasm")), None);
+    }
+
     #[test]
     fn config_uses_defaults_without_args() {
         let config = Config::from_env_and_args(Vec::new());
@@ -1458,8 +2363,12 @@ mod tests {
     fn the_play_page_looks_up_each_element_under_one_name() {
         let block = PLAY_JS
             .split_once("const el = {")
-            .and_then(|(_, rest)| rest.split_once("
-};"))
+            .and_then(|(_, rest)| {
+                rest.split_once(
+                    "
+};",
+                )
+            })
             .expect("play.js should declare `const el = { ... };`")
             .0;
 
@@ -1479,7 +2388,11 @@ mod tests {
             );
             seen.push(key);
         }
-        assert!(seen.len() > 20, "expected the whole map, found {}", seen.len());
+        assert!(
+            seen.len() > 20,
+            "expected the whole map, found {}",
+            seen.len()
+        );
     }
 
     /// Every element play.js reaches for has to be in the page.
@@ -1488,15 +2401,66 @@ mod tests {
     /// much later as a property access on null rather than at the lookup.
     #[test]
     fn every_element_the_play_page_looks_up_exists_in_the_markup() {
+        let missing = missing_ids(PLAY_JS, PLAY_HTML);
+        assert!(
+            missing.is_empty(),
+            "play.js looks up ids the page has not got: {missing:?}"
+        );
+    }
+
+    /// Ids a script reaches for with `$("...")` that the markup has not got.
+    fn missing_ids<'a>(js: &'a str, html: &str) -> Vec<&'a str> {
         let mut missing: Vec<&str> = Vec::new();
-        for (_, rest) in PLAY_JS.match_indices("$(\"").map(|(i, _)| PLAY_JS.split_at(i + 3)) {
+        for (_, rest) in js.match_indices("$(\"").map(|(i, _)| js.split_at(i + 3)) {
             let Some((id, _)) = rest.split_once('"') else {
                 continue;
             };
-            if !PLAY_HTML.contains(&format!("id=\"{id}\"")) && !missing.contains(&id) {
+            if !html.contains(&format!("id=\"{id}\"")) && !missing.contains(&id) {
                 missing.push(id);
             }
         }
-        assert!(missing.is_empty(), "play.js looks up ids the page has not got: {missing:?}");
+        missing
+    }
+
+    #[test]
+    fn every_element_the_contact_page_looks_up_exists_in_the_markup() {
+        let missing = missing_ids(CONTACT_PAGE_JS, CONTACT_HTML);
+        assert!(
+            missing.is_empty(),
+            "contact.js looks up ids the page has not got: {missing:?}"
+        );
+    }
+
+    /// The ticket page has the same trap and one of its own: the panel's views
+    /// are shown and hidden through a list of ids rather than a lookup each, so
+    /// those names never appear in a `$("...")` and would go unchecked.
+    #[test]
+    fn every_element_the_ticket_page_looks_up_exists_in_the_markup() {
+        let mut missing = missing_ids(TICKETS_JS, TICKETS_HTML);
+
+        let views = TICKETS_JS
+            .split_once("const VIEWS = [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .expect("tickets.js should declare `const VIEWS = [ ... ]`")
+            .0;
+        for id in views.split('"').skip(1).step_by(2) {
+            if !TICKETS_HTML.contains(&format!("id=\"{id}\"")) && !missing.contains(&id) {
+                missing.push(id);
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "tickets.js looks up ids the page has not got: {missing:?}"
+        );
+    }
+
+    /// The ticket route is the one the contact service is told about when its
+    /// portal stops being hosted, so the page and the link have to agree on it.
+    #[test]
+    fn the_ticket_page_and_its_script_agree_on_where_tickets_live() {
+        assert!(TICKETS_JS.contains("const ROOT = \"/support/tickets\""));
+        assert!(TICKETS_HTML.contains("href=\"/support/tickets\""));
+        assert!(CONTACT_HTML.contains("href=\"/support/tickets\""));
     }
 }

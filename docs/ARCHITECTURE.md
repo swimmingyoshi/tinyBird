@@ -266,7 +266,7 @@ Phases 1–6 are the "UI/UX first" block the current work is focused on. See
 
 ---
 
-## Two bugs worth remembering
+## Three bugs worth remembering
 
 Both were found by a game refusing to boot, and both were a single wrong
 constant or a missing line rather than anything structural. They are recorded
@@ -308,6 +308,25 @@ directly, which made it look like the new game had loaded.
 rebuilds the peripherals. The cartridge, the BIOS image, and battery-backed save
 data survive, as they do on hardware.
 
+### A double-size sprite drawn half a sprite away
+
+For an affine OBJ, X and Y in OAM are the top-left of the **bounding box**, and
+when the double-size bit is set that box is already the doubled one. The pixel
+sampler had this right — it centres the texture inside the box it is given. The
+caller did not: it shifted the origin up and left by half the extra size, which
+put every double-size affine sprite half a sprite from where the hardware puts
+it, 32px each way on a 64x64.
+
+Two things made it hard to see. Ordinary affine sprites were unaffected, because
+for them the box *is* the sprite and the shift computed to zero — so most
+rotation and scaling looked perfect. And `is_on_scanline` never had the shift,
+so it tested the box where the hardware puts it while the renderer drew
+somewhere else; the rows that did get drawn sampled the wrong part of the
+texture rather than simply appearing in the wrong place, which reads as a
+graphical glitch rather than as a misplaced sprite.
+
+---
+
 ## Cartridge backup
 
 Three of the four GBA backup types are memory-mapped and live in `bus.rs`. EEPROM
@@ -329,6 +348,53 @@ Two details cost real time and are worth stating:
 Save-type detection reads the tag string every commercial cartridge embeds.
 `SRAM_F_V` is a real tag and does not contain `SRAM_V`, so it needs its own
 check; without it the cartridge is reported as having no backup at all.
+
+---
+
+## The cartridge clock
+
+Ruby, Sapphire and Emerald carry a Seiko S-3511A on the cartridge, wired to the
+Game Pak's GPIO pins. FireRed and LeafGreen do not have the chip at all, which
+is why berry growth there is counted in steps and in Hoenn it is counted in
+days. It lives in [`rtc.rs`](../crates/tinybird-core/src/rtc.rs).
+
+It is not memory-mapped either. Three halfwords are overlaid on the start of the
+ROM — data at `0x080000C4`, pin direction at `C6`, and a control register at
+`C8` — and everything else is bit-banged over four pins: raise CS, clock eight
+bits of a command out on SCK, clock the answer back in. Hence a state machine
+rather than a set of registers.
+
+Three things are worth stating:
+
+- **Reads are gated twice.** A cartridge only gets the registers if its game
+  code says it has the chip, and even then only once the game sets the control
+  register. Until both hold, those three halfwords are the ROM underneath them,
+  which is exactly what a board with no chip on it reads as forever. Writes are
+  gated only on the first: setting the control register is how a game turns the
+  other two on.
+- **The offset is mirrored everywhere.** `0xC4` is a cartridge offset, and every
+  region masks down to the same low offsets — EWRAM's `0x020000C4` as readily as
+  ROM's `0x080000C4`. The write path runs before the region match, so it has to
+  check the region itself; without that, EWRAM writes at the mirrored offset
+  would be swallowed by the clock.
+- **The core cannot read the wall clock.** `tinybird-core` runs on
+  `wasm32-unknown-unknown`, where `SystemTime::now` panics, so the host pushes
+  the time in with `Gba::set_wall_clock` and the clock advances between pushes
+  from the cycles the machine has run. The web host pushes every frame from
+  `Date.now()`; the desktop pushes before each batch. A host that pushes once
+  still gets a running clock, on emulated time — which is what fast forward
+  ought to do to a cartridge that is being fast forwarded.
+
+The clock is deliberately **not** in the savestate. A real cartridge's clock
+runs on its own battery whether or not the console is on, so restoring a machine
+should not wind it back; and since the host pushes the time anyway, it is right
+again on the very next frame. Leaving it out also meant the savestate format did
+not have to change.
+
+Writes from the game to the date and time registers are dropped. The clock
+reported is the host's, and letting a game move it would put the machine's idea
+of now somewhere the host cannot follow. Only the status register is kept, which
+is where the games ask for 24-hour mode.
 
 ---
 
@@ -475,6 +541,39 @@ place to leave it than a puppeteering problem without one.
 given the same buttons with no cable between them produce 0 transfers and
 `sd=0` on both consoles, against 18,739 and `sd=1` with one. Without that
 comparison the figures would just be large.
+
+### A waiting console still has to answer the cable
+
+`IntrWait` and `VBlankIntrWait` halt until a particular interrupt flag is set.
+The gate that emulates them used to re-halt on every instruction unless *that*
+flag was pending — which meant no other interrupt handler could ever run while
+a game was waiting.
+
+On hardware the wait is not exclusive. It halts; **any** enabled interrupt
+wakes the CPU, the BIOS dispatcher calls the game's handler, and only then does
+the wait look again at the flag it wants. The handler for an unrelated
+interrupt runs, every time.
+
+For a linked game the difference is fatal rather than slow. The serial
+interrupt is how a console reads what came off the cable, so a game sitting in
+`VBlankIntrWait` — which is most menus, including a Pokémon summary screen —
+stopped answering the cable the instant it got there. The other console saw a
+partner that had gone silent and reported a communication error immediately.
+
+Two details matter in the fix:
+
+- The interrupt is **taken**, not merely woken from. Clearing `halted` on its
+  own lets the waiting thread run the instruction after `IntrWait`, so the wait
+  returns without its flag ever having been set. Entering the handler puts the
+  program counter on the IRQ vector instead.
+- The wait itself is untouched: still outstanding, still on its own flag, and
+  it has not consumed the unrelated interrupt's bit. Once the handler returns
+  and clears `IF`, the gate finds nothing pending and halts again.
+
+`test_intr_wait_ignores_unrelated_irq_bits` asserted the old behaviour, so it
+had encoded the bug. Its intent was right — an unrelated flag must not satisfy
+the wait — and that part still holds; what was wrong was expecting the console
+to stay asleep through the handler.
 
 ### The cable is visible in every serial mode
 

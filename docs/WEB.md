@@ -12,12 +12,34 @@ page is put together, and how asset storage is wired.
 
 | Path | What it is |
 |---|---|
-| `/` | Home. Shows real state: whether storage is configured and how many ROMs are reachable. |
+| `/` | Home. A landing page: the claim, the three surfaces, the way on. |
 | `/play` | The emulator. Canvas rendering, keyboard input, WebAudio, save states. |
+| `/info` | Where things stand: what works, what is in hand, what is knowingly missing — plus this server's live state and how to run your own. |
+| `/contact` | The contact form, and the sign-in in front of it. |
+| `/support/tickets` | What you have sent and what came back. One conversation at `/support/tickets/{id}`. |
 | `/overlay/{section}` | OBS browser sources, fed from the desktop app's JSON export. |
 
 Everything is served by `tinybird-web`, a single axum binary with the pages
 compiled in via `include_str!`.
+
+The three pages outside the emulator share their header through
+[`chrome.js`](../crates/tinybird-web/src/assets/chrome.js) — `mountChrome()`
+sets the server-up dot and mounts the account menu — and their look through one
+vocabulary in `console.css`: a `.strip` with a `.strip__title`, holding
+`.tiles`. The home page is only that, three times.
+
+The home page used to carry a live storage read-out, the commands to run it
+yourself, and the contact form. All three were real and none of them answered a
+question somebody arriving at the front door had asked yet, so the first two
+moved to `/info` and the third to `/contact`.
+
+> The emulator module is a separate build output, and `cargo build` does not
+> build the `wasm32` target. The server warns at startup when the module is
+> older than the sources compiled into it — `tinybird-core`, `-addons`,
+> `-games`, `-wasm`. It compares against **those sources**, not against its own
+> binary: every edit to a page or a stylesheet relinks this server and leaves
+> the module correctly untouched, and comparing the two build outputs made the
+> warning fire through whole days of front-end work with nothing wrong.
 
 > Because assets are embedded at compile time, **editing HTML/CSS/JS requires a
 > rebuild** of `tinybird-web`. This trips people up; if a change does not appear,
@@ -469,6 +491,50 @@ kept free of DOM references so it can be tested without a browser — including
 the thing that only breaks once deployed, which is that a page served over TLS
 may not open a plain `ws://` socket.
 
+### When a console cannot take a transfer
+
+A child that cannot join a transfer — it is ahead of the parent, or too far
+behind to catch up to the instruction the parent started on — **says so**
+rather than going quiet.
+
+Silence reaches the same conclusion. The difference is when: the parent waits
+out its full timeout first, and the parent's game is frozen for the whole of
+it, so a run of missed transfers becomes a run of stalls. A game watching its
+link go quiet for hundreds of milliseconds at a time is a game about to report
+a communication error, and that is true of any linked game, not just Pokémon.
+
+`link_skip` costs one message and turns a stall into a decision. The parent
+records the seat as `0xFFFF` — what hardware reads from a slot nobody is
+driving, and what a game already knows how to handle — and settles at once.
+
+The message is relayed like `link_value`, by any member about its own seat,
+and travels the same-machine path as well as the server one. A skip that only
+worked over the relay would leave two tabs on one computer stalling exactly
+where the message exists to stop them.
+
+### Reading the cable when it misbehaves
+
+The link note under the cable toggle names the **dominant** failure, not just a
+count:
+
+```text
+Player 2 of 2 · 58/s · 12 lost, mostly out of step
+```
+
+The four ways a transfer is lost want four different fixes, so a bare total
+says a link is unhappy and nothing about why:
+
+| Shown | Means |
+|---|---|
+| out of step | a console could not reach the instruction the parent started on |
+| no answer | nobody replied in time — the network, or a console that stopped |
+| arrived late | data reached a console that was no longer waiting for it |
+| given up | a wait abandoned, usually because the room went away |
+
+`window.tinybird.link` has the raw tally for anything finer.
+
+---
+
 ## 5. Asset storage
 
 Storage is the [0xstash media API](https://media.0xstash.dev/docs). The split
@@ -525,7 +591,22 @@ for yourself works. With it, saves belong to whoever is signed in.
 | `GET /api/auth/me` | who the caller is, and whether accounts exist at all |
 
 The sign-in panel is a dropdown hung off the header rather than a rail panel:
-it is checked rarely and read never, so it should cost no vertical space. The
+it is checked rarely and read never, so it should cost no vertical space. It is
+**the same menu on every page**, built by
+[`account.js`](../crates/tinybird-web/src/assets/account.js) into a one-line
+host each page carries:
+
+```html
+<div class="account" id="account" hidden></div>
+```
+
+`mountAccount({ onChange })` returns a small controller — `refresh()`,
+`user`, `noticeSignedOut()`, and an `extras` element a page can hang its own
+buttons in, which is where `/play` puts "Claim old saves". Nothing else has
+anything to add. It began as markup in `play.html` with its behaviour in
+`play.js`, which was fine while `/play` was the only page that had one; signing
+in is how you send a message, claim a save, or be someone in a room, so it
+belongs in the bar rather than bolted to whichever form happens to need it. The
 bar shows only whether you are signed in — a hollow dot or a lit one — and the
 address appears only once the menu is open, which keeps it out of a stream
 capture. The same reason the status line says "Signed in" and not "signed in as
@@ -587,6 +668,17 @@ Three rules the tests pin:
   not evict somebody else's progress.
 
 `POST /api/saves/claim` moves the pre-accounts saves to the signed-in caller.
+
+A save's name is part of its filename, and neither backend can rewrite an
+object's key in place, so `PATCH` is an upload under the new name followed by a
+delete of the old one — the same order an overwrite uses, and for the same
+reason: the copy is stored before the original goes, so a failure anywhere
+leaves the save where it was. The bytes make a round trip through the server to
+do it, which is the price of the name living in the key; it is paid on a
+rename, which is rare, and not on a save, which is not. A name may hold letters,
+numbers and hyphens — underscore separates the fields of the filename, so it
+cannot appear inside one — and the page trims as you type with the same rule so
+what is accepted is what is stored.
 Neither backend can rename an object, so each is re-uploaded under the new owner
 and the original removed afterwards, preserving timestamps and labels. It is a
 one-time migration and whoever claims them gets them: they have no owner to
@@ -602,6 +694,7 @@ the vault only takes image, audio, and video and verifies the bytes match.
 |---|---|
 | `GET /api/saves?game=BPRE` | saves for one cartridge, newest first |
 | `POST /api/saves` | store one; `file`, `game`, optional `label` and `replace` |
+| `PATCH /api/saves/{id}` | rename one; JSON `{"label": "..."}` |
 | `DELETE /api/saves/{id}` | remove one |
 | `GET /api/proxy?url=…` | relay storage bytes to the browser |
 
@@ -751,6 +844,47 @@ supports `HEAD` with `Content-Length` and byte ranges (`206` with
 bytes and refuses any URL not on the configured storage host, so it cannot
 become an open relay. Without it, a CORS regression upstream would surface as
 nothing but "Failed to fetch".
+
+### Who can see what
+
+The vault is one bucket shared by everything, so what keeps files apart is the
+route that lists them, not the store.
+
+| Route | Scope | Why |
+|---|---|---|
+| `/api/library` | Everyone, **cartridges only** | A shared ROM library is the point of it |
+| `/api/saves` | The signed-in account | Save states belong to whoever made them |
+| `/api/shots` | The signed-in account | So do screenshots |
+
+Two rules make that hold:
+
+**The owner is part of the stored name, and the server writes the name.** The
+vault has no notion of an owner, so a filename is all there is to say whose
+file this is — which means a caller who could choose the name could file a
+picture under someone else's account, or read theirs by asking for a listing of
+it. `/api/shots` builds the name from the session; nothing the browser sends is
+trusted. It is the same rule `/api/saves` follows, for the same reason.
+
+**The unscoped route returns cartridges and nothing else.** `/api/library` is
+deliberately not scoped, so everything it returns is visible to anyone who can
+reach the server. It used to list the whole vault, which advertised every
+screenshot in it — name, size and a working URL — to any visitor. The page had
+always filtered to ROM extensions before drawing anything, so it *looked*
+right; the filtering is now on the server, where it is a boundary rather than a
+formatting choice.
+
+Filtering in the page would have made privacy a setting anyone could turn off
+in the developer tools.
+
+**What is not solved yet.** A vault URL is a public CDN URL: it is unlisted,
+not protected, so anyone given one can open it. That is fine for a picture you
+chose to share and wrong as a privacy guarantee, and the private-backend path
+that `/api/saves` can use has no equivalent here yet.
+
+**Screenshots taken before this** were named by the browser and carry no owner,
+so they parse as nobody's and appear in no listing. Unreachable rather than
+everybody's is the safe direction for that mistake to fall, but they are still
+in the vault and still on public URLs.
 
 ### What the vault will and will not take
 
@@ -917,12 +1051,19 @@ everything stacks.
 The addon rail always says something. With no addon claiming the cartridge it
 explains what an addon is, rather than leaving a blank stripe.
 
-**The picture scales by whole pixels.** `fitScreen` takes the largest integer
-multiple of 240x160 that fits the bezel and letterboxes the remainder, because
-a fractional scale makes some source pixels two device pixels wide and others
-three, and that uneven ripple is what made an emulator look worse than the
-hardware. A `ResizeObserver` on the bezel re-runs it, so the window and full
-screen are the same code path.
+**The picture fills the bezel, and the whole-pixel step happens off screen.**
+A fractional scale over a 240x160 canvas makes some source pixels two device
+pixels wide and others three, and that uneven ripple is what made an emulator
+look worse than the hardware — but scaling by whole numbers and letterboxing
+the remainder threw away most of a step, running a 690px column at 2x with
+black either side. So `fitScreen` does both: the frame is blown up by a whole
+number onto a backing store large enough to cover the bezel in device pixels,
+and the CSS size fills the bezel exactly, leaving the browser one fractional
+step it resamples smoothly. Frames land on a 240x160 `frameCanvas` first,
+because `putImageData` ignores scaling — and that canvas is what screenshots,
+save thumbnails and shared lobby frames read, so a capture is always the
+picture the game drew. A `ResizeObserver` on the bezel re-runs it, so the
+window and full screen are the same code path.
 
 > **Every element gets one name in the `el` map.** A duplicate key in an object
 > literal is silent in JavaScript: the last one wins. Adding the lobby's
@@ -1087,6 +1228,211 @@ booted cold.
 
 `/play?rom=<url>&name=<label>` boots straight into a ROM, so a vault asset can
 be shared as a link.
+
+### The contact form
+
+`/contact` is the form, backed by the
+[0xstash contact API](https://contact.0xstash.dev/api/help). Optional: without
+`TINYBIRD_CONTACT_KEY` the panel says the form is switched off and who can turn
+it on, and the home page's signpost card for it does not appear — a card
+promising to reach a person should not lead to a form that cannot send. The nav
+link stays either way: it is a fixed bar on every page, and the page it leads to
+explains itself.
+
+It began as a panel at the foot of the home page, which put a form nobody had
+come for underneath everything they had. Its own page also gives the sign-in
+room to be a sign-in rather than a gate bolted to the front of something else.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TINYBIRD_CONTACT_KEY` | none | Project form key. The form is hidden without it. |
+| `TINYBIRD_CONTACT_ORIGIN` | none | `Origin` to present to the service. |
+| `TINYBIRD_CONTACT_URL` | `https://contact.0xstash.dev` | API base URL. |
+
+| Route | Purpose |
+|---|---|
+| `GET /api/contact` | whether there is a form, whether it needs a sign-in, and who it would send as |
+| `POST /api/contact` | `name`, `subject`, `message`, optional `category` and `siteUrl`; plus `email` only when accounts are off |
+
+A `202` from a signed-in sender carries `ticket`, the id the service filed
+the message under, and the form turns it into a link straight to
+`/support/tickets/{id}` — knowing there is a ticket and being able to open
+it are different things. The id is checked as an id before it is handed to
+the page, because the page puts it in a URL; a service that answers with
+something else costs the sender a link and nothing more. It is withheld
+without a session, where the message was never bound to an account and the
+link would only lead to a panel saying so.
+
+That leaves the honeypot's `202` distinguishable from a real one, which it
+was not before. Telling them apart needs a bot that has registered, verified
+an address, signed in, and then filled in a field it cannot see — by which
+point the per-account quota is the limit doing the work.
+
+**Sending requires an account** wherever accounts exist — that is,
+whenever `TINYBIRD_AUTH_PROJECT_SECRET` is set. Without it there is nobody to
+sign in as, the server is one person's own machine, and the form takes a name
+and an address the way any contact form does. The same `is_configured()` fork
+`save_owner` and `lobby_identity` use.
+
+**A signed-in sender's address comes from their session**, and the body's is
+ignored. This is the whole point of requiring the account: a form that demands
+a sign-in and then lets the page name the reply address has bought nothing,
+because the reply address is the part that matters. It is how a signed-in
+stranger would ask for somebody else's account to be looked at. So the email
+field goes away when signed in and the panel shows *Signed in as …* instead —
+offering an input whose contents are discarded is a lie the page would tell.
+
+**The name is still asked for.** It is a courtesy, not an identity claim: a
+username is a handle and often not a name at all, and whoever answers a support
+message would rather have something to call you. The field starts filled with
+the account's username, so leaving it alone is a valid answer, and typing over
+it changes nothing about who the message is from. Both travel with it — what
+was typed as `name`, and the account's own handle as `metadata.username`,
+beside the `sub` claim in `metadata.account`. Two fields rather than one,
+because collapsing them means either losing the handle support searches by or
+addressing somebody as `ash_1996`.
+
+**Signing in is the bar's account menu**, the same one every page carries, not
+a login box on this page. `/contact` shows a sentence saying so where the form
+would be, and redraws itself when the menu reports a change — a second login
+form here would be a second thing to keep in step for no reason.
+
+**The page does not hold the form key.** The published integration has the
+browser post straight to `contact.0xstash.dev` with the key in an
+`Authorization` header, pinned to a registered `Origin`. That fits a hosted
+marketing site. It does not fit this: tinyBird is a server people run on their
+own machine, so the page's origin is `http://127.0.0.1:8877`, which nobody can
+register, and a key shipped to that page would be a key committed to this
+repository. So the same arrangement as accounts and storage:
+
+```
+browser ──POST /api/contact──▶ tinyBird ──bearer form key──▶ contact service
+```
+
+`TINYBIRD_CONTACT_ORIGIN` exists because of the half of that trade which does
+cost something. A request from this server carries no `Origin` of its own, so
+if the key is registered against specific origins, name one here and it is sent.
+Left unset nothing is sent, which is right for a key with no origin restriction.
+
+**Validation happens twice.** The service asks for a name, an address, a
+subject, and ten characters of message; [`contact.rs`](../crates/tinybird-web/src/contact.rs)
+checks the same things before spending a request, so the form can say which
+field is wrong immediately and in its own words. It also caps the message at
+4000 characters — not a service limit, a ceiling so a relayed request cannot
+push megabytes through this server's key.
+
+**The honeypot is answered, not refused.** The form carries a `website` field
+positioned off screen and out of the tab order; a person never sees it, so
+anything in it came from a script. A filled one is answered with the same `202`
+a real message gets and nothing is sent. Telling the sender which field gave
+them away only teaches them to leave it alone next time.
+
+**Three limits, in front of each other.** The form spends this server's key, so
+on a public host it is otherwise an open relay into somebody's inbox.
+
+| Limit | Value | Refusal |
+|---|---|---|
+| Cooldown between one sender's messages | 60s | `429`, `Cooldown` |
+| One sender's messages per hour | 3 | `429`, `Quota` |
+| Whole process, whoever is sending | 30 per 10 min | `429`, `Throttled` |
+
+Counted per account, not per address. That only became worth doing once
+sign-in was required: an address is typed by whoever is sending, and anyone
+varying it walks straight past a per-address limit, whereas a `sub` claim is
+not theirs to vary. The process ceiling stays underneath as a backstop — it is
+what a pile of fresh accounts runs into, and what covers the no-accounts case,
+where every message counts against the single `anonymous` sender.
+
+The first two refusals say **how long**, in words rather than seconds
+(`about 40 minutes`, not `2400`), and set `Retry-After` for anything in front
+of the server reading headers rather than sentences. The process ceiling sets
+no `Retry-After`: when it clears depends on what everyone else does, and a
+promised moment that turns out not to be one is worse than no promise.
+
+A refusal by the ceiling does not spend the sender's own allowance — the checks
+all run before anything is recorded, so a message stopped by one limit is not
+also charged against another.
+
+### Tickets
+
+A sent message becomes a ticket, and the service keeps the conversation:
+the original, whatever support replied, whatever the sender said next.
+`/support/tickets` is that list and `/support/tickets/{id}` is one of them —
+the same document either way, drawing whichever the path names, so a ticket
+link survives being mailed, pasted and reloaded.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/tickets` | the signed-in account's tickets; optional `limit` and `offset` |
+| `GET /api/tickets/{id}` | one ticket |
+| `GET /api/tickets/{id}/messages` | that ticket's conversation |
+| `POST /api/tickets/{id}/messages` | `message` and `idempotencyKey` |
+
+**The credentials swap places.** A submission goes out under this server's form
+key with the sender named in an `X-0xstash-User-Token` header; a ticket read
+goes out the other way round — the sender's access token is the bearer, and the
+form key rides in `X-Contact-Project-Key`. That is not an inconsistency in the
+API, it is the security model. A ticket read is authorised by whoever the token
+introspects to, and the project key only says which project is being asked
+about. The key alone reads nothing, and neither does a request id: a guessed one
+answers exactly as a wrong one does.
+
+```
+browser ──GET /api/tickets──▶ tinyBird ──bearer session token──▶ contact service
+                                        + X-Contact-Project-Key
+```
+
+**The token never reaches the page.** The published integration keeps the
+access token in browser memory and calls the service directly. tinyBird cannot:
+its origin is `http://127.0.0.1:8877`, which nobody can register, and it has no
+in-browser token to keep — [`auth.rs`](../crates/tinybird-web/src/auth.rs) holds
+sessions server-side behind an `HttpOnly` cookie. So the relay is the same one
+the form uses, and it lands on the same side of every acceptance test: nothing
+in `localStorage`, nothing in a URL, no key in a built asset, and no ticket
+readable by anyone but the account that opened it.
+
+**A stale token is retried once.** `current_session` refreshes anything within a
+minute of expiring, so the ordinary case never reaches the service stale. When
+it does anyway — a token revoked early, clocks apart by more than that minute —
+the `401` triggers one refresh and one retry, and a second refusal is an answer.
+`ticket_call` in `main.rs` is where that lives; a loop there would spend a
+refresh token per attempt and never stop.
+
+**Replies are idempotent, and the page owns the key.** The composer mints a
+`crypto.randomUUID()` when a draft is first sent and keeps it in `localStorage`
+beside the draft itself. A send that times out leaves both in place, so pressing
+the button again carries the same `Idempotency-Key` and the service files one
+message rather than two; both are cleared only once a send has actually
+succeeded. A key minted per request would make every retry a new message, which
+is the failure it exists to prevent. The server refuses a reply that arrives
+without a usable one rather than inventing it — inventing it here would put the
+key back on the wrong side of the retry.
+
+**Nothing about a ticket's shape is assumed.** The service has published no
+schema for one, so the relay passes its JSON through whole rather than reshaping
+it, and [`tickets.js`](../crates/tinybird-web/src/assets/tickets.js) reads every
+field through a `pick` that takes the first name actually present — `status` or
+`state`, `createdAt` or `created_at`. A field nobody anticipated is simply not
+drawn, and a renamed one keeps rendering. Message bodies are set as
+`textContent` and shown `pre-wrap`: it is somebody's writing arriving over a
+network, and the only safe thing to do with it is show it as writing.
+
+**Which side said what is a guess, and says so.** The service names it
+differently in different places, so a message that matches neither pattern is
+left unattributed rather than credited to the wrong person — a support reply
+shown as your own is worse than one shown as nobody's.
+
+**Getting there is not an email round trip.** A signed-in sender's message is
+bound to their `sub` claim as it goes, so the ticket is readable the moment the
+service takes it. The form links straight to it and `/contact` carries a
+standing link to the list. The emailed link still works and still matters — it
+is what reaches somebody who has closed the tab — but nobody has to wait for it.
+
+**The portal stays hosted.** Emailed ticket links open the service's own private
+page, which is right while this is a thing people run on `localhost`: a link has
+to work on whatever device opens the mail. Pointing the project's portal at
+`https://gba.0xstash.dev/support/tickets/{ticketId}` is a change made in the
+operator dashboard once that route is live, not from here.
 
 ---
 
@@ -1272,10 +1618,20 @@ the same host, the default `127.0.0.1` is right and nothing needs changing. On a
 server where the proxy is elsewhere, set `TINYBIRD_WEB_HOST=0.0.0.0`.
 
 **Nothing else needs configuring**, and one thing that would have needed it does
-not: the auth service never sees the new origin, because the browser never talks
-to it. The server does, from wherever it runs. That was the point of the
-backend-for-frontend arrangement in [`auth.rs`](../crates/tinybird-web/src/auth.rs),
-and it means a new domain needs no CORS registration.
+not: neither the auth service nor the contact service ever sees the new origin,
+because the browser never talks to either. The server does, from wherever it
+runs. That was the point of the backend-for-frontend arrangement in
+[`auth.rs`](../crates/tinybird-web/src/auth.rs) and
+[`contact.rs`](../crates/tinybird-web/src/contact.rs), and it means a new domain
+needs no CORS registration.
+
+The contact form needs no attention either, as long as accounts are on: it
+requires a sign-in, limits each account to three messages an hour with a minute
+between them, and caps the whole process at thirty per ten minutes. Those are
+sized for a server a handful of people use. A busier one wants the numbers in
+[`contact.rs`](../crates/tinybird-web/src/contact.rs) raised and a real limiter
+in front of it — the counters live in memory, so a restart forgives everyone,
+and more than one process would not share them.
 
 The session cookie picks up `Secure` on its own: `is_secure` reads
 `X-Forwarded-Proto`, which Cloudflare sets. WebSockets proxy through Cloudflare

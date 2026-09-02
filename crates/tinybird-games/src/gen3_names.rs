@@ -43,7 +43,9 @@ pub struct Table {
 impl Table {
     /// The name at `index`, or `None` if it decodes to nothing.
     pub fn name(&self, memory: &dyn MemoryView, index: u16) -> Option<String> {
-        let at = self.base.checked_add(u32::from(index).checked_mul(self.stride)?)?;
+        let at = self
+            .base
+            .checked_add(u32::from(index).checked_mul(self.stride)?)?;
         let raw = memory.read_bytes(at, self.width);
         let text = decode(&raw);
         (!text.is_empty()).then_some(text)
@@ -78,10 +80,18 @@ const MOVE_COUNT: u16 = 355;
 const ITEM_COUNT: u16 = 400;
 
 /// What the names were read from, so a different cartridge re-reads them.
+///
+/// The fingerprint is what makes this a *cartridge* key rather than a *game*
+/// key. A ROM hack keeps the game code and revision of whatever it was built
+/// on, so keying on those two alone meant loading vanilla FireRed and then a
+/// FireRed hack in one session served the hack the original's name tables —
+/// its renamed species reported under the names they used to have, with
+/// nothing to indicate the read-out was describing a different cartridge.
 #[derive(Clone, PartialEq, Eq)]
 struct RomKey {
     game_code: String,
     revision: u8,
+    fingerprint: u64,
 }
 
 static CACHE: RwLock<Option<(RomKey, Names)>> = RwLock::new(None);
@@ -100,6 +110,7 @@ fn ensure_within(memory: &dyn MemoryView, rom: &RomIdentity, limit: usize) {
     let key = RomKey {
         game_code: rom.game_code.clone(),
         revision: rom.revision,
+        fingerprint: rom.fingerprint,
     };
 
     if let Ok(cache) = CACHE.read() {
@@ -268,7 +279,6 @@ fn search_within(memory: &dyn MemoryView, limit: usize) -> Tables {
     }
 }
 
-
 /// Turn a hit into a table base, if the entries around it agree.
 fn base_from_hit(memory: &dyn MemoryView, anchor: &Anchor, hit: u32) -> Option<Table> {
     let base = hit.checked_sub(u32::from(anchor.needle.1) * anchor.stride)?;
@@ -354,11 +364,18 @@ mod tests {
     use tinybird_addons::SparseMemory;
 
     fn rom_id(code: &str) -> RomIdentity {
+        dump(code, 0)
+    }
+
+    /// The same header, from a named cartridge. Every field but the last is
+    /// what a ROM hack inherits unchanged from the game it was built on.
+    fn dump(code: &str, fingerprint: u64) -> RomIdentity {
         RomIdentity {
             title: "POKEMON FIRE".to_string(),
             game_code: code.to_string(),
             maker_code: "01".to_string(),
             revision: 0,
+            fingerprint,
         }
     }
 
@@ -456,10 +473,45 @@ mod tests {
         );
 
         ensure_within(&memory, &rom_id("BPRE"), 4 * 1024 * 1024);
-        assert_eq!(move_name(52).as_deref(), Some("Ember"), "and title-cased on the way out");
+        assert_eq!(
+            move_name(52).as_deref(),
+            Some("Ember"),
+            "and title-cased on the way out"
+        );
         // Nothing was planted for these, so they have nothing to say.
         assert_eq!(species(1), None);
         assert_eq!(item(1), None);
+        forget();
+    }
+
+    /// The bug the fingerprint is in this key for.
+    ///
+    /// A hack keeps the game code and revision of whatever it was built on, so
+    /// keyed on those two alone the cache could not tell two cartridges apart:
+    /// load the original, load the hack, and the hack was served the
+    /// original's names — silently, and under a read-out that looked right.
+    #[test]
+    fn two_cartridges_with_the_same_header_do_not_share_one_set_of_names() {
+        forget();
+        let anchors =
+            |last: &'static str| vec![(1u16, "POUND"), (10, "SCRATCH"), (33, "TACKLE"), (52, last)];
+
+        let original = planted(&MOVES, 0x0824_7094, &anchors("EMBER"));
+        ensure_within(
+            &original,
+            &dump("BPRE", 0xa370_b3d2_a324_f96e),
+            4 * 1024 * 1024,
+        );
+        assert_eq!(move_name(52).as_deref(), Some("Ember"));
+
+        // Identical in every field a header carries; a different cartridge.
+        let hack = planted(&MOVES, 0x0824_7094, &anchors("SCALD"));
+        ensure_within(&hack, &dump("BPRE", 0xdfb8_d7b2_56b1_58e2), 4 * 1024 * 1024);
+        assert_eq!(
+            move_name(52).as_deref(),
+            Some("Scald"),
+            "the cartridge's own name, not one cached from the cartridge before it",
+        );
         forget();
     }
 

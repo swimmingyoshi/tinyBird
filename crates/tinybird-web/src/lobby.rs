@@ -34,11 +34,16 @@ const CODE_LEN: usize = 5;
 const CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXYZ23456789";
 /// The longest message a member may publish.
 ///
-/// Sized for a picture of a Game Boy Advance screen, which is the largest thing
-/// that legitimately travels: 240x160 encodes to something like ten kilobytes,
-/// and base64 adds a third. The cap is well above that and well below anything
-/// that would let a room be used as a file transfer.
-pub const MAX_MESSAGE_BYTES: usize = 128 * 1024;
+/// The largest thing that legitimately travels is the save state a console
+/// publishes when it joins a lockstep session. A Game Boy Advance without its
+/// cartridge is about 650KB of RAM, video memory and registers; gzip takes that
+/// to a couple of hundred kilobytes and base64 adds a third. One megabyte
+/// clears that with room to spare and is still far below anything that would
+/// make a room useful as a file transfer.
+///
+/// It is only reached once per session. Everything that travels per *frame* —
+/// an input mask — is a few dozen bytes.
+pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// The longest display name a member may claim.
 pub const MAX_NAME_LEN: usize = 24;
 /// How many people may be in one room.
@@ -185,6 +190,12 @@ pub enum Outgoing {
     LinkStart { seq: u32, frame: u32, offset: u32 },
     /// One console's halfword, on its way to the parent.
     LinkValue { from: String, seq: u32, value: u16 },
+    /// A console saying it cannot take part in this transfer.
+    ///
+    /// Silence would say the same thing eventually, but only after the
+    /// parent's timeout — and the parent is frozen for the whole of it. Saying
+    /// so costs one message and turns a stall into a decision.
+    LinkSkip { from: String, seq: u32 },
     /// What every console sent, in seat order, and how long the cable takes
     /// to clock it. From the parent only.
     LinkData {
@@ -194,6 +205,52 @@ pub enum Outgoing {
     },
     /// The room opened or closed to new arrivals.
     Locked { locked: bool },
+
+    // --- lockstep ---------------------------------------------------------
+    //
+    // The messages above carry the cable itself, one halfword at a time. These
+    // carry a session in which the cable never touches the network at all:
+    // every browser runs every console, so what travels is the input that
+    // drives them. See `assets/link.js` for why that is the only shape that
+    // reaches full speed.
+    /// A console offering itself for a session: what it is and where it is up
+    /// to. `state` is a gzipped, base64 save state, which is what lets every
+    /// browser start every console from the same place.
+    LinkHello {
+        from: String,
+        seat: u8,
+        rom_hash: String,
+        rom_name: String,
+        game_code: String,
+        state: String,
+    },
+    /// The parent opening a session on terms everyone then follows.
+    LinkBegin {
+        session: String,
+        seed: f64,
+        delay: u32,
+        seats: Vec<String>,
+    },
+    /// What one player is pressing, and the frame it belongs to.
+    ///
+    /// The only message on the critical path, and the reason this design is
+    /// affordable: sixty a second per player, of a halfword each.
+    LinkInput {
+        from: String,
+        session: String,
+        frame: u32,
+        keys: u16,
+    },
+    /// A fingerprint of everything one browser has computed, for comparison.
+    LinkHash {
+        from: String,
+        session: String,
+        frame: u32,
+        hash: u32,
+    },
+    /// A console leaving a session on purpose.
+    LinkBye { from: String, session: String },
+
     /// Something the sender did was refused.
     Error { message: String },
 }
@@ -225,6 +282,8 @@ pub enum Incoming {
     },
     /// Offer this console's halfword for the transfer in progress.
     LinkValue { seq: u32, value: u16 },
+    /// Say this console cannot take part in the transfer in progress.
+    LinkSkip { seq: u32 },
     /// Publish what every console sent, with the parent's transfer time.
     /// Host only.
     LinkData {
@@ -235,6 +294,38 @@ pub enum Incoming {
     },
     /// Close the room to new arrivals, or open it again. Host only.
     Lock { locked: bool },
+
+    // --- lockstep ---------------------------------------------------------
+    /// Offer this console for a session, with the state it starts from.
+    LinkHello {
+        seat: u8,
+        rom_hash: String,
+        rom_name: String,
+        #[serde(default)]
+        game_code: String,
+        state: String,
+    },
+    /// Open a session. Host only: the parent sets the terms.
+    LinkBegin {
+        session: String,
+        seed: f64,
+        delay: u32,
+        seats: Vec<String>,
+    },
+    /// Publish what this player is pressing for one frame.
+    LinkInput {
+        session: String,
+        frame: u32,
+        keys: u16,
+    },
+    /// Publish a fingerprint of what this browser has computed.
+    LinkHash {
+        session: String,
+        frame: u32,
+        hash: u32,
+    },
+    /// Leave a session.
+    LinkBye { session: String },
 }
 
 /// One room.
@@ -749,7 +840,11 @@ mod tests {
         assert_eq!(lobby.room_count(), 1);
 
         lobby.sweep_at(Instant::now() + EMPTY_ROOM_GRACE + Duration::from_secs(1));
-        assert_eq!(lobby.room_count(), 0, "an empty room should not last forever");
+        assert_eq!(
+            lobby.room_count(),
+            0,
+            "an empty room should not last forever"
+        );
         assert_eq!(
             lobby.join(&code, &user("u1", "Ada")).err(),
             Some(JoinError::NoSuchRoom)
@@ -783,7 +878,12 @@ mod tests {
         let a = lobby.join(&code, &Identity::guest("Ada")).unwrap();
 
         let members = lobby
-            .set_playing(&code, &a.member_id, Some("Minish Cap".into()), Some("BZME".into()))
+            .set_playing(
+                &code,
+                &a.member_id,
+                Some("Minish Cap".into()),
+                Some("BZME".into()),
+            )
             .expect("member exists");
         assert_eq!(members[0].playing.as_deref(), Some("Minish Cap"));
         assert_eq!(members[0].game_code.as_deref(), Some("BZME"));
@@ -831,10 +931,8 @@ mod tests {
 
     /// Which seat each member ended up in, by name.
     fn seats(members: &[Member]) -> Vec<(String, Option<u8>)> {
-        let mut list: Vec<(String, Option<u8>)> = members
-            .iter()
-            .map(|m| (m.name.clone(), m.seat))
-            .collect();
+        let mut list: Vec<(String, Option<u8>)> =
+            members.iter().map(|m| (m.name.clone(), m.seat)).collect();
         list.sort();
         list
     }
@@ -844,7 +942,9 @@ mod tests {
         let lobby = Lobby::new();
         let code = lobby.create(Some("ada")).expect("opens");
 
-        let host = lobby.join(&code, &Identity::account("ada", "Ada")).expect("host joins");
+        let host = lobby
+            .join(&code, &Identity::account("ada", "Ada"))
+            .expect("host joins");
         assert_eq!(host.members[0].seat, Some(0), "the host is the parent");
 
         for (user, name) in [("bea", "Bea"), ("cal", "Cal"), ("dot", "Dot")] {
@@ -874,17 +974,28 @@ mod tests {
     fn a_seat_is_freed_when_its_console_leaves() {
         let lobby = Lobby::new();
         let code = lobby.create(Some("ada")).expect("opens");
-        lobby.join(&code, &Identity::account("ada", "Ada")).expect("host");
-        let bea = lobby.join(&code, &Identity::account("bea", "Bea")).expect("joins");
-        lobby.join(&code, &Identity::account("cal", "Cal")).expect("joins");
+        lobby
+            .join(&code, &Identity::account("ada", "Ada"))
+            .expect("host");
+        let bea = lobby
+            .join(&code, &Identity::account("bea", "Bea"))
+            .expect("joins");
+        lobby
+            .join(&code, &Identity::account("cal", "Cal"))
+            .expect("joins");
 
-        assert_eq!(bea.members.iter().find(|m| m.name == "Bea").unwrap().seat, Some(1));
+        assert_eq!(
+            bea.members.iter().find(|m| m.name == "Bea").unwrap().seat,
+            Some(1)
+        );
 
         lobby.leave(&code, &bea.member_id).expect("leaves");
 
         // Seat 1 is free again, so the next arrival takes it rather than
         // being stranded without one while a seat sits empty.
-        let dot = lobby.join(&code, &Identity::account("dot", "Dot")).expect("joins");
+        let dot = lobby
+            .join(&code, &Identity::account("dot", "Dot"))
+            .expect("joins");
         assert_eq!(
             dot.members.iter().find(|m| m.name == "Dot").unwrap().seat,
             Some(1)
@@ -897,8 +1008,12 @@ mod tests {
     fn only_the_host_is_the_host() {
         let lobby = Lobby::new();
         let code = lobby.create(Some("ada")).expect("opens");
-        let host = lobby.join(&code, &Identity::account("ada", "Ada")).expect("host");
-        let guest = lobby.join(&code, &Identity::account("bea", "Bea")).expect("joins");
+        let host = lobby
+            .join(&code, &Identity::account("ada", "Ada"))
+            .expect("host");
+        let guest = lobby
+            .join(&code, &Identity::account("bea", "Bea"))
+            .expect("joins");
 
         assert!(lobby.is_host(&code, &host.member_id));
         assert!(!lobby.is_host(&code, &guest.member_id));
@@ -932,7 +1047,9 @@ mod tests {
         let code = lobby.create(None).expect("opens");
         for i in 0..MAX_MEMBERS {
             assert!(
-                lobby.join(&code, &Identity::guest(&format!("p{i}"))).is_ok(),
+                lobby
+                    .join(&code, &Identity::guest(&format!("p{i}")))
+                    .is_ok(),
                 "member {i}"
             );
         }
@@ -957,14 +1074,24 @@ mod tests {
         let code = lobby.create(None).expect("opens");
         let mut a = lobby.join(&code, &Identity::guest("Ada")).unwrap();
 
-        lobby.broadcast(&code, &Outgoing::Members { members: Vec::new() });
+        lobby.broadcast(
+            &code,
+            &Outgoing::Members {
+                members: Vec::new(),
+            },
+        );
         let text = a.receiver.try_recv().expect("should have a message");
         assert!(text.contains("\"type\":\"members\""), "got {text}");
     }
 
     #[test]
     fn broadcasting_into_a_room_that_is_gone_is_not_an_error() {
-        Lobby::new().broadcast("nobody-here", &Outgoing::Members { members: Vec::new() });
+        Lobby::new().broadcast(
+            "nobody-here",
+            &Outgoing::Members {
+                members: Vec::new(),
+            },
+        );
     }
 
     #[test]
@@ -998,7 +1125,10 @@ mod tests {
         let cleared: Incoming = serde_json::from_str(r#"{"type":"playing"}"#).expect("parses");
         assert!(matches!(
             cleared,
-            Incoming::Playing { playing: None, game_code: None }
+            Incoming::Playing {
+                playing: None,
+                game_code: None
+            }
         ));
 
         let lock: Incoming =
@@ -1009,13 +1139,16 @@ mod tests {
             serde_json::from_str(r#"{"type":"snapshot","snapshot":{"a":1}}"#).expect("parses");
         assert!(matches!(snapshot, Incoming::Snapshot { .. }));
 
-        let start: Incoming = serde_json::from_str(
-            r#"{"type":"link_start","seq":7,"frame":12,"offset":3456}"#,
-        )
-        .expect("parses");
+        let start: Incoming =
+            serde_json::from_str(r#"{"type":"link_start","seq":7,"frame":12,"offset":3456}"#)
+                .expect("parses");
         assert!(matches!(
             start,
-            Incoming::LinkStart { seq: 7, frame: 12, offset: 3456 }
+            Incoming::LinkStart {
+                seq: 7,
+                frame: 12,
+                offset: 3456
+            }
         ));
     }
 

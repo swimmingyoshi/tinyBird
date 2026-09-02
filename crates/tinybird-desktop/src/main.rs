@@ -1,14 +1,14 @@
 //! tinyBird Desktop - GBA Emulator Desktop Frontend
 
-mod audio;
-mod ui;
 mod addon_export;
 mod addon_manifests;
+mod audio;
 mod input_map;
-mod settings;
-mod shell;
 mod overlay;
 mod pokemon_assets;
+mod settings;
+mod shell;
+mod ui;
 
 use std::env;
 use std::fs;
@@ -1139,6 +1139,18 @@ impl App {
             let frame_debug = std::env::var("TINYBIRD_FRAME_DEBUG").is_ok();
             let frames_to_run = base_frames;
 
+            // The cartridge clock, on the three games that carry one. Pushed
+            // rather than stepped: this host can read the wall clock, so it
+            // may as well be the authority on what time it is.
+            if self.gba.has_cartridge_clock() {
+                self.gba.set_wall_clock(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|since| since.as_secs() as i64)
+                        .unwrap_or(0),
+                );
+            }
+
             for _ in 0..frames_to_run {
                 if frame_debug {
                     println!(
@@ -1425,7 +1437,14 @@ impl App {
                 Some(framebuffer) => {
                     let color_lookup = rgb555_lookup(color_correction);
                     let pixels = framebuffer.as_slice();
-                    Self::blit_game(view, win_w, content_h, pixels, color_lookup, integer_scaling);
+                    Self::blit_game(
+                        view,
+                        win_w,
+                        content_h,
+                        pixels,
+                        color_lookup,
+                        integer_scaling,
+                    );
                     Self::compose_layers(
                         view,
                         win_w,

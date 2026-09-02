@@ -360,6 +360,15 @@ impl AddonCard {
         self
     }
 
+    /// The picture, when the addon has one to offer.
+    ///
+    /// A card without one is not a broken card: it keeps its name, its badges
+    /// and its numbers, which is the whole reason `alt` is in the schema.
+    pub fn with_optional_image(mut self, image: Option<AddonImage>) -> Self {
+        self.image = image;
+        self
+    }
+
     pub fn with_lead(mut self, lead: AddonField) -> Self {
         self.lead = Some(lead);
         self
@@ -540,7 +549,10 @@ mod tests {
         // And a section with nothing to flag says nothing, so a consumer can
         // draw the flag whenever it is there and never have to test for blank.
         let plain = AddonSection::list("battle", "In battle", Vec::new());
-        assert!(serde_json::to_value(&plain).expect("serialize").get("badge").is_none());
+        assert!(serde_json::to_value(&plain)
+            .expect("serialize")
+            .get("badge")
+            .is_none());
     }
 
     /// An empty card is mostly absent from the JSON, so a consumer can tell

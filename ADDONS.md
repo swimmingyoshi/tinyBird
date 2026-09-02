@@ -14,11 +14,42 @@ For the practical "how do I write one" guide, see
 | Addon id | Game | Reports |
 |---|---|---|
 | `pokemon_frlg_party` | Pokemon FireRed / LeafGreen (`BPR*`, `BPG*`) | two sections: **party** with species sprites (nature, ability, held item, stats, IVs, EVs, moves and PP, status, team summary in the caption) and **dex**, which is the opponent while a battle is on and the area's encounters otherwise, with an IV flag on the tab |
-| `ffta_clan` | Final Fantasy Tactics Advance (`AFX*`; live data USA only) | player name, unit HP/MP with wounded flags |
+| `pokemon_emerald_party` | Pokemon Emerald (`BPE*`) | the same party and battle read-out, behind Emerald's own addresses. Hoenn's encounter tables are not entered, so the dex reports the map you are on and says so rather than borrowing Kanto's |
+| `pokemon_rs_party` | Pokemon Ruby / Sapphire (`AXV*`, `AXP*`) | party only. Their battle and save-block addresses are not written down, so those are switched off rather than borrowed from a game whose are |
+| `ffta_clan` | Final Fantasy Tactics Advance (`AFX*`; live data USA only) | full clan with race/job portraits out of battle; deployed party with live HP/MP and wounded flags in battle |
 | `cartridge` | any ROM | header, region, maker, checksum, boot logo |
 
 `cartridge` is registered last and claims everything, so an unrecognised game
 shows its cartridge details rather than an empty panel.
+
+The two Pokemon addons share every parser: a Generation 3 party slot is the
+same 100 bytes with the same four personality-keyed substructures in Emerald as
+in FireRed, so only the addresses are written down twice, as a `Gen3Layout`.
+Ruby and Sapphire are the same shape again, and read by the same parsers — but
+they keep the party in IWRAM rather than EWRAM, and only their party is
+reported. The scan is what makes that possible: it validates every candidate
+before accepting one, so pointing it at the right 32KB finds a party nobody has
+measured the address of. A battle cannot be found that way — it is read from
+fixed addresses, and a wrong one reports a battle that is not happening, with an
+opponent assembled out of whatever those bytes hold. So it is left switched off,
+and the addon's capabilities say `party` rather than claiming otherwise.
+
+### Knowing which cartridge, not just which game
+
+`RomIdentity` carries a `fingerprint`: a hash of four kilobytes sampled across
+the ROM. Everything else it holds comes from the 192-byte header, and a ROM
+hack inherits every one of those fields from the game it was built on — Pokemon
+Ultra Violet reports itself as `BPRE`, "POKEMON FIRE", maker 01, revision 0, in
+16MB, exactly like the original.
+
+Two things depend on telling them apart. The name tables read out of the
+cartridge are cached against it, and keying that cache on the game code alone
+served a hack the names of the game before it. And `pokemon_frlg_party` will
+only report its compiled-in encounter tables for a dump they were entered
+against: everything read from live memory follows a hack wherever it went, but
+a table keyed by map number would have Route 1's original encounters drawn as
+fact on a hack that changed them. An unrecognised build keeps its party and its
+battles and is told the tables do not describe it.
 
 ---
 
@@ -241,8 +272,8 @@ Use `tinybird-probe` to find the addresses —
 - Manifests cannot express decryption, arithmetic, conditions, or tone rules.
   See "What it cannot do yet" below.
 - Per-addon enable/disable in settings.
-- FFTA: identify the two unlabelled `u16` stats in the unit record, the clan
-  name, and gil; verify the Japanese and European layouts.
+- FFTA: identify the two unlabelled `u16` stats in the unit record, level, JP,
+  clan name, and gil; verify the Japanese and European layouts.
 - FRLG: names and PP are tables in `pokemon_frlg.rs` rather than being read out
   of the cartridge. Both are complete for Generation 3 — all 354 moves and all
   386 species — but see below for why reading them from the ROM would be

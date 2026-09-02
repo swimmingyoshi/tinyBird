@@ -15,8 +15,8 @@
 //!   RAM signature instead of an empty panel.
 
 pub mod cartridge;
-pub mod gen3_names;
 pub mod ffta;
+pub mod gen3_names;
 pub mod pokemon_frlg;
 
 use std::sync::OnceLock;
@@ -24,8 +24,7 @@ use std::sync::OnceLock;
 use serde::Serialize;
 use tinybird_addons::{
     read_rom_identity, AddonInfo, AddonRegistry, AddonSnapshot as ContractAddonSnapshot,
-    ManifestAddon, MemoryView, StreamSnapshot as ContractStreamSnapshot,
-    SNAPSHOT_SCHEMA_VERSION,
+    ManifestAddon, MemoryView, StreamSnapshot as ContractStreamSnapshot, SNAPSHOT_SCHEMA_VERSION,
 };
 use tinybird_core::Gba;
 
@@ -102,7 +101,9 @@ pub fn install_manifests(manifests: Vec<ManifestAddon>) -> Result<usize, String>
     REGISTRY
         .set(build_registry_with(manifests))
         .map(|()| count)
-        .map_err(|_| "addons were already in use; install manifests before the first snapshot".to_string())
+        .map_err(|_| {
+            "addons were already in use; install manifests before the first snapshot".to_string()
+        })
 }
 
 fn registry() -> &'static AddonRegistry<AddonData> {
@@ -125,7 +126,9 @@ fn registry() -> &'static AddonRegistry<AddonData> {
 pub fn build_registry_with(manifests: Vec<ManifestAddon>) -> AddonRegistry<AddonData> {
     let mut registry = AddonRegistry::new()
         .with(Box::new(pokemon_frlg::PokemonFrlgAddon))
-        .with(Box::new(ffta::FftaAddon));
+        .with(Box::new(pokemon_frlg::PokemonEmeraldAddon))
+        .with(Box::new(pokemon_frlg::PokemonRubySapphireAddon))
+        .with(Box::new(ffta::FftaAddon::default()));
 
     for manifest in manifests {
         registry.register(Box::new(manifest));
@@ -248,7 +251,10 @@ mod tests {
         let ids: Vec<_> = registry.infos().iter().map(|info| info.addon_id).collect();
 
         let custom = ids.iter().position(|id| *id == "custom.test").unwrap();
-        let compiled = ids.iter().position(|id| *id == "pokemon_frlg_party").unwrap();
+        let compiled = ids
+            .iter()
+            .position(|id| *id == "pokemon_frlg_party")
+            .unwrap();
         let fallback = ids.iter().position(|id| *id == "cartridge").unwrap();
 
         assert!(compiled < custom, "a manifest must not shadow a real addon");
@@ -319,6 +325,8 @@ mod tests {
             game_code: "AFXE".to_string(),
             maker_code: "01".to_string(),
             revision: 0,
+            // Not a real dump; nothing here reads the fingerprint.
+            fingerprint: 0,
         });
         assert_eq!(game_display_label(&snapshot), "AFXE");
 

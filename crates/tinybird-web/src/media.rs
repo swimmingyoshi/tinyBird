@@ -268,7 +268,11 @@ pub fn guess_content_type(filename: &str) -> &'static str {
     }
 }
 
-/// Whether a name looks like a GBA ROM, for filtering the library view.
+/// Whether a name looks like a GBA ROM.
+///
+/// This decides what the *unscoped* library listing returns, so it is a
+/// privacy boundary and not only a tidiness one: a shared ROM library is the
+/// point of that route, and everything else in the vault belongs to somebody.
 pub fn is_rom_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.ends_with(".gba") || lower.ends_with(".bin") || lower.ends_with(".agb")
@@ -367,7 +371,13 @@ pub async fn upload_asset(
 
     let name = first_string(
         &value,
-        &["originalName", "original_name", "name", "filename", "assetName"],
+        &[
+            "originalName",
+            "original_name",
+            "name",
+            "filename",
+            "assetName",
+        ],
     )
     .unwrap_or_else(|| filename.to_string());
     let url = first_string(&value, &["url", "publicUrl", "public_url", "href"])
@@ -381,7 +391,6 @@ pub async fn upload_asset(
         content_type: first_string(&value, &["contentType", "content_type", "mime"]),
     })
 }
-
 
 /// Whether `url` points at the configured storage host.
 ///
@@ -428,7 +437,6 @@ pub async fn proxy_fetch(config: &MediaConfig, url: &str) -> Result<(Vec<u8>, St
     let bytes = response.bytes().await.map_err(|err| err.to_string())?;
     Ok((bytes.to_vec(), content_type))
 }
-
 
 // -------------------------------------------------------------- capabilities
 
@@ -653,6 +661,112 @@ pub struct ParsedSave {
     pub label: String,
 }
 
+/// Prefix marking a screenshot this server wrote.
+const SHOT_PREFIX: &str = "tbshot";
+const SHOT_EXTENSION: &str = ".png";
+
+/// One screenshot in the vault.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ShotEntry {
+    pub owner: String,
+    pub filename: String,
+    pub original_name: String,
+    pub game_code: String,
+    pub taken_at_ms: u64,
+    pub url: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ShotsResponse {
+    pub configured: bool,
+    pub shots: Vec<ShotEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Build the name a screenshot is stored under.
+///
+/// The owner is in the name for the same reason it is in a save's: the vault
+/// has no notion of one, so a name is all there is to say whose picture this
+/// is. **The server builds this, never the browser** — a caller that could
+/// choose the owner field could list, and later delete, somebody else's
+/// pictures.
+pub fn shot_name(owner: &str, game_code: &str, taken_at_ms: u64) -> String {
+    let owner = sanitize_token_capped(owner, MAX_OWNER_LEN);
+    let code = sanitize_token(game_code);
+    format!("{SHOT_PREFIX}_{owner}_{code}_{taken_at_ms}{SHOT_EXTENSION}")
+}
+
+/// Read back what [`shot_name`] wrote.
+///
+/// `None` for anything else in the vault — including screenshots this server
+/// wrote before it knew about owners. Those become invisible rather than
+/// everybody's, which is the safe direction for a mistake to fall.
+pub fn parse_shot_name(original_name: &str) -> Option<(String, String, u64)> {
+    let stem = original_name.strip_suffix(SHOT_EXTENSION)?;
+    let mut parts = stem.split('_');
+    if parts.next()? != SHOT_PREFIX {
+        return None;
+    }
+    let owner = parts.next()?.to_string();
+    let game_code = parts.next()?.to_string();
+    let taken_at_ms = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((owner, game_code, taken_at_ms))
+}
+
+/// Screenshots belonging to one owner, newest first.
+///
+/// Filtered here rather than in the page. A listing that returned everything
+/// and left the browser to hide the rest would be a privacy setting anyone
+/// could turn off with the developer tools.
+pub async fn list_shots(config: &MediaConfig, owner: &str) -> ShotsResponse {
+    if !config.is_configured() {
+        return ShotsResponse {
+            configured: false,
+            shots: Vec::new(),
+            error: None,
+        };
+    }
+
+    let listing = list_assets(config).await;
+    if let Some(error) = listing.error {
+        return ShotsResponse {
+            configured: true,
+            shots: Vec::new(),
+            error: Some(error),
+        };
+    }
+
+    let mut shots: Vec<ShotEntry> = listing
+        .assets
+        .into_iter()
+        .filter_map(|asset| {
+            let (asset_owner, game_code, taken_at_ms) = parse_shot_name(&asset.name)?;
+            (asset_owner == sanitize_token_capped(owner, MAX_OWNER_LEN)).then(|| ShotEntry {
+                owner: asset_owner,
+                filename: asset.name.clone(),
+                original_name: asset.name,
+                game_code,
+                taken_at_ms,
+                url: asset.url,
+                size: asset.size.unwrap_or(0),
+            })
+        })
+        .collect();
+
+    shots.sort_by(|a, b| b.taken_at_ms.cmp(&a.taken_at_ms));
+
+    ShotsResponse {
+        configured: true,
+        shots,
+        error: None,
+    }
+}
+
 /// Build the name a save is stored under.
 ///
 /// The owner is part of the name because the downloads backend has no notion of
@@ -774,7 +888,10 @@ fn parse_save_entry(item: &serde_json::Value, config: &MediaConfig) -> Option<Sa
     let url = first_string(item, &["url", "publicUrl", "public_url"])
         .map(|url| absolutise(&url, config))
         .unwrap_or_else(|| {
-            format!("{}/downloads/{}/{}", config.base_url, config.project, filename)
+            format!(
+                "{}/downloads/{}/{}",
+                config.base_url, config.project, filename
+            )
         });
 
     Some(SaveEntry {
@@ -1016,7 +1133,9 @@ pub async fn upload_save(
     // project's allowlist, so no `type` field is sent. Older builds sent one;
     // it is now a deprecated fallback.
     let url = match capabilities.backend {
-        SaveBackend::Private => format!("{}/api/private-assets/{}", config.base_url, config.project),
+        SaveBackend::Private => {
+            format!("{}/api/private-assets/{}", config.base_url, config.project)
+        }
         SaveBackend::PublicDownloads => {
             format!("{}/api/downloads/{}", config.base_url, config.project)
         }
@@ -1087,7 +1206,10 @@ pub async fn upload_save(
     if let Some(id) = replace {
         if id != entry.id {
             if let Err(err) = delete_save(config, owner, id).await {
-                eprintln!("Could not remove the overwritten save {id}: {}", err.message());
+                eprintln!(
+                    "Could not remove the overwritten save {id}: {}",
+                    err.message()
+                );
             }
         }
     }
@@ -1169,6 +1291,61 @@ pub async fn claim_legacy_saves(
     }
 
     Ok(result)
+}
+
+/// Give a stored save a different label.
+///
+/// Neither backend can rewrite an object in place — the label is part of the
+/// name — so a rename is the same upload-then-delete an overwrite is, and for
+/// the same reason: the copy is stored before the original goes, so a failure
+/// at any point leaves the save exactly where it was.
+///
+/// The bytes make a round trip through this server to do it. That is the cost
+/// of a name living in a filename, and it is paid on a rename, which is rare,
+/// rather than on a save, which is not.
+pub async fn rename_save(
+    config: &MediaConfig,
+    owner: &str,
+    id: &str,
+    label: &str,
+) -> Result<SaveEntry, String> {
+    let wanted = sanitize_token(label);
+    // Silently storing nothing when someone typed something is worse than
+    // refusing: they would come back to a save that had lost its name and no
+    // reason why.
+    if wanted.is_empty() && !label.trim().is_empty() {
+        return Err("A save name can use letters, numbers and hyphens.".to_string());
+    }
+
+    let listing = list_saves(config, owner, None).await;
+    if let Some(error) = listing.error {
+        return Err(error);
+    }
+    // Scoped to this owner's listing, so an id from somebody else's vault is
+    // not found rather than renamed.
+    let save = listing
+        .saves
+        .into_iter()
+        .find(|save| save.id == id)
+        .ok_or("that save is not in the vault")?;
+
+    // Already called that. Re-uploading a name over itself is not a rename;
+    // it is a way to end up with the delete removing what was just stored.
+    if wanted == save.label {
+        return Ok(save);
+    }
+
+    let (bytes, _) = proxy_fetch(config, &save.url).await?;
+    upload_save(
+        config,
+        owner,
+        &save.game_code,
+        &wanted,
+        save.saved_at_ms,
+        bytes,
+        Some(&save.id),
+    )
+    .await
 }
 
 /// Render a `detail` field, which may be a string or a structured object.
@@ -1263,7 +1440,9 @@ pub async fn delete_save(config: &MediaConfig, owner: &str, id: &str) -> Result<
 
     // Keep the id to a single path segment so it cannot escape the project.
     if id.contains('/') || id.contains('\\') || id.contains("..") {
-        return Err(DeleteError::Failed("that is not a valid save id".to_string()));
+        return Err(DeleteError::Failed(
+            "that is not a valid save id".to_string(),
+        ));
     }
 
     let listing = list_saves(config, owner, None).await;
@@ -1328,6 +1507,35 @@ mod tests {
         }
     }
 
+    /// A name that reduces to nothing is refused rather than applied.
+    ///
+    /// The label is sanitised into a filename, so "???" stores as no label at
+    /// all. Accepting it would silently clear the name the save already had,
+    /// and the only evidence would be the name being gone. Checked before the
+    /// listing is fetched, which is why an unreachable host does not matter.
+    #[tokio::test]
+    async fn a_name_with_nothing_storable_in_it_is_refused() {
+        let error = rename_save(&config(), "owner-1", "1.savestate", "???")
+            .await
+            .expect_err("a name of pure punctuation should be refused");
+        assert!(error.contains("letters, numbers and hyphens"), "{error}");
+    }
+
+    /// The page trims a name as it is typed, with a rule written out a second
+    /// time in JavaScript. If the two ever drift apart someone types a name
+    /// that looks accepted and gets a different one back, so the rule is
+    /// pinned here where a change to it has to be deliberate.
+    #[test]
+    fn a_save_name_keeps_letters_numbers_and_hyphens_and_nothing_else() {
+        assert_eq!(sanitize_token("Route 4 boss"), "Route4boss");
+        assert_eq!(sanitize_token("pre-elite-four"), "pre-elite-four");
+        // Underscore separates the fields of the filename, so it cannot also
+        // appear inside one of them.
+        assert_eq!(sanitize_token("mt_moon"), "mtmoon");
+        assert_eq!(sanitize_token("???"), "");
+        assert_eq!(sanitize_token(&"a".repeat(40)).len(), 24);
+    }
+
     fn save(game_code: &str, saved_at_ms: u64) -> SaveEntry {
         SaveEntry {
             owner: "owner-1".to_string(),
@@ -1341,6 +1549,74 @@ mod tests {
             url: "https://media.example/downloads/tinybird/x.bin".to_string(),
             size: 1024,
         }
+    }
+
+    #[test]
+    fn the_shared_library_lists_cartridges_and_nothing_else() {
+        assert!(is_rom_name("pokemon_fire_red.gba"));
+        assert!(is_rom_name("GAME.AGB"));
+        assert!(is_rom_name("dump.bin"));
+
+        // The listing is not scoped to an account, so anything else in the
+        // vault must not appear in it.
+        assert!(!is_rom_name("tbshot_user-123_BPRE_1787570960801.png"));
+        assert!(!is_rom_name("1636_-_Pokemon_Fire_Red-1787814439664.png"));
+        assert!(!is_rom_name("tb_user_BPRE_1787570960801.savestate"));
+    }
+
+    #[test]
+    fn shot_names_round_trip() {
+        let name = shot_name("user-123", "BPRE", 1787570960801);
+        assert_eq!(name, "tbshot_user-123_BPRE_1787570960801.png");
+        assert_eq!(
+            parse_shot_name(&name),
+            Some(("user-123".to_string(), "BPRE".to_string(), 1787570960801))
+        );
+    }
+
+    /// The privacy boundary. A listing filters on the owner parsed out of the
+    /// name, so anything that is not exactly the shape this server writes has
+    /// to parse as nothing — otherwise a crafted name is a way into somebody
+    /// else's pictures.
+    #[test]
+    fn only_names_this_server_wrote_parse_as_screenshots() {
+        for hostile in [
+            // Another kind of asset entirely.
+            "pokemon_fire_red.gba",
+            "tb_user-123_BPRE_1787570960801.savestate",
+            // The prefix, but not the shape.
+            "tbshot_user-123_BPRE.png",
+            "tbshot_user-123.png",
+            "tbshot.png",
+            // Extra fields, which is how a name could try to carry two owners.
+            "tbshot_user-123_BPRE_1787570960801_extra.png",
+            // A timestamp that is not one.
+            "tbshot_user-123_BPRE_notatime.png",
+            // Right shape, wrong extension: the vault would serve this as
+            // something other than an image.
+            "tbshot_user-123_BPRE_1787570960801.html",
+        ] {
+            assert_eq!(parse_shot_name(hostile), None, "{hostile} should not parse");
+        }
+    }
+
+    /// Owner tokens are sanitised on the way in, so a name cannot be used to
+    /// smuggle separators and change how it parses back.
+    #[test]
+    fn an_owner_cannot_smuggle_separators_into_a_name() {
+        let name = shot_name("a_b/../c", "BPRE", 1);
+        let (owner, code, at) = parse_shot_name(&name).expect("still parses");
+
+        assert!(
+            !owner.contains('_'),
+            "an underscore would add a field: {owner}"
+        );
+        assert!(
+            !owner.contains('/'),
+            "a slash would change the path: {owner}"
+        );
+        assert_eq!(code, "BPRE");
+        assert_eq!(at, 1);
     }
 
     #[test]
@@ -1368,8 +1644,8 @@ mod tests {
     /// Saves written before accounts existed have no owner field in the name.
     #[test]
     fn saves_from_before_accounts_belong_to_the_legacy_owner() {
-        let parsed = parse_save_name("tb_BPRE_1787570960801_route4.savestate")
-            .expect("should still parse");
+        let parsed =
+            parse_save_name("tb_BPRE_1787570960801_route4.savestate").expect("should still parse");
         assert_eq!(parsed.owner, LEGACY_OWNER);
         assert_eq!(parsed.game_code, "BPRE");
         assert_eq!(parsed.saved_at_ms, 1_787_570_960_801);
@@ -1400,7 +1676,10 @@ mod tests {
     fn an_owner_cannot_forge_another_owners_name() {
         let forged = save_name("me_BPRE_1", "BPRE", 2, "");
         let parsed = parse_save_name(&forged).expect("should parse");
-        assert_ne!(parsed.owner, "me", "the underscores must not split the field");
+        assert_ne!(
+            parsed.owner, "me",
+            "the underscores must not split the field"
+        );
         assert_eq!(parsed.saved_at_ms, 2, "the real timestamp must win");
     }
 
@@ -1436,18 +1715,30 @@ mod tests {
         assert!(parse_save_name("tb_BPRE.bin").is_none(), "no timestamp");
         assert!(parse_save_name("tb_BPRE_notanumber.bin").is_none());
         assert!(parse_save_name("tb_owner_BPRE_notanumber.bin").is_none());
-        assert!(parse_save_name("tb_BPRE_1.txt").is_none(), "wrong extension");
-        assert!(parse_save_name("other_BPRE_1.bin").is_none(), "wrong prefix");
+        assert!(
+            parse_save_name("tb_BPRE_1.txt").is_none(),
+            "wrong extension"
+        );
+        assert!(
+            parse_save_name("other_BPRE_1.bin").is_none(),
+            "wrong prefix"
+        );
     }
 
     #[test]
     fn the_proxy_only_accepts_the_configured_storage_host() {
         let config = config();
-        assert!(is_storage_url(&config, "https://media.example/downloads/tinybird/a.bin"));
+        assert!(is_storage_url(
+            &config,
+            "https://media.example/downloads/tinybird/a.bin"
+        ));
         assert!(is_storage_url(&config, "https://media.example/vault/a.png"));
 
         // An open proxy could be pointed at anything reachable from the server.
-        assert!(!is_storage_url(&config, "http://169.254.169.254/latest/meta-data/"));
+        assert!(!is_storage_url(
+            &config,
+            "http://169.254.169.254/latest/meta-data/"
+        ));
         assert!(!is_storage_url(&config, "https://evil.example/x"));
         assert!(!is_storage_url(&config, "file:///etc/passwd"));
     }
@@ -1455,7 +1746,10 @@ mod tests {
     #[test]
     fn a_lookalike_host_cannot_pass_the_proxy_check() {
         // "https://media.example.evil.com/..." shares a prefix with the base.
-        assert!(!is_storage_url(&config(), "https://media.example.evil.com/a.bin"));
+        assert!(!is_storage_url(
+            &config(),
+            "https://media.example.evil.com/a.bin"
+        ));
     }
 
     fn caps(private_enabled: bool, allowed_private: &[&str]) -> Capabilities {
@@ -1485,7 +1779,9 @@ mod tests {
 
         *capabilities_cache().lock().unwrap() =
             Some((std::time::Instant::now(), caps(true, &[".savestate"])));
-        let cached = capabilities(&nowhere).await.expect("should come from the cache");
+        let cached = capabilities(&nowhere)
+            .await
+            .expect("should come from the cache");
         assert_eq!(cached.backend, SaveBackend::Private);
 
         forget_capabilities();
@@ -1508,7 +1804,10 @@ mod tests {
             .expect("clock should support this");
         *capabilities_cache().lock().unwrap() = Some((stale, caps(true, &[".savestate"])));
 
-        assert!(capabilities(&nowhere).await.is_err(), "stale must be refetched");
+        assert!(
+            capabilities(&nowhere).await.is_err(),
+            "stale must be refetched"
+        );
         forget_capabilities();
     }
 
@@ -1516,7 +1815,10 @@ mod tests {
     fn private_storage_is_used_when_the_project_allows_our_extension() {
         // Saves are someone's progress; owner-scoped signed URLs beat public
         // ones whenever the project permits them.
-        assert_eq!(caps(true, &[".png", ".savestate"]).backend, SaveBackend::Private);
+        assert_eq!(
+            caps(true, &[".png", ".savestate"]).backend,
+            SaveBackend::Private
+        );
     }
 
     #[test]
@@ -1601,7 +1903,9 @@ mod tests {
 
     #[test]
     fn nothing_is_evicted_below_the_limit() {
-        let saves: Vec<_> = (0..MAX_SAVES_PER_GAME as u64).map(|i| save("BPRE", i)).collect();
+        let saves: Vec<_> = (0..MAX_SAVES_PER_GAME as u64)
+            .map(|i| save("BPRE", i))
+            .collect();
         assert!(saves_to_evict(&saves, MAX_SAVES_PER_GAME).is_empty());
     }
 
@@ -1661,8 +1965,7 @@ mod tests {
         assert_eq!(entry.filename, "4ec04bd66d0d42f098e605dc.bin");
         assert_eq!(entry.size, 8192);
         assert_eq!(
-            entry.url,
-            "https://media.example/downloads/tinybird/4ec04bd66d0d42f098e605dc.bin",
+            entry.url, "https://media.example/downloads/tinybird/4ec04bd66d0d42f098e605dc.bin",
             "the relative URL from the API must be made absolute"
         );
     }
@@ -1797,7 +2100,10 @@ mod tests {
         assert_eq!(guess_content_type("clip.mp4"), "video/mp4");
         // The API refuses this, and a clear rejection beats a wrong label.
         assert_eq!(guess_content_type("save.state"), "application/octet-stream");
-        assert_eq!(guess_content_type("noextension"), "application/octet-stream");
+        assert_eq!(
+            guess_content_type("noextension"),
+            "application/octet-stream"
+        );
     }
 
     #[test]
@@ -1832,9 +2138,12 @@ mod tests {
     #[test]
     fn base_urls_lose_a_trailing_slash() {
         // Otherwise every built URL would contain a double slash.
-        temp_env(&[("TINYBIRD_MEDIA_URL", Some("https://media.example/"))], || {
-            assert_eq!(MediaConfig::from_env().base_url, "https://media.example");
-        });
+        temp_env(
+            &[("TINYBIRD_MEDIA_URL", Some("https://media.example/"))],
+            || {
+                assert_eq!(MediaConfig::from_env().base_url, "https://media.example");
+            },
+        );
     }
 
     #[test]

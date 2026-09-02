@@ -112,7 +112,13 @@ export class LobbyConnection {
     onLinkTick,
     onLinkStart,
     onLinkValue,
+    onLinkSkip,
     onLinkData,
+    onLinkHello,
+    onLinkBegin,
+    onLinkInput,
+    onLinkHash,
+    onLinkBye,
     onStatus,
     onRefused,
     onLocked,
@@ -129,7 +135,13 @@ export class LobbyConnection {
     this.onLinkTick = onLinkTick ?? (() => {});
     this.onLinkStart = onLinkStart ?? (() => {});
     this.onLinkValue = onLinkValue ?? (() => {});
+    this.onLinkSkip = onLinkSkip ?? (() => {});
     this.onLinkData = onLinkData ?? (() => {});
+    this.onLinkHello = onLinkHello ?? (() => {});
+    this.onLinkBegin = onLinkBegin ?? (() => {});
+    this.onLinkInput = onLinkInput ?? (() => {});
+    this.onLinkHash = onLinkHash ?? (() => {});
+    this.onLinkBye = onLinkBye ?? (() => {});
     this.onStatus = onStatus ?? (() => {});
     // A refusal is final: a room that does not exist will not start existing
     // because we asked again, so retrying would spin forever.
@@ -224,11 +236,39 @@ export class LobbyConnection {
       case "link_start":
         this.onLinkStart(message.seq, message.frame ?? 0, message.offset ?? 0);
         break;
+      case "link_skip":
+        this.onLinkSkip(message.from, message.seq);
+        break;
       case "link_value":
         this.onLinkValue(message.from, message.seq, message.value);
         break;
       case "link_data":
         this.onLinkData(message.seq, message.values, message.cycles);
+        break;
+      // Lockstep. Every one of these goes over the socket, including between
+      // two tabs of the same browser that could have used the zero-hop channel
+      // below. Splitting them across two transports would let an input arrive
+      // before the session it belongs to, and a session that misses its first
+      // inputs never runs a frame. One socket is one order, and 60 messages a
+      // second has nothing to gain from saving a millisecond on each.
+      case "link_hello":
+        this.onLinkHello(message.from, message);
+        break;
+      case "link_begin":
+        this.onLinkBegin(message);
+        break;
+      case "link_input":
+        if (message.from !== this.you) {
+          this.onLinkInput(message.from, message.session, message.frame, message.keys);
+        }
+        break;
+      case "link_hash":
+        if (message.from !== this.you) {
+          this.onLinkHash(message.from, message.session, message.frame, message.hash);
+        }
+        break;
+      case "link_bye":
+        if (message.from !== this.you) this.onLinkBye(message.from, message.session);
         break;
       case "locked":
         this.locked = Boolean(message.locked);
@@ -286,6 +326,8 @@ export class LobbyConnection {
       this.onLinkStart(message.seq, message.frame ?? 0, message.offset ?? 0);
     } else if (message.type === "link_value") {
       this.onLinkValue(message.from, message.seq, message.value);
+    } else if (message.type === "link_skip") {
+      this.onLinkSkip(message.from, message.seq);
     } else if (message.type === "link_data" && parent) {
       this.onLinkData(message.seq, message.values, message.cycles);
     }
@@ -342,9 +384,48 @@ export class LobbyConnection {
     return this.#sendLink({ type: "link_value", seq, value });
   }
 
+  /** Say this console cannot take part in the transfer in progress. */
+  publishLinkSkip(seq) {
+    return this.#sendLink({ type: "link_skip", seq });
+  }
+
   /** Publish what every console sent, in seat order. Host only. */
   publishLinkData(seq, values, cycles) {
     return this.#sendLink({ type: "link_data", seq, values, cycles });
+  }
+
+  // --- lockstep -----------------------------------------------------------
+
+  /** Offer this console for a session: what it is, and where it starts from. */
+  publishLinkHello({ seat, romHash, romName, gameCode, state }) {
+    return this.#send({
+      type: "link_hello",
+      seat,
+      rom_hash: romHash,
+      rom_name: romName,
+      game_code: gameCode ?? "",
+      state,
+    });
+  }
+
+  /** Open a session on terms everyone follows. Host only. */
+  publishLinkBegin({ session, seed, delay, seats }) {
+    return this.#send({ type: "link_begin", session, seed, delay, seats });
+  }
+
+  /** Publish what this player is pressing for one frame. */
+  publishLinkInput(session, frame, keys) {
+    return this.#send({ type: "link_input", session, frame, keys });
+  }
+
+  /** Publish a fingerprint of everything this browser has computed. */
+  publishLinkHash(session, frame, hash) {
+    return this.#send({ type: "link_hash", session, frame, hash });
+  }
+
+  /** Leave a session on purpose, rather than by going quiet. */
+  publishLinkBye(session) {
+    return this.#send({ type: "link_bye", session });
   }
 
   /** Close the room to new arrivals, or open it again. Host only. */

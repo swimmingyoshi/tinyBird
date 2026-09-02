@@ -2,6 +2,7 @@
 // vault. Everything that touches WebAssembly memory lives in tinybird.js.
 
 import { AudioSink, EmulatorError, TinyBird } from "/tinybird.js";
+import { mountAccount } from "/account.js";
 import { ACTIONS, Controls, keyLabel, padLabel } from "/controls.js";
 import {
   THUMBNAIL_PREFIX_BYTES,
@@ -12,6 +13,14 @@ import {
   unpackSave,
 } from "/saveformat.js";
 import { GBA_FRAME_HZ, MAX_CATCHUP_FRAMES, schedule } from "/pacing.js";
+import {
+  HASH_INTERVAL,
+  delayForRoundTrip,
+  openSession,
+  packState,
+  romFingerprint,
+  unpackState,
+} from "/link.js";
 import {
   FRAME_INTERVAL_MS,
   FRAME_QUALITY,
@@ -32,11 +41,13 @@ const el = {
   linkLabel: $("link-label"),
   play: $("btn-play"),
   reset: $("btn-reset"),
+  eject: $("btn-eject"),
   ff: $("btn-ff"),
   full: $("btn-full"),
   save: $("btn-save"),
   store: $("btn-store"),
   fileState: $("file-state"),
+  loadState: $("load-state"),
   fileRom: $("file-rom"),
   optAudio: $("opt-audio"),
   optSpeed: $("opt-speed"),
@@ -48,23 +59,6 @@ const el = {
   optOverlayRow: $("opt-overlay-row"),
   overlayStage: $("overlay-stage"),
   cloud: $("btn-cloud"),
-  account: $("account"),
-  accountToggle: $("account-toggle"),
-  accountMenu: $("account-menu"),
-  accountLabel: $("account-label"),
-  accountIn: $("account-in"),
-  accountWho: $("account-who"),
-  accountForm: $("account-form"),
-  accountEmail: $("account-email"),
-  accountPassword: $("account-password"),
-  accountPassword2: $("account-password2"),
-  accountUsername: $("account-username"),
-  signUpBack: $("btn-signup-back"),
-  accountHint: $("account-hint"),
-  signIn: $("btn-signin"),
-  signUp: $("btn-signup"),
-  signOut: $("btn-signout"),
-  claim: $("btn-claim"),
   lobbyNote: $("lobby-note"),
   lobbyOut: $("lobby-out"),
   lobbyIn: $("lobby-in"),
@@ -129,11 +123,34 @@ const el = {
 };
 
 const ctx = el.canvas.getContext("2d", { alpha: false });
-// Nearest-neighbour on the drawing side too. Without this a browser may
-// smooth when the backing store and the CSS size differ.
+// Nearest-neighbour for the blow-up onto the backing store. That step is
+// always a whole multiple, so every source pixel covers the same number of
+// backing pixels and the edges stay hard.
 ctx.imageSmoothingEnabled = false;
+
+/**
+ * The frame at the size the game drew it.
+ *
+ * The display canvas is a whole multiple of that now, and putImageData ignores
+ * scaling, so the frame lands here first and is blown up from here. It doubles
+ * as what every capture reads: a screenshot, a save thumbnail and a shared
+ * frame all want the picture the game drew, not the size the layout stretched
+ * it to.
+ */
+const frameCanvas = document.createElement("canvas");
+frameCanvas.width = 240;
+frameCanvas.height = 160;
+const frameCtx = frameCanvas.getContext("2d", { alpha: false });
 /** Reused so each frame is one putImageData rather than an allocation. */
-const image = ctx.createImageData(240, 160);
+const image = frameCtx.createImageData(240, 160);
+
+/** How far the frame may be blown up before the browser takes over. */
+const MAX_BACKING_SCALE = 12;
+
+/** Put the frame on the display canvas, at whatever size it currently is. */
+function blit() {
+  ctx.drawImage(frameCanvas, 0, 0, el.canvas.width, el.canvas.height);
+}
 
 let emu = null;
 let audio = null;
@@ -546,25 +563,61 @@ function paintDeckHint() {
 }
 
 /**
- * Size the picture to a whole multiple of 240x160.
+ * Give the picture the whole bezel, without the uneven pixels.
  *
- * Letting CSS stretch the canvas to the container gives a fractional scale, so
- * some source pixels land two device pixels wide and others three. That uneven
- * ripple is what made the browser build look worse than the desktop one, which
- * has always scaled by whole pixels and letterboxed the remainder.
+ * Scaling by a whole number and letterboxing the remainder threw away most of
+ * a step: a 690px column ran the game at 2x, a 480px picture with black either
+ * side. Filling the bezel from a 240x160 backing store is the other extreme —
+ * a fractional scale lands some source pixels two device pixels wide and
+ * others three, and that ripple is what made the browser build look worse than
+ * the desktop one.
+ *
+ * So do both. The backing store is a whole multiple of 240x160, large enough
+ * to cover the bezel; the CSS size fills the bezel exactly. The blow-up is
+ * exact, and the one fractional step left is the browser's own, which it
+ * resamples smoothly instead of dropping rows.
  */
 function fitScreen() {
-  const box = el.screen.getBoundingClientRect();
-  if (box.width === 0 || box.height === 0) return;
+  // The content box, not `getBoundingClientRect` — the bezel is border-box
+  // with a 1px edge, so its outer size is 2px more than the panel can have,
+  // and a panel built to the outer size loses a pixel each side to `overflow:
+  // hidden` instead of showing it.
+  const boxWidth = el.screen.clientWidth;
+  const boxHeight = el.screen.clientHeight;
+  if (boxWidth === 0 || boxHeight === 0) return;
 
-  const scale = Math.max(1, Math.floor(Math.min(box.width / 240, box.height / 160)));
-  el.canvas.style.width = `${240 * scale}px`;
-  el.canvas.style.height = `${160 * scale}px`;
-  el.panel.style.width = `${240 * scale}px`;
-  el.panel.style.height = `${160 * scale}px`;
-  // Drives the scanline period so lines land on source-pixel boundaries.
-  el.screen.style.setProperty("--px", `${scale}px`);
-  el.screen.dataset.scale = String(scale);
+  // The largest 240x160-shaped rectangle the bezel holds. Floored, so a
+  // rounding crumb never spills past the edge.
+  const scale = Math.min(boxWidth / 240, boxHeight / 160);
+  const width = Math.floor(240 * scale);
+  const height = Math.floor(160 * scale);
+
+  // Sized in device pixels: on a 2x display the backing store has to be twice
+  // as big to be covering one source pixel per device pixel.
+  const dpr = window.devicePixelRatio || 1;
+  const backing = Math.min(
+    MAX_BACKING_SCALE,
+    Math.max(1, Math.ceil((width * dpr) / 240)),
+  );
+  if (el.canvas.width !== 240 * backing) {
+    el.canvas.width = 240 * backing;
+    el.canvas.height = 160 * backing;
+    // Resizing a canvas resets its context, the smoothing flag included.
+    ctx.imageSmoothingEnabled = false;
+  }
+
+  el.canvas.style.width = `${width}px`;
+  el.canvas.style.height = `${height}px`;
+  el.panel.style.width = `${width}px`;
+  el.panel.style.height = `${height}px`;
+  // Drives the scanline period, one line per source pixel row. Fractional on
+  // purpose: a whole number of CSS pixels would drift a row out of step with
+  // the picture by the bottom of the screen.
+  el.screen.style.setProperty("--px", `${height / 160}px`);
+  el.screen.dataset.scale = String(Math.max(1, Math.round(scale)));
+  // Resizing cleared the canvas, and a paused game has no next frame coming
+  // to draw it back.
+  blit();
 }
 
 const resizeObserver = new ResizeObserver(fitScreen);
@@ -644,7 +697,8 @@ function present() {
   const frame = emu.frameView();
   if (!frame) return;
   image.data.set(frame);
-  ctx.putImageData(image, 0, 0);
+  frameCtx.putImageData(image, 0, 0);
+  blit();
 }
 
 /**
@@ -702,10 +756,16 @@ function tick(now) {
     return;
   }
 
+  // A lockstep session offers itself as soon as the room and the cartridge
+  // allow. Doing it here rather than only on a membership change covers the
+  // orders that arrive the other way round — a game loaded after the room was
+  // joined, a fingerprint that finished hashing after the roster settled.
+  if (LOCKSTEP && sessionPhase === "off" && lockstepWanted()) offerConsole();
+
   // The parent decides when a transfer happens, and has to be able to do so
   // while frozen waiting for the last one — otherwise the first transfer of a
   // session would be the only one.
-  driveLink(now);
+  if (!session) driveLink(now);
 
   // A link transfer waiting on the network freezes emulated time.
   //
@@ -724,10 +784,30 @@ function tick(now) {
   //
   // Everything below this still runs. The room has to keep being serviced
   // while the cable waits, because the room is what the cable is waiting on.
-  const linkWaiting = emu.linkPending || heldAtBarrier(now);
+  //
+  // A lockstep session has no such wait: the cable is carried inside this
+  // page, so a transfer costs a function call and there is nothing to freeze
+  // for. What a session waits on instead is the next frame's input, which is
+  // once a frame rather than nine times, and `runLockstep` handles it.
+  const linkWaiting = !session && (emu.linkPending || heldAtBarrier(now));
   if (linkWaiting) frameClock = 0;
 
   const unlimited = fastForward && fastForwardSpeed === 0;
+
+  // Ruby, Sapphire and Emerald read a clock on the cartridge, and the core
+  // cannot read one itself: it runs on wasm32, where the host is the only
+  // thing that knows what time it is. Pushed every frame rather than once, so
+  // berry growth and the tides in Shoal Cave follow the wall clock rather than
+  // however long the emulator happened to be running.
+  //
+  // Except in a lockstep session, where the seed was pushed once when the
+  // session opened and must never be pushed again. Two browsers each reading
+  // their own `Date.now` is precisely the divergence a session exists to
+  // prevent: Emerald reads the cartridge clock, and two consoles told
+  // different times stop agreeing within a frame. The clock then advances from
+  // the cycles the machine actually runs, which is the only sense in which a
+  // linked cartridge clock can be right on both machines at once.
+  if (!session) emu.setWallClock(Date.now() / 1000);
 
   // With a cable attached the running is done by the slice pump, so that the
   // other console never waits a whole frame for an answer. This loop then only
@@ -736,7 +816,11 @@ function tick(now) {
   // stopped the battery being flushed, which is not a luxury during a trade:
   // trading writes to the cartridge.
   let ran = 0;
-  if (emu.linkConnected) {
+  if (session) {
+    // Every console in this browser, one frame each, cable and all. The only
+    // thing that can stop it is input that has not arrived.
+    ran = runLockstep(now);
+  } else if (emu.linkConnected) {
     if (!linkWaiting) {
       const due = schedule(now, frameClock, fastForward ? fastForwardSpeed : 1);
       frameClock = due.clock;
@@ -755,14 +839,14 @@ function tick(now) {
   // A transfer that began inside the frame just run goes out now rather than
   // a frame later. The core stops the frame the moment one starts, so this is
   // the first opportunity, and taking it saves another 16ms per transfer.
-  if (ran > 0) driveLink(now);
+  if (ran > 0 && !session) driveLink(now);
 
   // Count what was run and, on the parent, tell the room.
   //
   // Only frames this loop finished: one cut short by a transfer is counted by
   // `resumeAfterTransfer` when it actually completes, and counting it here as
   // well would have the parent claim frames it has not run.
-  if (ran > 0 && emu.linkConnected) {
+  if (ran > 0 && !session && emu.linkConnected) {
     linkFrame += framesFinished(ran);
     if (isParent() && lobby?.connected) lobby.publishLinkTick(linkFrame);
   }
@@ -859,13 +943,26 @@ let renderedSignature = "";
 let lastSnapshot = null;
 
 function toggleCard(key) {
-  if (openCards.has(key)) openCards.delete(key);
-  else openCards.add(key);
+  const opening = !openCards.has(key);
+  if (opening) openCards.add(key);
+  else openCards.delete(key);
   // Redraw from the snapshot we already have rather than waiting up to 250ms
   // for the next one; a click that does nothing for a quarter second reads as
   // a click that did not land.
   renderedSignature = "";
   if (lastSnapshot) renderSnapshot(lastSnapshot);
+
+  // The redraw destroyed the button the click landed on, so focus fell back to
+  // the body: the next Tab restarted from the top of the page, and a card
+  // opened near the bottom of a scrolled rail could open off screen. Put focus
+  // back on the card and bring what just appeared into view.
+  const head = el.rig.querySelector(`[data-card-key="${CSS.escape(key)}"]`);
+  if (!head) return;
+  head.focus({ preventScroll: true });
+  (opening ? (head.closest(".card") ?? head) : head).scrollIntoView({
+    block: "nearest",
+    behavior: "smooth",
+  });
 }
 
 // --- rails --------------------------------------------------------------
@@ -938,8 +1035,8 @@ function saveSlots() {
 function sideOf(id) {
   // Saves and shots belong to no game, so they default to the right: without
   // them that rail would be empty until an addon claimed a cartridge.
-  const ownsNoGame = id === SAVES_PANE || id === SHOTS_PANE;
-  return placement[id] ?? (ownsNoGame ? "right" : "left");
+  const defaultsRight = id === SAVES_PANE || id === SHOTS_PANE || id === "enemies";
+  return placement[id] ?? (defaultsRight ? "right" : "left");
 }
 
 function moveTo(id, side) {
@@ -1000,26 +1097,54 @@ function railItems(sections) {
       title: section.title,
       note: section.note,
       badge: section.badge,
+      // What this pane's body is built from, so a rail can tell "the same
+      // numbers again" from "something moved" without rebuilding to find out.
+      sign: JSON.stringify(section),
       build: () => renderContent(section),
     })),
-    { id: SAVES_PANE, title: "Saves", note: savesCount, node: el.savesPane },
-    { id: SHOTS_PANE, title: "Shots", note: shotsCount, node: el.shotsPane },
+    { id: SAVES_PANE, title: "Saves", note: savesCount, node: el.savesPane, sign: "saves" },
+    { id: SHOTS_PANE, title: "Shots", note: shotsCount, node: el.shotsPane, sign: "shots" },
   ];
 }
 
+/**
+ * The block each rail slot is showing, and the signatures it was built from.
+ *
+ * An addon reports four times a second and a battle moves a number on nearly
+ * every one of them. Rebuilding both columns whenever any byte changed meant
+ * fresh `<img>` elements that decode a frame late, a tab strip that dropped
+ * its focus ring mid-click, and a scrolled rail that snapped back to the top —
+ * four times a second, for as long as the battle lasted. Keyed by side and
+ * position, so only the pane whose own signature moved is rebuilt.
+ */
+const slotCache = new Map();
+
 function renderRails(sections) {
+  const enemyAppeared =
+    sections.some((section) => section.section_id === "enemies") &&
+    !lastSections.some((section) => section.section_id === "enemies");
   lastSections = sections;
   const items = railItems(sections);
 
-  // Park the saves pane before the rails are rebuilt. Whichever rail is
-  // showing it will take it straight back; the rest of the time it sits in the
-  // park rather than being detached from the document entirely.
-  el.panePark.append(el.savesPane);
-  el.panePark.append(el.shotsPane);
+  // Rebuilding a pane briefly shortens the column, and the browser clamps
+  // scrollTop to whatever height it finds at that moment. Reading it back
+  // afterwards is how the rail stays where it was left.
+  const scrolls = [el.leftPane, el.rightPane]
+    .map((pane) => pane.closest(".readout"))
+    .filter(Boolean)
+    .map((box) => ({ box, top: box.scrollTop }));
 
   for (const side of SIDES) {
     const mine = items.filter((item) => sideOf(item.id) === side);
     const host = side === "left" ? el.leftPane : el.rightPane;
+
+    // Entering formation/battle should immediately reveal the newly useful
+    // opponent roster. This happens only on the transition, so the player can
+    // still switch this rail back to Saves while the fight continues.
+    if (side === "right" && enemyAppeared && mine.some((item) => item.id === "enemies")) {
+      slots.right = ["enemies"];
+      saveSlots();
+    }
 
     if (mine.length === 0) {
       slots[side] = [];
@@ -1035,16 +1160,78 @@ function renderRails(sections) {
     if (slots[side].length === 0) slots[side] = [mine[0].id];
     if (mine.length === 1) slots[side] = [mine[0].id];
 
-    host.replaceChildren(
-      ...slots[side].map((id, index) =>
-        renderSlot(side, index, mine, mine.find((item) => item.id === id)),
-      ),
+    const blocks = slots[side].map((id, index) =>
+      renderSlot(side, index, mine, mine.find((item) => item.id === id)),
     );
+    // `replaceChildren` removes and reinserts even a child that is already
+    // there, which would undo every reused node above. Only touch the host
+    // when the list it holds is actually a different list.
+    const settled =
+      host.childNodes.length === blocks.length &&
+      blocks.every((block, index) => host.childNodes[index] === block);
+    if (!settled) host.replaceChildren(...blocks);
   }
 
-  // Shown exactly when a rail took it back out of the park.
-  el.savesPane.hidden = el.savesPane.parentElement === el.panePark;
-  el.shotsPane.hidden = el.shotsPane.parentElement === el.panePark;
+  // Panes that exist whether or not a game is loaded sit in the park when no
+  // rail is showing them, rather than being detached from the document.
+  for (const pane of [el.savesPane, el.shotsPane]) {
+    const shown = el.leftPane.contains(pane) || el.rightPane.contains(pane);
+    if (!shown && pane.parentElement !== el.panePark) el.panePark.append(pane);
+    pane.hidden = !shown;
+  }
+
+  for (const { box, top } of scrolls) {
+    if (box.scrollTop !== top) box.scrollTop = top;
+  }
+}
+
+/**
+ * One slot, reusing as much of the last one as still applies.
+ *
+ * The chrome — the tab strip and the head — and the body change on different
+ * clocks. The chrome moves when the player moves something; the body moves
+ * with the game. Signing them separately is what lets a battle redraw its
+ * numbers without taking the tab strip down with them.
+ */
+function renderSlot(side, index, available, item) {
+  const key = `${side}:${index}`;
+  const cached = slotCache.get(key);
+
+  const chromeSig = JSON.stringify([
+    index,
+    item.id,
+    item.title,
+    item.note ?? "",
+    slots[side],
+    available.map((o) => [o.id, o.title, o.badge?.text ?? "", o.badge?.tone ?? ""]),
+    savesCount,
+    shotsCount,
+  ]);
+  // Which of this section's cards are open is state the section's own payload
+  // knows nothing about, so it has to be signed too — otherwise a click that
+  // only opens a card would find the signature unchanged and draw nothing.
+  const openHere = [...openCards]
+    .filter((card) => card.startsWith(`${item.id}:`))
+    .sort()
+    .join(",");
+  const bodySig = `${item.sign}|${openHere}`;
+
+  if (cached && cached.chromeSig === chromeSig && cached.bodySig === bodySig) {
+    // A pane that is a node rather than a drawing can have been taken by the
+    // other column since this block was built.
+    if (item.node && !cached.body.contains(item.node)) cached.body.append(item.node);
+    return cached.block;
+  }
+
+  if (cached && cached.chromeSig === chromeSig) {
+    cached.body.replaceChildren(item.node ?? item.build());
+    cached.bodySig = bodySig;
+    return cached.block;
+  }
+
+  const built = buildSlot(side, index, available, item);
+  slotCache.set(key, { ...built, chromeSig, bodySig });
+  return built.block;
 }
 
 /**
@@ -1059,7 +1246,7 @@ function renderRails(sections) {
  * click would answer. The second pane is an "and also show…", so it is styled
  * like the afterthought it is and costs one row.
  */
-function renderSlot(side, index, available, item) {
+function buildSlot(side, index, available, item) {
   const block = document.createElement("div");
   block.className = "slot";
 
@@ -1156,7 +1343,7 @@ function renderSlot(side, index, available, item) {
   body.append(item.node ?? item.build());
   block.append(body);
 
-  return block;
+  return { block, body };
 }
 
 function railButton(label, title, onClick) {
@@ -1320,9 +1507,24 @@ const HINT_INLINE_MAX = 16;
  * picture that fails to load simply leaves its frame empty — the card still
  * carries the name, which is the whole reason `alt` is in the schema.
  */
-function renderCardImage(image) {
+function renderCardImage(image, key) {
+  // A rebuilt card used to get a brand new `<img>`, and a fresh element
+  // decodes asynchronously even when the bytes are already in the cache — one
+  // blank frame per rebuild, which during a battle is a portrait that blinks
+  // four times a second. The same slot showing the same picture keeps the
+  // element it already decoded.
+  const kept = spriteFrames.get(key);
+  if (kept && kept.src === image.src) {
+    const shown = kept.frame.firstElementChild;
+    if (shown) shown.alt = image.alt ?? "";
+    return kept.frame;
+  }
+
   const frame = document.createElement("div");
   frame.className = "card__portrait";
+  if (image.src.startsWith("/ffta/jobs/")) {
+    frame.classList.add("card__portrait--label");
+  }
 
   const img = document.createElement("img");
   img.className = "card__sprite";
@@ -1336,8 +1538,17 @@ function renderCardImage(image) {
   });
 
   frame.append(img);
+  spriteFrames.set(key, { src: image.src, frame });
   return frame;
 }
+
+/**
+ * One frame per card slot, so a redraw does not re-decode a picture it has.
+ *
+ * Keyed by slot rather than by source: two of the same species in one party
+ * are two cards, and a single element cannot be in both of them.
+ */
+const spriteFrames = new Map();
 
 /** A bar. The percentage comes from the addon's numbers, never from the text. */
 function renderMeter(meter, tone) {
@@ -1382,11 +1593,12 @@ function renderCard(card, key, featured = false) {
   head.className = "card__head";
   if (hasDetail) {
     head.type = "button";
+    head.dataset.cardKey = key;
     head.setAttribute("aria-expanded", String(open));
     head.addEventListener("click", () => toggleCard(key));
   }
 
-  if (card.image) head.append(renderCardImage(card.image));
+  if (card.image) head.append(renderCardImage(card.image, key));
 
   const title = document.createElement("div");
   title.className = "card__id";
@@ -1571,10 +1783,69 @@ function flushBattery() {
 // --- loading ------------------------------------------------------------
 
 function setControlsEnabled(enabled) {
-  for (const button of [el.play, el.reset, el.ff, el.save, el.store, el.cloud]) {
+  for (const button of [el.play, el.reset, el.eject, el.ff, el.save, el.store, el.cloud]) {
     button.disabled = !enabled;
   }
+
+  // "Load from file" goes with them. `requireCartridge` already refuses the
+  // action, but refusing after a file picker, a file chosen and a read is a
+  // worse way to learn it than a key that was never live — and the title says
+  // why rather than leaving a dead control unexplained.
+  el.fileState.disabled = !enabled;
+  el.loadState.dataset.disabled = String(!enabled);
+  el.loadState.title = enabled
+    ? "Open a save state from this computer"
+    : "Load a game first — a save state does not carry one";
 }
+
+/**
+ * Refuse an action that only means something with a cartridge in.
+ *
+ * A save state is a picture of a machine *around* a cartridge — it does not
+ * carry one. Restoring into an empty console produced either an error from the
+ * core or, worse, a machine running nothing in particular; either way the
+ * message named a serialisation problem rather than the actual mistake.
+ */
+function requireCartridge(action) {
+  if (emu?.hasRom) return true;
+  say(`Load a game before you ${action}. A save state does not carry one.`, "bad");
+  return false;
+}
+
+/**
+ * Take the cartridge out.
+ *
+ * The battery is flushed first: everything the cartridge wrote is still owed
+ * to it, and ejecting is exactly the moment that debt comes due.
+ */
+function ejectRom() {
+  if (!emu?.hasRom) return;
+
+  flushBattery();
+  emu.eject();
+
+  running = false;
+  fastForward = false;
+  romName = "";
+  gameCode = "";
+  lastSnapshotAt = 0;
+  el.ff.setAttribute("aria-pressed", "false");
+  el.screen.dataset.mode = "empty";
+  el.play.textContent = "Resume";
+  setControlsEnabled(false);
+  // Back to the "no cartridge" rail, and a black screen rather than the last
+  // frame of a game that is no longer in the machine.
+  renderSnapshot(null);
+  frameCtx.clearRect(0, 0, 240, 160);
+  blit();
+  // The same words the bar carries before anything is loaded, because that is
+  // the state the machine is now in.
+  setLink("idle", "no cartridge");
+  lobby?.setPlaying(null, null);
+  say("Cartridge ejected");
+}
+
+el.eject.addEventListener("click", ejectRom);
 
 async function startRom(bytes, name) {
   try {
@@ -1583,6 +1854,24 @@ async function startRom(bytes, name) {
     say(error.message, "bad");
     return;
   }
+
+  // Kept, rather than handed over and forgotten. A lockstep session runs the
+  // other player's console in this browser too, and a console with no
+  // cartridge in it cannot run anything — so when both players are on the same
+  // game, which is every battle and most trades, these are the bytes that go
+  // into the second core. Sixteen megabytes is a lot to hold; fetching the
+  // same file again mid-session, from a vault URL that may have expired, is
+  // worse.
+  romBytes = new Uint8Array(bytes.slice(0));
+  romHash = "";
+  romFingerprint(romBytes)
+    .then((hash) => {
+      romHash = hash;
+    })
+    .catch(() => {
+      // Without a fingerprint a session cannot prove the two cartridges match,
+      // so it will refuse to start. That is the right failure.
+    });
 
   romName = name;
   running = true;
@@ -1797,6 +2086,10 @@ const yieldToEvents = (() => {
 
 /** Run the frames the clock has allowed, a slice at a time. */
 async function pumpSlices() {
+  // A lockstep session owns emulated time completely. A frame run from here
+  // would be a frame the other browser did not run, which is a desync — and
+  // one that would not show up until a state hash caught it seconds later.
+  if (session) return;
   if (pumping) return;
   pumping = true;
   try {
@@ -1842,6 +2135,8 @@ const linkTally = {
   settled: 0,
   timedOut: 0,
   couldNotJoin: 0,
+  /** Transfers a console bowed out of, saying so rather than going quiet. */
+  skipped: 0,
   refusedDelivery: 0,
   abandoned: 0,
   /** Frames carried on part-way through, rather than waiting for the next. */
@@ -1896,6 +2191,10 @@ function seatedMembers() {
  */
 function reseatCable() {
   if (!emu) return;
+  if (LOCKSTEP) {
+    reseatLockstep();
+    return;
+  }
 
   const seated = seatedMembers();
   const seat = mySeat();
@@ -1950,6 +2249,37 @@ function renderLinkNote() {
     el.linkNote.textContent = "On. Start or join a room to link.";
     return;
   }
+
+  // A lockstep session reports something different from a relay, because the
+  // numbers that matter are different. There is no round trip per transfer to
+  // report and no lost transfers to count; what can go wrong is that a frame's
+  // input did not arrive, so that is what is shown.
+  if (LOCKSTEP) {
+    el.linkNote.dataset.tone = sessionPhase === "failed" ? "bad" : "";
+    if (sessionPhase === "failed") {
+      el.linkNote.textContent = `Link stopped: ${sessionNote}`;
+      return;
+    }
+    if (!session) {
+      el.linkNote.textContent =
+        sessionPhase === "opening"
+          ? "Starting both consoles…"
+          : sessionPhase === "offering"
+            ? "Offering this console…"
+            : "Waiting for a second console.";
+      return;
+    }
+    const who =
+      session.mySeat === 0
+        ? `Player 1 of ${session.players}, driving the cable`
+        : `Player ${session.mySeat + 1} of ${session.players}`;
+    const stalls = stalledFrames > 0 ? ` · ${stalledFrames} waits` : "";
+    el.linkNote.textContent =
+      `${who} · ${session.players} consoles here · ${session.delay}f delay` +
+      ` · ${session.bufferedFrames}f buffered${stalls}`;
+    return;
+  }
+
   if (!emu?.linkConnected) {
     el.linkNote.textContent = "Waiting for a second console.";
     return;
@@ -1969,20 +2299,437 @@ function renderLinkNote() {
   }
 
   const rate = Math.round(linkRate);
-  const lost =
-    linkTally.timedOut +
-    linkTally.couldNotJoin +
-    linkTally.refusedDelivery +
-    linkTally.abandoned;
 
   // Only the parent asks, so only the parent can time the answer. Showing a
   // child a round trip of zero would be inventing a number.
   const trip = seat === 0 ? ` · ${linkTally.roundTripMs.toFixed(1)}ms` : "";
-  el.linkNote.textContent =
-    `${who} · ${rate}/s${trip}${transport}` + (lost > 0 ? ` · ${lost} lost` : "");
+  const trouble = describeLinkLoss();
+  el.linkNote.textContent = `${who} · ${rate}/s${trip}${transport}${trouble}`;
   // A link that is losing transfers is the thing worth noticing, so it is the
   // one state that changes colour.
-  el.linkNote.dataset.tone = lost > 0 ? "bad" : "";
+  el.linkNote.dataset.tone = trouble ? "bad" : "";
+}
+
+/**
+ * What is going wrong with the cable, not just how much.
+ *
+ * A bare count of lost transfers says a link is unhappy and nothing about why,
+ * and the four ways it can go wrong want four different fixes. Naming the one
+ * that dominates turns "12 lost" into a direction to look in — which is the
+ * difference between a bug report and a diagnosis.
+ */
+function describeLinkLoss() {
+  const causes = [
+    // A console asked to join a transfer it could not reach: it was ahead of
+    // the parent, or too far behind to catch up. A synchronisation problem.
+    [linkTally.couldNotJoin + linkTally.skipped, "out of step"],
+    // Nobody answered in time. The network, or a console that stopped running.
+    [linkTally.timedOut, "no answer"],
+    // Data arrived at a console that was not waiting for it.
+    [linkTally.refusedDelivery, "arrived late"],
+    // A wait given up on, usually because the room went away.
+    [linkTally.abandoned, "given up"],
+  ];
+
+  const lost = causes.reduce((total, [count]) => total + count, 0);
+  if (lost === 0) return "";
+
+  const [, worst] = causes.reduce((a, b) => (b[0] > a[0] ? b : a));
+  return ` · ${lost} lost, mostly ${worst}`;
+}
+
+// --- lockstep -------------------------------------------------------------
+//
+// The relay above is kept because it is proven and because `?relay=1` is a way
+// back if this turns out to have a hole in it. It is not the default and
+// should not be: it cannot reach full speed, for reasons `link.js` sets out at
+// length. Everything below runs every console in this browser and puts only
+// input on the wire.
+
+/**
+ * Match the session to the room, tearing the old one down if the room changed.
+ *
+ * A session is built from a fixed list of seats and a state each of them
+ * started from, so a seat appearing or leaving is a different session rather
+ * than an adjustment to this one. The replacement is offered on the next tick;
+ * doing it here would race the membership update that caused it.
+ */
+function reseatLockstep() {
+  const want = lockstepWanted();
+  const shape = want
+    ? seatedMembers()
+        .sort((a, b) => a.seat - b.seat)
+        .map((member) => member.id)
+        .join(",")
+    : "none";
+
+  if (shape !== cableShape) {
+    cableShape = shape;
+    endSession();
+  }
+  renderLinkNote();
+}
+
+/** Put the relay's cable away, so two cables are never on one console. */
+function stopRelayCable() {
+  if (emu?.linkConnected) emu.linkDisconnect();
+  linkPhase = "idle";
+  childSeq = -1;
+  linkFrame = 0;
+  grantedFrame = 0;
+  lastTickAt = 0;
+  linkFrameCycle = 0;
+}
+
+/** Whether to run linked play in lockstep rather than by relaying halfwords. */
+const LOCKSTEP = new URLSearchParams(window.location.search).get("relay") !== "1";
+
+/** The live session, or null. */
+let session = null;
+/** `off`, `offering`, `opening`, `live` or `failed`. */
+let sessionPhase = "off";
+/** Why the last session stopped, for the read-out. */
+let sessionNote = "";
+/** What every seated console published about itself, by member id. */
+const hellos = new Map();
+/**
+ * Which console each member is, by member id.
+ *
+ * The room's own seat numbers are not used directly: a room may leave a gap —
+ * somebody in seat 2 with seat 1 empty — and a cable may not, so a session
+ * compacts them and this is the mapping it settled on.
+ */
+let sessionSeats = new Map();
+
+/** Which console a member is in the running session, or null. */
+function seatOf(id) {
+  const seat = sessionSeats.get(id);
+  return seat === undefined ? null : seat;
+}
+/** The cartridge in the machine, and its fingerprint. */
+let romBytes = null;
+let romHash = "";
+/** The BIOS, so a second console can be given the same one. */
+let biosBytes = null;
+/** Consoles built for other players' seats, reused across sessions. */
+const peerConsoles = new Map();
+/** The session this browser has asked the room to open, before it opened. */
+let begunSession = "";
+/** When our own hello went out, so the echo measures the trip to the server. */
+let helloSentAt = 0;
+/** Round trip to the relay, in milliseconds. Decides the input delay. */
+let relayRoundTripMs = 60;
+/** Frames the session wanted to run but could not, for want of input. */
+let stalledFrames = 0;
+/** Library listing, fetched once when a session needs somebody else's game. */
+let libraryCache = null;
+
+/** Whether a lockstep session should be running, given the room and the toggle. */
+function lockstepWanted() {
+  if (!LOCKSTEP || !emu?.hasRom || !el.link.checked) return false;
+  if (!lobby?.connected) return false;
+  const seated = seatedMembers();
+  return seated.length >= 2 && mySeat() !== null;
+}
+
+/**
+ * Offer this console to the room, so a session can be built from it.
+ *
+ * What is offered is a save state, not a battery save. A battery save would
+ * mean resetting to the title screen to start a link, which is not what a cable
+ * does; a state means both players carry on from where they are. It costs a
+ * few hundred kilobytes once, against nothing per frame afterwards.
+ *
+ * The state is also what makes determinism achievable at all: every browser
+ * restores every console from the same bytes, so the two start from a position
+ * they provably agree on rather than from two independently-arrived-at guesses.
+ */
+async function offerConsole() {
+  // Only from a standing start. A failed session stays failed until the room
+  // changes: retrying a link that just corrupted itself, once a frame, is how
+  // a bad state becomes an unusable page.
+  if (sessionPhase !== "off") return;
+  if (!lockstepWanted() || !romHash) return;
+
+  sessionPhase = "offering";
+  sessionNote = "";
+  renderLinkNote();
+
+  try {
+    const state = await packState(emu.saveState());
+    helloSentAt = performance.now();
+    lobby.publishLinkHello({
+      seat: mySeat(),
+      romHash,
+      romName,
+      gameCode,
+      state,
+    });
+  } catch (error) {
+    failSession(`could not offer this console: ${error.message}`);
+  }
+}
+
+/**
+ * Take somebody's offer, and open a session once every seat has made one.
+ *
+ * Only the parent decides when. Everyone else waits to be told, which is what
+ * makes the terms — the seed, the delay, the order of seats — the same set of
+ * terms on every machine rather than three machines' opinions.
+ */
+function acceptHello(from, message) {
+  hellos.set(from, message);
+
+  if (from === lobby.you && helloSentAt) {
+    // Our own hello coming back has been to the server and returned, which is
+    // the round trip the input delay has to cover. Measuring it here costs no
+    // message of its own.
+    relayRoundTripMs = performance.now() - helloSentAt;
+    helloSentAt = 0;
+  }
+
+  if (!isParent() || sessionPhase === "live" || sessionPhase === "opening") return;
+
+  const seated = seatedMembers().sort((a, b) => a.seat - b.seat);
+  if (seated.length < 2 || !seated.every((member) => hellos.has(member.id))) return;
+
+  // Asking is remembered separately from having opened, because between the
+  // two there is a round trip. A fourth player's hello arriving inside it
+  // would otherwise ask a second time, and the room would be told to open two
+  // sessions whose order nobody agrees on.
+  if (begunSession) return;
+  begunSession = `${lobby.you}:${Date.now().toString(36)}`;
+
+  lobby.publishLinkBegin({
+    session: begunSession,
+    // The cartridge clock every console starts from. Whole seconds, because
+    // that is the resolution the chip has, and one number rather than each
+    // browser's own `Date.now`, which is the whole point.
+    seed: Math.floor(Date.now() / 1000),
+    delay: delayForRoundTrip(relayRoundTripMs + 20),
+    // Seat order, compacted. A room can leave a gap — somebody in seat 2 with
+    // seat 1 empty — and a cable cannot, so the console a player sits in is
+    // their position in this list.
+    seats: seated.map((member) => member.id),
+  });
+}
+
+/** Open the session the parent has described. */
+async function beginSession(message) {
+  if (sessionPhase === "live" || sessionPhase === "opening") return;
+  if (!lockstepWanted()) return;
+
+  const ids = Array.isArray(message.seats) ? message.seats : [];
+  const mine = ids.indexOf(lobby.you);
+  if (mine < 0) return;
+
+  const entries = [];
+  for (let seat = 0; seat < ids.length; seat += 1) {
+    const hello = hellos.get(ids[seat]);
+    if (!hello) {
+      failSession("a player did not say what they were running");
+      return;
+    }
+    entries.push({
+      seat,
+      id: ids[seat],
+      romHash: hello.rom_hash,
+      romName: hello.rom_name,
+      gameCode: hello.game_code,
+      packed: hello.state,
+    });
+  }
+
+  sessionPhase = "opening";
+  sessionNote = "";
+  sessionSeats = new Map(ids.map((id, seat) => [id, seat]));
+  renderLinkNote();
+
+  try {
+    // The relay's cable must come out first. Both would otherwise be attached
+    // to the same console, and the relay's timeouts would abandon transfers
+    // the session had already carried.
+    stopRelayCable();
+
+    for (const entry of entries) entry.state = await unpackState(entry.packed);
+
+    session = await openSession({
+      id: message.session,
+      seats: entries,
+      mySeat: mine,
+      localEmu: emu,
+      delay: Math.min(12, Math.max(2, Number(message.delay) || 3)),
+      seed: Number(message.seed) || Math.floor(Date.now() / 1000),
+      bios: biosBytes,
+      makeConsole: () => spareConsole(entries.length),
+      resolveRom: resolvePeerRom,
+    });
+
+    sessionPhase = "live";
+    stalledFrames = 0;
+    framesOwed = 0;
+    frameClock = 0;
+    running = true;
+    say(`Linked with ${entries.length - 1} other player. Running both consoles here.`);
+  } catch (error) {
+    failSession(error.message);
+  } finally {
+    renderLinkNote();
+  }
+}
+
+/**
+ * A second emulator for somebody else's seat.
+ *
+ * The module is instantiated again rather than the core being taught about
+ * multiple machines. Each instantiation gets its own linear memory, so the
+ * `static mut EMULATOR` inside is a singleton per instance and two of them do
+ * not see each other — which is exactly the isolation two consoles want, for
+ * no Rust at all.
+ */
+async function spareConsole(players) {
+  for (const [seat, core] of peerConsoles) {
+    if (seat < players) {
+      peerConsoles.delete(seat);
+      return core;
+    }
+  }
+  return TinyBird.load();
+}
+
+/**
+ * Find the cartridge a seat needs.
+ *
+ * The common case is that it is the one already in the machine: two people
+ * battling, or trading between two copies of the same game. Beyond that we can
+ * only offer what this browser already has — ROMs are not relayed, so a link
+ * between two different games needs both games on both machines.
+ */
+async function resolvePeerRom(entry) {
+  if (entry.romHash === romHash && romBytes) return romBytes;
+
+  if (libraryCache === null) {
+    const [vault, local] = await Promise.all([fetchVault(), fetchLocal()]);
+    libraryCache = [...vault.assets, ...local];
+  }
+
+  const named = libraryCache.filter((asset) => asset.name === entry.romName);
+  for (const asset of named) {
+    try {
+      const response = await fetchStorage(asset.url);
+      if (!response.ok) continue;
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if ((await romFingerprint(bytes)) === entry.romHash) return bytes;
+    } catch {
+      // Try the next candidate rather than failing the whole session on one
+      // unreachable vault entry.
+    }
+  }
+
+  throw new Error(
+    `this link needs ${entry.romName || "another cartridge"}, which is not in this browser`,
+  );
+}
+
+/** Stop the session, saying why. */
+function failSession(reason) {
+  if (session) {
+    session.detach();
+    for (let seat = 0; seat < session.consoles.length; seat += 1) {
+      if (seat !== session.mySeat) peerConsoles.set(seat, session.consoles[seat]);
+    }
+  }
+  session = null;
+  sessionPhase = "failed";
+  sessionNote = reason;
+  hellos.clear();
+  begunSession = "";
+  say(`Link stopped: ${reason}`, "bad");
+  renderLinkNote();
+}
+
+/** Take the session down without calling it a failure. */
+function endSession() {
+  if (session) {
+    if (lobby?.connected) lobby.publishLinkBye(session.id);
+    // Kept for the next session. Instantiating the module means fetching and
+    // compiling it again, which is a visible pause, and a room's membership
+    // changes every time anybody loads a game.
+    for (let seat = 0; seat < session.consoles.length; seat += 1) {
+      if (seat !== session.mySeat) peerConsoles.set(seat, session.consoles[seat]);
+    }
+    session.detach();
+  }
+  session = null;
+  sessionPhase = "off";
+  sessionNote = "";
+  hellos.clear();
+  begunSession = "";
+}
+
+/** Publish this player's mask for a frame far enough ahead to arrive in time. */
+function publishInput() {
+  const at = session.pushLocal(buttons);
+  if (at !== null) lobby.publishLinkInput(session.id, at, buttons);
+}
+
+/**
+ * Run the session for this animation frame.
+ *
+ * Where the relay stalls nine times a frame — once per transfer — this stalls
+ * at most once, and only when a message for the next frame has not arrived
+ * yet. Everything else, the whole cable included, happens here without leaving
+ * the page.
+ */
+function runLockstep(now) {
+  const due = schedule(now, frameClock, 1);
+  frameClock = due.clock;
+  framesOwed = Math.min(framesOwed + due.frames, MAX_CATCHUP_FRAMES);
+
+  publishInput();
+
+  let ran = 0;
+  while (framesOwed > 0) {
+    if (!session.ready) {
+      // The next frame is waiting on somebody else. Debt accrued while waiting
+      // would be spent racing ahead the moment it lands, so it is dropped —
+      // the same rule the unlinked loop uses when the page was paused.
+      stalledFrames += 1;
+      framesOwed = 0;
+      frameClock = 0;
+      break;
+    }
+
+    if (!session.runFrame()) {
+      failSession("a frame could not be completed");
+      return 0;
+    }
+
+    framesOwed -= 1;
+    framesRun += 1;
+    ran += 1;
+    publishInput();
+
+    if (audio && audio.ready) audio.push(session.local.takeAudio());
+    // The other consoles produce sound too, into a buffer nobody empties.
+    // Emptying it is what keeps that from growing for the length of a session.
+    for (let seat = 0; seat < session.consoles.length; seat += 1) {
+      if (seat !== session.mySeat) session.consoles[seat].takeAudio();
+    }
+
+    if (session.hashDue) {
+      const value = session.hash();
+      lobby.publishLinkHash(session.id, session.frame, value);
+      if (session.recordHash(session.frame, value) !== null) {
+        failSession("the two consoles computed different states");
+        return ran;
+      }
+    }
+  }
+
+  // Drawing is the caller's, which already knows to do it only when something
+  // changed.
+  return ran;
 }
 
 /**
@@ -2069,6 +2816,9 @@ function resumeAfterTransfer() {
  * immediately after the two confirmation prompts.
  */
 function catchUpToLinkStart(targetFrame, targetOffset) {
+  // Relay-only, like everything it runs. In a session the two consoles are
+  // already at the same instruction, because they are both in this browser.
+  if (session) return false;
   const frame = Number(targetFrame);
   const offset = Number(targetOffset);
   if (!Number.isSafeInteger(frame) || !Number.isSafeInteger(offset) || frame < 0 || offset < 0) {
@@ -2330,7 +3080,7 @@ function shareFrame(now) {
   lastFrameAt = now;
   // JPEG rather than PNG: a tenth of the size at this scale, and the artefacts
   // are invisible once the picture is a thumbnail in someone's sidebar.
-  lobby.publishFrame(el.canvas.toDataURL("image/jpeg", FRAME_QUALITY));
+  lobby.publishFrame(frameCanvas.toDataURL("image/jpeg", FRAME_QUALITY));
 }
 
 el.share.addEventListener("change", () => {
@@ -2394,22 +3144,40 @@ async function joinRoom(code) {
       // Do not sample SIOMLT_SEND until this game has reached the instruction
       // where the parent began the transfer. Network latency otherwise leaves
       // the child answering one protocol word behind.
+      // A console that cannot take this transfer says so rather than going
+      // quiet. Silence reaches the same conclusion, but only after the
+      // parent's timeout — and the parent's game is frozen for the whole of
+      // it, so a run of missed transfers turned into a run of stalls. That is
+      // what a game sees as a link that has stopped responding.
+      //
+      // Answering with a halfword would be worse than either: the parent would
+      // hand back data this console cannot receive.
       if (!catchUpToLinkStart(frame, offset)) {
         linkTally.couldNotJoin++;
+        lobby.publishLinkSkip(seq);
         return;
       }
 
-      // Answering a transfer this console could not join would have the parent
-      // wait on data that is never going to land anywhere. Better to be the
-      // console that went quiet: the parent times out and marks the seat
-      // absent, which the game already knows how to handle.
       if (!emu.linkJoin()) {
         linkTally.couldNotJoin++;
+        lobby.publishLinkSkip(seq);
         return;
       }
       childSeq = seq;
       childDeadline = performance.now() + LINK_TIMEOUT_MS;
       lobby.publishLinkValue(seq, emu.linkSendValue);
+    },
+
+    onLinkSkip: (from, seq) => {
+      if (!isParent() || linkPhase !== "collecting" || seq !== linkSeq) return;
+
+      // Counted as answered, with nothing on the wire. On hardware a console
+      // that does not drive its slot reads as 0xFFFF, which is exactly what a
+      // game expects from a seat that is not there — and it arrives now rather
+      // than after a timeout the parent spends frozen.
+      linkAnswers.set(from, 0xffff);
+      linkTally.skipped++;
+      if (everyoneAnswered()) settleLink();
     },
 
     onLinkValue: (from, seq, value) => {
@@ -2440,6 +3208,47 @@ async function joinRoom(code) {
       if (emu.linkDeliver(values, cycles)) linkTally.settled++;
       else linkTally.refusedDelivery++;
       resumeAfterTransfer();
+    },
+
+    // --- lockstep ---------------------------------------------------------
+
+    onLinkHello: (from, message) => {
+      if (!LOCKSTEP) return;
+      acceptHello(from, message);
+    },
+
+    onLinkBegin: (message) => {
+      if (!LOCKSTEP) return;
+      beginSession(message);
+    },
+
+    onLinkInput: (from, id, frame, keys) => {
+      if (!session || id !== session.id) return;
+      const seat = seatOf(from);
+      if (seat === null) return;
+      if (!session.acceptInput(seat, frame, keys)) {
+        // A mask for a frame already run, or one further ahead than the ring
+        // holds. Either way the two browsers are further apart than the buffer
+        // covers, and carrying on would run a frame on input that is not the
+        // input the other browser used.
+        failSession("the two consoles drifted too far apart");
+      }
+    },
+
+    onLinkHash: (from, id, frame, hash) => {
+      if (!session || id !== session.id) return;
+      if (session.acceptHash(frame, hash) !== null) {
+        failSession("the two consoles computed different states");
+      }
+    },
+
+    onLinkBye: (from, id) => {
+      if (!session || id !== session.id) return;
+      // Said on purpose, so this is not a failure — the other player closed
+      // the cable rather than fell off it.
+      endSession();
+      say("The other player left the link.");
+      renderLinkNote();
     },
     onStatus: (status) => {
       if (status === "connected") {
@@ -2536,71 +3345,6 @@ el.copyCode.addEventListener("click", async () => {
   }
 });
 
-// --- account ------------------------------------------------------------
-//
-// The page never sees a token. Signing in sets a first-party cookie this
-// server issues, and the server holds the credentials the auth service gave it;
-// see `auth.rs` for why it is arranged that way. So all this code does is post
-// a form and read back who it is talking to.
-
-/** The signed-in user, or null. Saves belong to whoever this is. */
-let account = null;
-
-function sayAccount(text, tone) {
-  el.accountHint.textContent = text;
-  if (tone) {
-    el.accountHint.dataset.tone = tone;
-  } else {
-    delete el.accountHint.dataset.tone;
-  }
-}
-
-/** Open or close the account menu. */
-function showAccountMenu(open) {
-  el.accountMenu.hidden = !open;
-  el.accountToggle.setAttribute("aria-expanded", String(open));
-  if (open) {
-    // Whichever field is the point of the menu right now.
-    (account ? el.signOut : el.accountEmail).focus();
-  }
-}
-
-/** Show either the form or the signed-in state. */
-function renderAccount(user) {
-  account = user;
-  const signedIn = Boolean(user);
-  el.accountIn.hidden = !signedIn;
-  el.accountForm.hidden = signedIn;
-  el.account.classList.toggle("is-signed-in", signedIn);
-
-  // The bar says whether you are signed in, not who you are: the address only
-  // appears once the menu is open, so it is not sitting in a stream capture.
-  el.accountLabel.textContent = signedIn ? "Account" : "Sign in";
-  if (signedIn) {
-    el.accountWho.textContent = user.display_name
-      ? `${user.display_name} · ${user.email}`
-      : user.email;
-  }
-}
-
-el.accountToggle.addEventListener("click", () => {
-  showAccountMenu(el.accountMenu.hidden);
-});
-
-// A menu that will not close is worse than one that never opened.
-document.addEventListener("click", (event) => {
-  if (!el.accountMenu.hidden && !el.account.contains(event.target)) {
-    showAccountMenu(false);
-  }
-});
-
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !el.accountMenu.hidden) {
-    showAccountMenu(false);
-    el.accountToggle.focus();
-  }
-});
-
 // --- lobby dialog -------------------------------------------------------
 //
 // Hosting or joining is a thing you do once at the start of a session, so it
@@ -2652,159 +3396,74 @@ paintShortcuts();
 refreshPadPresence();
 refreshShots();
 
-/** Ask who we are. Also tells us whether accounts exist at all. */
-async function refreshAccount() {
-  try {
-    const response = await fetch("/api/auth/me");
-    const body = await response.json();
-    // Without a configured auth service the panel stays hidden and saves fall
-    // back to the single local owner, which is a supported way to run this.
-    el.account.hidden = !body.configured;
-    if (!body.configured) return;
-    renderAccount(body.user ?? null);
-  } catch {
-    el.account.hidden = true;
-  }
-}
+// --- account ------------------------------------------------------------
+//
+// The menu itself is account.js, shared with every other page. What is left
+// here is the part only this page has: saves and screenshots belong to whoever
+// is signed in, so a change of identity has to reload them.
+
+/** The account menu, once startup has built it. */
+let accounts = null;
 
 /**
- * Switch the form between signing in and creating an account.
+ * The one button this page adds to the menu.
  *
- * The extra fields are emptied on the way out rather than left filled and
- * hidden: a repeated password sitting in a hidden input is a password the next
- * person at this browser can read out of the DOM.
+ * Built here rather than in the shared markup: claiming saves means nothing on
+ * a page with no saves on it.
  */
-function setAccountMode(mode) {
-  el.accountForm.dataset.mode = mode;
-  const creating = mode === "register";
+const claimButton = document.createElement("button");
+claimButton.className = "key key--slim";
+claimButton.type = "button";
+claimButton.hidden = true;
 
-  el.signIn.hidden = creating;
-  el.signUpBack.hidden = !creating;
-  el.signUp.textContent = creating ? "Create account" : "Create account\u2026";
-  el.accountPassword.autocomplete = creating ? "new-password" : "current-password";
+/** Whether the first read of who-we-are has landed. */
+let accountKnown = false;
 
-  if (!creating) {
-    el.accountUsername.value = "";
-    el.accountPassword2.value = "";
+/**
+ * React to a change of identity.
+ *
+ * The first call is startup asking; everything after it is a real change, and
+ * a real change means the vault on screen belongs to the wrong person.
+ */
+function onAccountChange(user) {
+  offerClaim();
+  if (!accountKnown) {
+    accountKnown = true;
+    return;
   }
-  sayAccount(
-    creating
-      ? "Pick a name others see in a room. 12 characters or more for the password."
-      : "Saves are kept per account. 12 characters or more.",
-  );
+  // Deliberately not "signed in as <address>": the status line is the one part
+  // of the page always on screen, and putting the address there undoes the
+  // reason the menu hides it.
+  say(user ? "Signed in" : "Signed out");
+  // Shots as well as saves: leaving the last account's screenshots on screen
+  // would outlive the session that was allowed to see them.
+  refreshVault();
 }
-
-/** Post credentials, then reload the saves that belong to the new identity. */
-async function submitAccount(path, extra = {}) {
-  const email = el.accountEmail.value.trim();
-  const password = el.accountPassword.value;
-  if (!email || !password) {
-    sayAccount("Email and password, please.", "bad");
-    return;
-  }
-
-  for (const button of [el.signIn, el.signUp]) button.disabled = true;
-  sayAccount("Working…");
-  try {
-    const response = await fetch(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password, ...extra }),
-    });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error ?? `${response.status}`);
-
-    setAccountMode("signin");
-    // The password has done its job; there is no reason to leave it in a field
-    // where a screenshot or a shoulder would catch it.
-    el.accountPassword.value = "";
-    renderAccount(body.user);
-    sayAccount("");
-    showAccountMenu(false);
-    // Deliberately not "signed in as <address>": the status line is the one
-    // part of the page that is always visible, and putting the address there
-    // undoes the reason the menu hides it. The menu says who when asked.
-    say("Signed in", "good");
-    await refreshSaves();
-    await offerClaim();
-  } catch (error) {
-    sayAccount(error.message, "bad");
-  } finally {
-    for (const button of [el.signIn, el.signUp]) button.disabled = false;
-  }
-}
-
-el.accountForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  // Enter in the create form means "create", which is the button that is
-  // showing; in the sign-in form it means sign in.
-  if (el.accountForm.dataset.mode === "register") el.signUp.click();
-  else submitAccount("/api/auth/login");
-});
-
-el.signUp.addEventListener("click", () => {
-  // First click opens the longer form; the second one submits it. Creating an
-  // account by accident from a two-field sign-in box is worse than a click.
-  if (el.accountForm.dataset.mode !== "register") {
-    setAccountMode("register");
-    el.accountUsername.focus();
-    return;
-  }
-
-  const username = el.accountUsername.value.trim();
-  if (!username) {
-    sayAccount("Pick a username.", "bad");
-    el.accountUsername.focus();
-    return;
-  }
-
-  // Checked here and nowhere else: the server only ever receives one password,
-  // so a repeat field can only be verified by the page that collected both.
-  if (el.accountPassword.value !== el.accountPassword2.value) {
-    sayAccount("Those passwords do not match.", "bad");
-    el.accountPassword2.focus();
-    el.accountPassword2.select();
-    return;
-  }
-
-  submitAccount("/api/auth/register", { displayName: username });
-});
-
-el.signUpBack.addEventListener("click", () => setAccountMode("signin"));
-
-el.signOut.addEventListener("click", async () => {
-  await fetch("/api/auth/logout", { method: "POST" });
-  renderAccount(null);
-  el.claim.hidden = true;
-  showAccountMenu(false);
-  say("Signed out");
-  await refreshSaves();
-});
 
 /**
  * Offer to take over saves stored before accounts existed.
  *
- * Only shown when there is something to take: an button that does nothing is
+ * Only shown when there is something to take: a button that does nothing is
  * worse than no button.
  */
 async function offerClaim() {
-  el.claim.hidden = true;
-  if (!account) return;
+  claimButton.hidden = true;
+  if (!accounts?.user) return;
   try {
     const response = await fetch("/api/saves?legacy=1");
     if (!response.ok) return;
     const body = await response.json();
-    el.claim.hidden = (body.legacy ?? 0) === 0;
-    if (!el.claim.hidden) {
-      el.claim.textContent = `Claim ${body.legacy} old save${body.legacy === 1 ? "" : "s"}`;
+    claimButton.hidden = (body.legacy ?? 0) === 0;
+    if (!claimButton.hidden) {
+      claimButton.textContent = `Claim ${body.legacy} old save${body.legacy === 1 ? "" : "s"}`;
     }
   } catch {
     // Nothing to offer; the button stays hidden.
   }
 }
 
-el.claim.addEventListener("click", async () => {
-  el.claim.disabled = true;
+claimButton.addEventListener("click", async () => {
+  claimButton.disabled = true;
   say("Claiming saves…");
   try {
     const response = await fetch("/api/saves/claim", { method: "POST" });
@@ -2817,7 +3476,7 @@ el.claim.addEventListener("click", async () => {
   } catch (error) {
     say(`Could not claim those saves: ${error.message}`, "bad");
   } finally {
-    el.claim.disabled = false;
+    claimButton.disabled = false;
   }
 });
 
@@ -2825,7 +3484,7 @@ el.claim.addEventListener("click", async () => {
 
 /** A PNG of the current screen, for identifying a save at a glance. */
 async function captureThumbnail() {
-  const blob = await new Promise((resolve) => el.canvas.toBlob(resolve, "image/png"));
+  const blob = await new Promise((resolve) => frameCanvas.toBlob(resolve, "image/png"));
   if (!blob) return null;
   return new Uint8Array(await blob.arrayBuffer());
 }
@@ -2951,9 +3610,19 @@ function setShotsCount(text) {
  * vault gives us — it lists by whatever order it likes.
  */
 async function refreshShots() {
-  let assets = [];
+  let shots = [];
   try {
-    const response = await fetch("/api/library");
+    // Scoped to this account by the server. Asking for the whole vault and
+    // filtering here would make privacy a setting anyone could turn off in the
+    // developer tools.
+    const response = await fetch("/api/shots");
+    if (response.status === 401) {
+      accounts?.noticeSignedOut();
+      el.shotsOff.textContent = "Sign in to keep screenshots.";
+      showShots(false);
+      setShotsCount("");
+      return;
+    }
     const body = await response.json();
     if (!body.configured) {
       el.shotsOff.textContent =
@@ -2961,24 +3630,21 @@ async function refreshShots() {
       showShots(false);
       return;
     }
-    assets = (body.assets ?? []).filter((asset) =>
-      /^image\//.test(asset.content_type ?? ""),
-    );
+    shots = body.shots ?? [];
   } catch {
     showShots(false);
     return;
   }
 
-  if (assets.length === 0) {
+  if (shots.length === 0) {
     showShots(false);
     setShotsCount("");
     return;
   }
 
-  assets.sort((a, b) => takenAt(b.name) - takenAt(a.name));
   showShots(true);
-  setShotsCount(`${assets.length}`);
-  el.shotsList.replaceChildren(...assets.map(renderShot));
+  setShotsCount(`${shots.length}`);
+  el.shotsList.replaceChildren(...shots.map(renderShot));
 }
 
 function showShots(visible) {
@@ -2986,41 +3652,46 @@ function showShots(visible) {
   el.shotsOff.hidden = visible;
 }
 
-/** The timestamp the upload put in the name, or 0 for anything older. */
-function takenAt(name) {
-  const match = /(\d{10,})\.png$/i.exec(name ?? "");
-  return match ? Number(match[1]) : 0;
-}
-
-function renderShot(asset) {
+function renderShot(shot) {
   const item = document.createElement("li");
 
   const open = document.createElement("button");
   open.type = "button";
   open.className = "shots__item";
-  open.title = asset.name;
+  open.title = shot.game_code ? `${shot.game_code} screenshot` : "Screenshot";
 
   const image = document.createElement("img");
   image.className = "shots__thumb";
-  image.src = asset.url;
+  image.src = shot.url;
   image.alt = "";
   image.loading = "lazy";
   open.append(image);
 
-  const when = takenAt(asset.name);
-  if (when) open.append(span("shots__when", formatWhen(when)));
+  if (shot.taken_at_ms) open.append(span("shots__when", formatWhen(shot.taken_at_ms)));
 
-  open.addEventListener("click", () => showShot(asset, when));
+  open.addEventListener("click", () => showShot(shot, shot.taken_at_ms));
   item.append(open);
   return item;
 }
 
 function showShot(asset, when) {
   el.shotFull.src = asset.url;
-  el.shotFull.alt = asset.name;
+  el.shotFull.alt = "";
   el.shotWhen.textContent = when ? formatWhen(when) : "";
   el.shotOpen.href = asset.url;
   el.shotViewer.showModal();
+}
+
+/**
+ * Reload everything the vault keeps per account.
+ *
+ * Saves and screenshots are both scoped to whoever is signed in, so both have
+ * to be re-asked for when that changes. Only saves were, which is why a
+ * screenshot taken before a sign-out reappeared only after the next one was
+ * taken — the list was right on the server and stale on the page.
+ */
+async function refreshVault() {
+  await Promise.all([refreshSaves(), refreshShots()]);
 }
 
 /** Reload the saves list for the current cartridge. */
@@ -3036,6 +3707,7 @@ async function refreshSaves() {
     if (response.status === 401) {
       // Accounts are on and nobody is signed in. Say so where the saves would
       // be, rather than hiding the panel as though the vault were off.
+      accounts?.noticeSignedOut();
       showSaves(true);
       setSavesCount("signed out");
       el.savesList.replaceChildren(savesNote("Sign in to keep saves in the vault."));
@@ -3083,24 +3755,57 @@ function renderSaveRow(save) {
   const shot = document.createElement("img");
   shot.className = "saves__shot";
   shot.alt = "";
-  shot.width = 60;
-  shot.height = 40;
-
-  const load = document.createElement("button");
-  load.type = "button";
-  load.className = "saves__load";
-  load.title = `Load ${save.original_name}`;
-  load.append(span("saves__when", formatWhen(save.saved_at_ms)));
-  load.addEventListener("click", () => loadSaveFromVault(save));
-
+  shot.width = 96;
+  shot.height = 64;
   // Pull only the container prefix; the rest of the save stays on the CDN
   // until someone actually loads it.
   loadThumbnail(save, shot);
 
-  const size = span("saves__size", formatSize(save.size));
+  const meta = document.createElement("div");
+  meta.className = "saves__meta";
+
+  // Drawn from what we already have, so cancelling a rename costs nothing and
+  // a finished one is repainted by the refresh that follows it.
+  const paintMeta = () => {
+    const name = span("saves__name", save.label || "Unnamed");
+    if (!save.label) name.dataset.empty = "on";
+
+    // Renaming belongs beside the name, not in a row of verbs: it is the one
+    // action here that acts on a word rather than on the save.
+    const pencil = document.createElement("button");
+    pencil.type = "button";
+    pencil.className = "saves__pencil";
+    pencil.textContent = "✎";
+    pencil.title = "Rename this save";
+    pencil.setAttribute("aria-label", "Rename this save");
+    pencil.addEventListener("click", () => beginRename(save, meta, paintMeta));
+
+    const line = document.createElement("div");
+    line.className = "saves__nameline";
+    line.append(name, pencil);
+
+    const when = span("saves__when", formatWhenShort(save.saved_at_ms));
+    // The parts that got cut: the full date, and a size that is the same 220KB
+    // on every row and so tells you nothing by being on all of them.
+    when.title = `${formatWhen(save.saved_at_ms)} · ${formatSize(save.size)}`;
+
+    meta.replaceChildren(line, when);
+  };
+  paintMeta();
 
   const actions = document.createElement("div");
   actions.className = "saves__actions";
+
+  // Loading throws away the run in progress, and a button that says "load"
+  // does not say that. So it arms first, like the two that destroy the save
+  // itself: what is at risk is different, the misclick is the same.
+  const load = arming({
+    label: "load",
+    armed: "confirm?",
+    className: "saves__act saves__act--go",
+    title: "Load this save, discarding the game in progress",
+    run: () => loadSaveFromVault(save),
+  });
 
   // Overwriting throws away what is in the slot, so it arms first, exactly like
   // delete.
@@ -3127,9 +3832,89 @@ function renderSaveRow(save) {
     run: () => deleteSave(save),
   });
 
-  actions.append(overwrite, fetchToDisk, remove);
-  item.append(shot, load, size, actions);
+  actions.append(load, overwrite, fetchToDisk, remove);
+  item.append(shot, meta, actions);
   return item;
+}
+
+/** Longest name the vault keeps. The rest would be trimmed off the filename. */
+const SAVE_LABEL_MAX = 24;
+
+/**
+ * Rename a save, in the row it sits in.
+ *
+ * The name lives in the stored filename, so what a name may contain is what a
+ * filename may contain: letters, numbers and hyphens. Trimming as it is typed
+ * says that once and immediately, rather than letting someone finish a name
+ * the server then quietly reduces to something else.
+ */
+function beginRename(save, meta, paintMeta) {
+  const form = document.createElement("form");
+  form.className = "saves__rename";
+
+  const input = document.createElement("input");
+  input.className = "saves__name-input";
+  input.value = save.label ?? "";
+  input.maxLength = SAVE_LABEL_MAX;
+  input.placeholder = "letters, numbers, hyphens";
+  input.setAttribute("aria-label", "Save name");
+  input.addEventListener("input", () => {
+    const clean = input.value.replace(/[^A-Za-z0-9-]/g, "").slice(0, SAVE_LABEL_MAX);
+    if (clean !== input.value) input.value = clean;
+  });
+
+  const keep = document.createElement("button");
+  keep.type = "submit";
+  keep.className = "saves__act saves__act--go";
+  keep.textContent = "save";
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "saves__act";
+  cancel.textContent = "cancel";
+  cancel.addEventListener("click", paintMeta);
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    keep.disabled = true;
+    renameSave(save, input.value);
+  });
+  // Escape belongs to the field while the field is open. Without this it
+  // reaches the page's own handler and leaves focus mode instead.
+  form.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.stopPropagation();
+    paintMeta();
+  });
+
+  form.append(input, keep, cancel);
+  meta.replaceChildren(form);
+  input.focus();
+  input.select();
+}
+
+async function renameSave(save, label) {
+  if (label === (save.label ?? "")) {
+    await refreshSaves();
+    return;
+  }
+
+  say("Renaming…");
+  try {
+    // The name is part of the object's key in the vault, so the server has to
+    // restore it under a new one; there is no field to edit in place.
+    const response = await fetch(`/api/saves/${encodeURIComponent(save.id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ label }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error ?? `${response.status}`);
+    say(label ? `Renamed to ${label}` : "Name cleared", "good");
+  } catch (error) {
+    say(`Could not rename: ${error.message}`, "bad");
+  }
+  await refreshSaves();
 }
 
 /**
@@ -3146,18 +3931,25 @@ function arming({ label, armed, className, title, run }) {
   button.className = className;
   button.textContent = label;
   button.title = title;
+  // The armed state is a colour and a changed word. Neither reaches a screen
+  // reader on its own, and "click again" is the whole contract of the control.
+  button.setAttribute("aria-label", title);
 
   let timer = 0;
   const disarm = () => {
     clearTimeout(timer);
     button.dataset.confirm = "false";
     button.textContent = label;
+    button.title = title;
+    button.setAttribute("aria-label", title);
   };
 
   button.addEventListener("click", async () => {
     if (button.dataset.confirm !== "true") {
       button.dataset.confirm = "true";
       button.textContent = armed;
+      button.title = `${title} - click again to confirm`;
+      button.setAttribute("aria-label", button.title);
       timer = setTimeout(disarm, 4000);
       return;
     }
@@ -3219,6 +4011,10 @@ async function loadThumbnail(save, image) {
 }
 
 async function loadSaveFromVault(save) {
+  // The vault list is filed per cartridge, so a slot shown here belongs to the
+  // game that was loaded when it was shown. That is not the same as a game
+  // being loaded *now* — the list survives an eject.
+  if (!requireCartridge("load a save state")) return;
   say("Fetching save…");
   try {
     const response = await fetchStorage(save.url);
@@ -3261,6 +4057,29 @@ function savesNote(text) {
 }
 
 /** A short, local, human timestamp. */
+/**
+ * The same moment as `formatWhen`, in as few characters as still tell two
+ * saves apart.
+ *
+ * A save row has about 170px beside its thumbnail, and "8/27/2026 01:05 AM"
+ * wrapped onto a second line there — spending most of a line on a year that is
+ * nearly always this one. Today keeps only the time, this year keeps the day
+ * and the month, and only a save old enough for the year to matter pays for
+ * it. The full date and the size stay in the row's tooltip.
+ */
+function formatWhenShort(ms) {
+  const when = new Date(ms);
+  if (Number.isNaN(when.getTime())) return "unknown";
+  const now = new Date();
+  const time = when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (when.toDateString() === now.toDateString()) return `Today ${time}`;
+
+  const day = when.toLocaleDateString([], { day: "numeric", month: "short" });
+  return when.getFullYear() === now.getFullYear()
+    ? `${day} ${time}`
+    : `${day} ${when.getFullYear()}`;
+}
+
 function formatWhen(ms) {
   const when = new Date(ms);
   if (Number.isNaN(when.getTime())) return "unknown";
@@ -3354,7 +4173,11 @@ async function loadBios() {
   try {
     const response = await fetch("/bios");
     if (!response.ok) return false;
-    emu.loadBios(await response.arrayBuffer());
+    // Kept, because a lockstep session builds a second console in this browser
+    // and it has to be given the same BIOS as the first. Two consoles running
+    // different BIOS images agree on nothing for long.
+    biosBytes = new Uint8Array(await response.arrayBuffer());
+    emu.loadBios(biosBytes);
     return true;
   } catch {
     return false;
@@ -3463,31 +4286,32 @@ el.save.addEventListener("click", () => {
 // screenshot is exactly what it is for. States stay local downloads.
 el.store.addEventListener("click", async () => {
   const blob = await new Promise((resolve) =>
-    el.canvas.toBlob(resolve, "image/png"),
+    frameCanvas.toBlob(resolve, "image/png"),
   );
   if (!blob) {
     say("The screen could not be captured.", "bad");
     return;
   }
 
-  const name = `${baseName(romName)}-${Date.now()}.png`;
   say(`Uploading ${formatSize(blob.size)}…`);
 
+  // `/api/shots` rather than the general vault upload: the server names the
+  // file, and the owner is part of that name. A name the browser chose would
+  // let anyone file a picture under someone else's account, or read theirs.
   const form = new FormData();
-  form.append("file", blob, name);
+  form.append("game", gameCode ?? "");
+  form.append("file", blob, "screenshot.png");
 
   try {
-    const response = await fetch("/api/library/upload", { method: "POST", body: form });
+    const response = await fetch("/api/shots", { method: "POST", body: form });
     const body = await response.json();
     if (!response.ok) throw new Error(body.error ?? `${response.status}`);
-    say(`Uploaded ${body.name}`, "good");
+    say("Screenshot saved", "good");
     // Straight into the gallery, so the picture is there when you look.
     refreshShots();
-    // The vault URL is public, so it is worth handing over.
-    if (body.url) console.info("screenshot url:", body.url);
     lastUploadUrl = body.url ?? null;
   } catch (error) {
-    say(`Upload failed: ${error.message}`, "bad");
+    say(`Screenshot failed: ${error.message}`, "bad");
   }
 });
 
@@ -3496,6 +4320,10 @@ let lastUploadUrl = null;
 el.fileState.addEventListener("change", async (event) => {
   const [file] = event.target.files;
   if (!file) return;
+  if (!requireCartridge("load a save state")) {
+    event.target.value = "";
+    return;
+  }
   try {
     // A file downloaded from the vault is a container; a local one is raw.
     emu.loadState(await unpackSave(await file.arrayBuffer()));
@@ -3605,6 +4433,7 @@ window.addEventListener("drop", async (event) => {
   const [file] = event.dataTransfer.files;
   if (!file) return;
   if (/\.(state|savestate)$/i.test(file.name)) {
+    if (!requireCartridge("load a save state")) return;
     try {
       emu.loadState(await unpackSave(await file.arrayBuffer()));
       running = true;
@@ -3726,9 +4555,11 @@ async function boot() {
   });
 
   // Before the library, because a ?rom= link boots straight into a game and
-  // that immediately asks for its saves.
-  await refreshAccount();
-  await offerClaim();
+  // that immediately asks for its saves. Mounted here rather than at load, so
+  // the first answer arrives in step with the rest of startup.
+  accounts = mountAccount({ onChange: onAccountChange });
+  accounts?.extras.append(claimButton);
+  await accounts?.refresh();
   await loadLibrary();
 
   if (requested) {

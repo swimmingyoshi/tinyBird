@@ -27,16 +27,27 @@
         <nav class="bar__nav">
           <a class="is-current" href="/" aria-current="page">Home</a>
           <a href="/play">Play</a>
+          <a href="/info">Info</a>
+          <a href="/contact">Contact</a>
         </nav>
         <p class="bar__state" id="link-state" data-state="idle">
           <span class="dot" aria-hidden="true"></span><span id="link-label">checking</span>
         </p>
+
+        <!-- The account menu, built by account.js and the same on every
+             page. In the bar because it is checked rarely and read never. -->
+        <div class="account" id="account" hidden></div>
       </header>
 
-      <main>
-        <!-- The thesis: one emulator core, three places it runs. That is the
-             actual architecture, so it is what the page leads with. -->
+      <!-- The home page is a landing page and nothing else now. What used to
+           sit here — a live storage read-out, the commands to run it yourself,
+           a contact form — was all real, and all of it was answering a
+           question nobody arriving at the front door had asked yet. Those live
+           on /info and /contact. What is left is one claim, the three places
+           it holds, and the way on. -->
+      <main class="home">
         <section class="hero">
+          <p class="hero__kicker">Game Boy Advance · Rust · WebAssembly</p>
           <h1 class="hero__title">
             One GBA core.<br />Three places to run it.
           </h1>
@@ -47,103 +58,106 @@
           </p>
           <p class="hero__actions">
             <a class="key key--lead" href="/play">Play in this browser</a>
-            <a class="key" href="/overlay/full">Open the overlay</a>
+            <a class="key" href="/info">Where things stand</a>
           </p>
         </section>
 
-        <!-- A spec sheet rather than feature cards: these are three surfaces
-             over one core, and what differs between them is concrete. -->
-        <section class="spec">
-          <table class="spec__table">
-            <caption class="panel__eyebrow">Surfaces</caption>
-            <thead>
-              <tr>
-                <th scope="col">Surface</th>
-                <th scope="col">Runs</th>
-                <th scope="col">Use it for</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <th scope="row"><a href="/play">Browser</a></th>
-                <td>WebAssembly, 60&nbsp;fps</td>
-                <td>Play a ROM from your vault with no install.</td>
-              </tr>
-              <tr>
-                <th scope="row">Desktop</th>
-                <td><code>cargo run --release</code></td>
-                <td>Full speed, gamepads, save states, the addon dashboard.</td>
-              </tr>
-              <tr>
-                <th scope="row"><a href="/overlay/full">Overlay</a></th>
-                <td>Browser source</td>
-                <td>Live party and encounter data in OBS.</td>
-              </tr>
-            </tbody>
-          </table>
+        <!-- Three surfaces over one core. This was a table, which was the
+             right shape while it was a spec sheet among other spec sheets; on
+             a page that is now only this, three cards give each surface the
+             room to say what it is actually for. -->
+        <section class="strip">
+          <h2 class="strip__title">Surfaces</h2>
+          <div class="tiles">
+            <article class="tile tile--go">
+              <p class="tile__index" aria-hidden="true">01</p>
+              <h3 class="tile__name">Browser</h3>
+              <p class="tile__spec"><code>WebAssembly · 60 fps</code></p>
+              <p class="tile__body">
+                Play a ROM from your vault, or off your own disk, with nothing
+                to install.
+              </p>
+              <a class="tile__link" href="/play">Open the emulator</a>
+            </article>
+
+            <article class="tile tile--go">
+              <p class="tile__index" aria-hidden="true">02</p>
+              <h3 class="tile__name">Desktop</h3>
+              <p class="tile__spec"><code>cargo run --release</code></p>
+              <p class="tile__body">
+                Full speed, gamepads, save states, and the addon dashboard in a
+                native window.
+              </p>
+              <a class="tile__link" href="/info">How to run it</a>
+            </article>
+
+            <article class="tile tile--go">
+              <p class="tile__index" aria-hidden="true">03</p>
+              <h3 class="tile__name">Overlay</h3>
+              <p class="tile__spec"><code>OBS browser source</code></p>
+              <p class="tile__body">
+                Live party and encounter data on a stream, read out of the game
+                as it runs.
+              </p>
+              <a class="tile__link" href="/overlay/full">Open the overlay</a>
+            </article>
+          </div>
         </section>
 
-        <div class="split">
-          <!-- Addons: the thing that makes this more than an emulator. -->
-          <section class="panel">
-            <p class="panel__eyebrow">Game addons</p>
-            <p class="panel__lead">
-              An addon reads live state out of the running game and publishes it
-              through one schema, so the dashboard, the overlay, and any tool of
-              yours see the same data.
-            </p>
-            <dl class="cart__facts">
-              <div>
-                <dt>Pokemon FireRed / LeafGreen</dt>
-                <dd>party · encounters · battle</dd>
-              </div>
-              <div>
-                <dt>Final Fantasy Tactics Advance</dt>
-                <dd>units · player</dd>
-              </div>
-              <div>
-                <dt>Any other cartridge</dt>
-                <dd>header · region · checksum</dd>
-              </div>
-            </dl>
-            <p class="panel__foot">
-              The last one claims every ROM, so a game nobody has written an
-              addon for still shows something useful.
-            </p>
-          </section>
-
-          <!-- Storage: real state, read from the server. -->
-          <section class="panel">
-            <p class="panel__eyebrow">
-              Storage<span class="panel__note" id="storage-note">checking</span>
-            </p>
-            <p class="panel__lead" id="storage-lead">
-              Reading your vault…
-            </p>
-            <dl class="cart__facts" id="storage-facts" hidden>
-              <div><dt>Vault</dt><dd id="storage-vault">—</dd></div>
-              <div><dt>ROMs</dt><dd id="storage-roms">—</dd></div>
-              <div><dt>BIOS</dt><dd id="storage-bios">—</dd></div>
-            </dl>
-            <p class="panel__foot">
-              Asset bytes come straight from the CDN; the API key stays on the
-              server and is only used to list the vault and store save states.
-            </p>
-          </section>
-        </div>
-
-        <section class="panel">
-          <p class="panel__eyebrow">Run it yourself</p>
-          <pre class="code"><code># Desktop
-cargo run --release -- roms/game.gba
-
-# This page, plus the overlay server
-cargo build -p tinybird-wasm --target wasm32-unknown-unknown --release
-cargo run -p tinybird-web
-
-# Optional: point it at your asset vault
-cp .env.example .env   # then set TINYBIRD_MEDIA_KEY</code></pre>
+        <!-- Addons: the thing that makes this more than an emulator. -->
+        <section class="strip">
+          <h2 class="strip__title">Game addons</h2>
+          <p class="strip__lede">
+            An addon reads live state out of the running game and publishes it
+            through one schema, so the dashboard, the overlay, and any tool of
+            yours see the same data. They are JSON, not code.
+          </p>
+          <div class="tiles">
+            <article class="tile tile--quiet">
+              <h3 class="tile__name">Pokémon FireRed / LeafGreen</h3>
+              <p class="tile__body">Party, area encounters, active battle.</p>
+            </article>
+            <article class="tile tile--quiet">
+              <h3 class="tile__name">Final Fantasy Tactics Advance</h3>
+              <p class="tile__body">
+                Player name, every unit on the field by name with HP and MP,
+                and which of them are yours.
+              </p>
+            </article>
+            <article class="tile tile--quiet">
+              <h3 class="tile__name">Any other cartridge</h3>
+              <p class="tile__body">
+                Header, region, maker, checksum. This one claims every ROM and
+                runs last, so a game nobody has written an addon for still
+                shows something useful.
+              </p>
+            </article>
+          </div>
         </section>
+
+        <!-- Signposts. The nav has both, but the nav is four words in a bar;
+             somebody who has read this far deserves to be told what is
+             actually on the other end. -->
+        <nav class="strip">
+          <h2 class="strip__title">More</h2>
+          <div class="tiles tiles--wide">
+            <a class="tile tile--link" href="/info">
+              <h3 class="tile__name">Where things stand</h3>
+              <p class="tile__body">
+                What the emulator does well, what is half-built, and what is
+                knowingly missing — plus this server's own state and the
+                commands to run your own.
+              </p>
+            </a>
+            <a class="tile tile--link" href="/contact" id="signpost-contact" hidden>
+              <h3 class="tile__name">Get in touch</h3>
+              <p class="tile__body">
+                A cartridge that renders wrong, a save that will not load, an
+                addon you want written. It reaches a person.
+              </p>
+            </a>
+          </div>
+        </nav>
       </main>
 
       <footer class="foot">

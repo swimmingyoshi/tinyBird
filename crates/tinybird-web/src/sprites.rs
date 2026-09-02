@@ -140,7 +140,10 @@ mod tests {
     #[test]
     fn sprites_are_cached_by_species_so_a_duplicate_costs_nothing() {
         // Two of the same species in a party are one cache entry, not two.
-        assert_eq!(cache_path(Path::new("cache"), 32), cache_path(Path::new("cache"), 32));
+        assert_eq!(
+            cache_path(Path::new("cache"), 32),
+            cache_path(Path::new("cache"), 32)
+        );
     }
 
     /// The desktop caches painted artwork under the bare species number in the

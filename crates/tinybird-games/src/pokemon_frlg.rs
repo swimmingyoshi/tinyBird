@@ -49,6 +49,133 @@ const FIRE_RED_PARTY_BASE: u32 = 0x0202_4284;
 const FIRE_RED_PARTY_SCAN_START: u32 = 0x0202_3000;
 const FIRE_RED_PARTY_SCAN_END: u32 = 0x0202_6000;
 const FIRE_RED_SAVE_BLOCK1_PTR_ADDR: u32 = 0x0300_5008;
+
+const EMERALD_BATTLE_TYPE_FLAGS_ADDR: u32 = 0x0202_2FEC;
+const EMERALD_BATTLE_OUTCOME_ADDR: u32 = 0x0202_433A;
+const EMERALD_ENEMY_PARTY_BASE: u32 = 0x0202_4744;
+const EMERALD_PARTY_COUNT_ADDR: u32 = 0x0202_44E9;
+const EMERALD_PARTY_BASE: u32 = 0x0202_44EC;
+const EMERALD_SAVE_BLOCK1_PTR_ADDR: u32 = 0x0300_5D8C;
+
+/// Where one Generation 3 game keeps the things this addon reads.
+///
+/// The *shapes* are identical across the generation — a 100-byte party slot,
+/// four personality-keyed 12-byte substructures, the same stat and move
+/// layout — which is why FireRed and Emerald share every parser below. Only
+/// the addresses move, so only the addresses are written down twice.
+#[derive(Clone, Copy)]
+struct Gen3Layout {
+    party_base: u32,
+    party_count: u32,
+    enemy_party: u32,
+    /// `None` on a game whose battle addresses are not written down here.
+    ///
+    /// A party is found by scanning and validating, so it is safe to look for
+    /// on a game nobody has measured. A battle is not: it is read from fixed
+    /// addresses, and a wrong one reports a battle that is not happening, with
+    /// an opponent assembled out of whatever those bytes hold. Better to report
+    /// no battle than an invented one.
+    battle_type_flags: Option<u32>,
+    battle_outcome: u32,
+    /// `None` when this game's save block has not been located either.
+    save_block1_ptr: Option<u32>,
+    /// Where the party is looked for when it is not where it should be. The
+    /// scan is what makes a preferred address a hint rather than a
+    /// requirement, which is most of why a ROM hack still reports a party.
+    scan_start: u32,
+    scan_end: u32,
+    /// What is known about the maps of this game. Emerald has no encounter
+    /// tables entered yet, so every map comes back unmapped and says so.
+    area_for_map: fn(u8, u8) -> FireRedAreaSnapshot,
+}
+
+const FIRE_RED_LAYOUT: Gen3Layout = Gen3Layout {
+    party_base: FIRE_RED_PARTY_BASE,
+    party_count: FIRE_RED_PARTY_COUNT_ADDR,
+    enemy_party: FIRE_RED_ENEMY_PARTY_BASE,
+    battle_type_flags: Some(FIRE_RED_BATTLE_TYPE_FLAGS_ADDR),
+    battle_outcome: FIRE_RED_BATTLE_OUTCOME_ADDR,
+    save_block1_ptr: Some(FIRE_RED_SAVE_BLOCK1_PTR_ADDR),
+    scan_start: FIRE_RED_PARTY_SCAN_START,
+    scan_end: FIRE_RED_PARTY_SCAN_END,
+    area_for_map: fire_red_area_for_map,
+};
+
+const EMERALD_LAYOUT: Gen3Layout = Gen3Layout {
+    party_base: EMERALD_PARTY_BASE,
+    party_count: EMERALD_PARTY_COUNT_ADDR,
+    enemy_party: EMERALD_ENEMY_PARTY_BASE,
+    battle_type_flags: Some(EMERALD_BATTLE_TYPE_FLAGS_ADDR),
+    battle_outcome: EMERALD_BATTLE_OUTCOME_ADDR,
+    save_block1_ptr: Some(EMERALD_SAVE_BLOCK1_PTR_ADDR),
+    // Emerald's party sits above FireRed's, so the window reaches further up.
+    scan_start: FIRE_RED_PARTY_SCAN_START,
+    scan_end: FIRE_RED_PARTY_SCAN_END,
+    area_for_map: unmapped_area,
+};
+
+/// Ruby and Sapphire keep the party in IWRAM rather than EWRAM, and their
+/// battle and save-block addresses are not written down here.
+///
+/// The scan is what makes this workable: it validates every candidate before
+/// accepting it, so pointing it at the right 32KB finds the party without
+/// anybody having measured its address. What cannot be found that way is left
+/// switched off rather than guessed at.
+const RUBY_SAPPHIRE_LAYOUT: Gen3Layout = Gen3Layout {
+    party_base: 0x0300_4360,
+    party_count: 0x0300_4350,
+    enemy_party: 0,
+    battle_type_flags: None,
+    battle_outcome: 0,
+    save_block1_ptr: None,
+    scan_start: 0x0300_0000,
+    scan_end: 0x0300_8000,
+    area_for_map: unmapped_area,
+};
+
+/// Every map, until somebody enters Hoenn's encounter tables.
+///
+/// Reporting where you are without claiming to know what lives there is the
+/// same answer the FireRed side gives for a route nobody has typed in yet, and
+/// it is the honest one: the map numbers are read from memory, the encounters
+/// would have been invented.
+fn unmapped_area(map_group: u8, map_num: u8) -> FireRedAreaSnapshot {
+    FireRedAreaSnapshot {
+        map_group,
+        map_num,
+        map_key: UNKNOWN_MAP_KEY.to_string(),
+        name: "Unknown Area".to_string(),
+        encounter_groups: Vec::new(),
+    }
+}
+
+/// The cartridges the encounter tables below were entered against.
+///
+/// Everything else this addon reports comes out of live memory or out of the
+/// cartridge's own name tables, so it follows a hack wherever the hack went.
+/// The encounter tables do not: they are written down here, keyed by map
+/// group and number, and a hack that keeps Route 1's map slot while changing
+/// what lives on it would have them reported as fact.
+///
+/// The header cannot tell the two apart — Ultra Violet is `BPRE`, "POKEMON
+/// FIRE", maker 01, revision 0, 16MB, exactly like the original — so the
+/// fingerprint decides. An unrecognised dump is not refused, it is only not
+/// told things about itself that were measured somewhere else.
+const TABLED_DUMPS: &[u64] = &[
+    // Pokemon FireRed (U) rev 0, "1636 - Pokemon Fire Red (U)(Squirrels)".
+    0xa370_b3d2_a324_f96e,
+    // Pokemon LeafGreen (U) v1.1.
+    0x4de1_c3a0_0e28_e109,
+    // Pokemon Emerald (USA, Europe). No Hoenn encounter tables are entered
+    // yet, so this only says the cartridge is the one the addresses above were
+    // written for — every map still reports itself as unmapped.
+    0x1242_1885_e86d_eb20,
+];
+
+/// Whether the compiled-in map and encounter tables describe this cartridge.
+fn tables_describe(rom: &RomIdentity) -> bool {
+    TABLED_DUMPS.contains(&rom.fingerprint)
+}
 const SAVE_BLOCK1_LOCATION_OFFSET: u32 = 0x0004;
 const WARP_DATA_MAP_GROUP_OFFSET: u32 = 0;
 const WARP_DATA_MAP_NUM_OFFSET: u32 = 1;
@@ -94,6 +221,10 @@ const SUBSTRUCT_ORDERS: [[usize; 4]; 24] = [
 pub struct FireRedSnapshot {
     pub source: &'static str,
     pub party_base_address: u32,
+    /// Whether this cartridge is one the compiled-in map and encounter tables
+    /// were entered against. False on a ROM hack, whose header is
+    /// indistinguishable from the game it was built on.
+    pub tabled_dump: bool,
     pub party: Vec<FireRedPartyMember>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub area: Option<FireRedAreaSnapshot>,
@@ -152,6 +283,12 @@ pub struct FireRedStatSpread {
     pub sp_def: u16,
 }
 
+/// The map constant used when a group and number pair matches nothing here.
+///
+/// Named once so "a real place with nothing in it" and "a place this addon has
+/// not been taught" stay one check apart rather than two guesses.
+pub const UNKNOWN_MAP_KEY: &str = "MAP_UNKNOWN";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct FireRedAreaSnapshot {
     pub map_group: u8,
@@ -159,6 +296,14 @@ pub struct FireRedAreaSnapshot {
     pub map_key: String,
     pub name: String,
     pub encounter_groups: Vec<FireRedEncounterGroup>,
+}
+
+impl FireRedAreaSnapshot {
+    /// Whether this is somewhere the addon can name, rather than the fallback
+    /// it lands on when nothing matched.
+    pub fn is_mapped(&self) -> bool {
+        self.map_key != UNKNOWN_MAP_KEY
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -234,9 +379,98 @@ impl GameAddon<AddonData> for PokemonFrlgAddon {
     }
 
     fn snapshot(&self, memory: &dyn MemoryView, rom: &RomIdentity) -> Option<AddonSnapshot> {
-        let (party_base_address, party) = locate_fire_red_party(memory)?;
-        let area = locate_fire_red_area(memory);
-        let battle = locate_fire_red_battle(memory, area.as_ref());
+        gen3_snapshot(
+            memory,
+            rom,
+            &FIRE_RED_LAYOUT,
+            self.info(),
+            frlg_display_name(rom),
+        )
+    }
+}
+
+/// Pokemon Emerald.
+///
+/// The same generation as FireRed and LeafGreen, so the same parsers read it;
+/// only [`Gen3Layout`] differs. Ruby and Sapphire are the same shape again and
+/// would be a third layout, but their addresses are not written down here yet,
+/// so they are left to the cartridge fallback rather than guessed at.
+pub struct PokemonEmeraldAddon;
+
+impl GameAddon<AddonData> for PokemonEmeraldAddon {
+    fn info(&self) -> AddonInfo {
+        AddonInfo {
+            addon_id: "pokemon_emerald_party",
+            display_name: "Pokemon Emerald",
+            version: ADDON_VERSION,
+            capabilities: &["party", "battle"],
+            supported_games: "Pokemon Emerald (BPE*)",
+        }
+    }
+
+    fn supports(&self, rom: &RomIdentity) -> bool {
+        rom.code_prefix() == "BPE" || rom.title.eq_ignore_ascii_case("POKEMON EMER")
+    }
+
+    fn snapshot(&self, memory: &dyn MemoryView, rom: &RomIdentity) -> Option<AddonSnapshot> {
+        gen3_snapshot(memory, rom, &EMERALD_LAYOUT, self.info(), "Emerald Party")
+    }
+}
+
+/// Pokemon Ruby and Sapphire.
+///
+/// Party only. Their battle and save-block addresses have not been measured,
+/// and the layout above leaves those switched off rather than reading
+/// whatever happens to be at an address borrowed from another game.
+pub struct PokemonRubySapphireAddon;
+
+impl GameAddon<AddonData> for PokemonRubySapphireAddon {
+    fn info(&self) -> AddonInfo {
+        AddonInfo {
+            addon_id: "pokemon_rs_party",
+            display_name: "Pokemon Ruby / Sapphire",
+            version: ADDON_VERSION,
+            capabilities: &["party"],
+            supported_games: "Pokemon Ruby (AXV*) and Sapphire (AXP*)",
+        }
+    }
+
+    fn supports(&self, rom: &RomIdentity) -> bool {
+        rom.code_prefix() == "AXV"
+            || rom.code_prefix() == "AXP"
+            || rom.title.eq_ignore_ascii_case("POKEMON RUBY")
+            || rom.title.eq_ignore_ascii_case("POKEMON SAPP")
+    }
+
+    fn snapshot(&self, memory: &dyn MemoryView, rom: &RomIdentity) -> Option<AddonSnapshot> {
+        let name = if self.supports(rom) && rom.code_prefix() == "AXP" {
+            "Sapphire Party"
+        } else {
+            "Ruby Party"
+        };
+        gen3_snapshot(memory, rom, &RUBY_SAPPHIRE_LAYOUT, self.info(), name)
+    }
+}
+
+/// Read one Generation 3 cartridge, whichever it is.
+fn gen3_snapshot(
+    memory: &dyn MemoryView,
+    rom: &RomIdentity,
+    layout: &Gen3Layout,
+    info: AddonInfo,
+    display_name: &'static str,
+) -> Option<AddonSnapshot> {
+    {
+        // A cartridge with no party in it yet is still this cartridge. Bailing
+        // here meant the addon did not claim the ROM at all until the player
+        // had a starter, so the rail said "no game-specific addon claimed this
+        // ROM" over a game this addon reads perfectly well — and `party_section`
+        // has carried a "no party yet" message the whole time that nothing
+        // could reach.
+        let (party_base_address, party) =
+            locate_fire_red_party(memory, layout).unwrap_or((layout.party_base, Vec::new()));
+        let area = locate_fire_red_area(memory, layout);
+        let battle = locate_fire_red_battle(memory, layout, area.as_ref());
 
         let mut overlay_lines = Vec::with_capacity(party.len() + 4);
         overlay_lines.push(format!("Party: {} / {}", party.len(), PARTY_SLOT_COUNT));
@@ -264,17 +498,17 @@ impl GameAddon<AddonData> for PokemonFrlgAddon {
         let fire_red = FireRedSnapshot {
             source: "live_memory",
             party_base_address,
+            tabled_dump: tables_describe(rom),
             party,
             area,
             battle,
         };
         let sections = fire_red_sections(&fire_red);
 
-        let info = self.info();
         Some(
             AddonSnapshot::new(
                 info.addon_id,
-                frlg_display_name(rom),
+                display_name,
                 overlay_lines,
                 AddonData::FireRed(fire_red),
             )
@@ -318,14 +552,15 @@ fn fire_red_sections(snapshot: &FireRedSnapshot) -> Vec<AddonSection> {
 /// What you are looking at, whatever that currently is.
 fn dex_section(snapshot: &FireRedSnapshot) -> AddonSection {
     match (&snapshot.battle, &snapshot.area) {
+        // The battle is read out of memory as it happens, so it is right on
+        // any cartridge that still stores a battle where this one looks.
         (Some(battle), _) => battle_dex(battle),
+        (None, Some(area)) if !snapshot.tabled_dump => unknown_dump_dex(area),
         (None, Some(area)) => area_dex(area),
-        (None, None) => AddonSection::list(
-            "dex",
-            "Dex",
-            vec!["Nothing to report yet.".to_string()],
-        )
-        .with_note("What you meet, and what lives where you are"),
+        (None, None) => {
+            AddonSection::list("dex", "Dex", vec!["Nothing to report yet.".to_string()])
+                .with_note("What you meet, and what lives where you are")
+        }
     }
 }
 
@@ -410,7 +645,11 @@ fn party_card(member: &FireRedPartyMember) -> AddonCard {
 
     // The totals first, against the theoretical maxima so the bars say
     // something: 31 per stat for IVs, and the 510 the game caps total EVs at.
-    fields.push(AddonField::gauge("IVs", u32::from(member.iv_total), MAX_IV_TOTAL));
+    fields.push(AddonField::gauge(
+        "IVs",
+        u32::from(member.iv_total),
+        MAX_IV_TOTAL,
+    ));
     fields.push(
         AddonField::gauge("EVs", u32::from(member.ev_total), MAX_EV_TOTAL)
             .with_tone(AddonTone::Neutral),
@@ -426,7 +665,11 @@ fn party_card(member: &FireRedPartyMember) -> AddonCard {
     };
     // Species and level. The slot number was here and told you nothing you
     // could not get by counting down the list.
-    let subtitle = if member.nickname.trim().eq_ignore_ascii_case(&member.species_name) {
+    let subtitle = if member
+        .nickname
+        .trim()
+        .eq_ignore_ascii_case(&member.species_name)
+    {
         format!("Lv {}", member.level)
     } else {
         format!("{} \u{00b7} Lv {}", member.species_name, member.level)
@@ -434,7 +677,7 @@ fn party_card(member: &FireRedPartyMember) -> AddonCard {
 
     AddonCard::new(title)
         .with_subtitle(subtitle)
-        .with_image(species_sprite(member.species_id, &member.species_name))
+        .with_optional_image(species_sprite(member.species_id, &member.species_name))
         .with_lead(AddonField::gauge(
             "HP",
             u32::from(member.current_hp),
@@ -449,8 +692,40 @@ fn party_card(member: &FireRedPartyMember) -> AddonCard {
 /// A path rather than a full URL, so whatever is serving the page serves the
 /// sprite too: the host decides where the pictures actually come from and can
 /// cache them, and the addon stays a thing that only reads memory.
-fn species_sprite(species_id: u16, species_name: &str) -> AddonImage {
-    AddonImage::new(format!("/sprites/{species_id}")).with_alt(species_name)
+/// Where the internal index and the National Dex number stop agreeing.
+///
+/// Generation 3 stores species by an internal index of its own. For Kanto and
+/// Johto it is the Dex number, which is why this went unnoticed for as long as
+/// the only game being read was FireRed. Between Celebi and Treecko sit
+/// twenty-five unused slots, and every Hoenn species is that much further
+/// along than its Dex number.
+const FIRST_HOENN_INTERNAL_ID: u16 = 277;
+const LAST_HOENN_INTERNAL_ID: u16 = 411;
+const HOENN_INTERNAL_OFFSET: u16 = 25;
+
+/// The National Dex number for an internal species index.
+///
+/// `None` for the unused slots, which have no Pokemon and so no picture.
+fn national_dex_number(species_id: u16) -> Option<u16> {
+    match species_id {
+        1..=251 => Some(species_id),
+        FIRST_HOENN_INTERNAL_ID..=LAST_HOENN_INTERNAL_ID => {
+            Some(species_id - HOENN_INTERNAL_OFFSET)
+        }
+        _ => None,
+    }
+}
+
+/// The card's picture, when the species has one.
+///
+/// The host serves sprites by National Dex number, and what comes out of the
+/// cartridge is the internal index. Handing one over as the other is silent
+/// where the two agree and wrong where they do not: a Torchic is internal 280,
+/// and National Dex 280 is a Ralts, which is exactly the picture that came
+/// back. Every Hoenn species was showing the wrong Pokemon.
+fn species_sprite(species_id: u16, species_name: &str) -> Option<AddonImage> {
+    let dex = national_dex_number(species_id)?;
+    Some(AddonImage::new(format!("/sprites/{dex}")).with_alt(species_name))
 }
 
 /// A move and what is left of it. PP is a bar only for moves whose maximum is
@@ -460,14 +735,9 @@ fn move_field(slot: &FireRedMoveSlot) -> AddonField {
     match move_max_pp(slot.move_id) {
         Some(max) => AddonField::new(label, slot.name.clone())
             .with_meter(AddonMeter::new(u32::from(slot.pp), u32::from(max)))
-            .with_tone(AddonTone::from_fraction(
-                u32::from(slot.pp),
-                u32::from(max),
-            ))
+            .with_tone(AddonTone::from_fraction(u32::from(slot.pp), u32::from(max)))
             .with_hint(format!("{}/{} PP", slot.pp, max)),
-        None => {
-            AddonField::new(label, slot.name.clone()).with_hint(format!("{} PP left", slot.pp))
-        }
+        None => AddonField::new(label, slot.name.clone()).with_hint(format!("{} PP left", slot.pp)),
     }
 }
 
@@ -608,7 +878,11 @@ fn battle_dex(battle: &FireRedBattleSnapshot) -> AddonSection {
         );
     }
 
-    fields.push(AddonField::gauge("IVs", u32::from(opponent.iv_total), MAX_IV_TOTAL));
+    fields.push(AddonField::gauge(
+        "IVs",
+        u32::from(opponent.iv_total),
+        MAX_IV_TOTAL,
+    ));
     // A wild Pokemon has no effort values, and "EV 0" six times is six pieces
     // of nothing. A trainer's has them, and then they are worth the column.
     fields.extend(stat_rows(
@@ -632,7 +906,7 @@ fn battle_dex(battle: &FireRedBattleSnapshot) -> AddonSection {
 
     let card = AddonCard::new(title)
         .with_subtitle(format!("Lv {}", opponent.level))
-        .with_image(species_sprite(opponent.species_id, &opponent.species_name))
+        .with_optional_image(species_sprite(opponent.species_id, &opponent.species_name))
         .with_lead(AddonField::gauge(
             "HP",
             u32::from(opponent.current_hp),
@@ -667,6 +941,29 @@ fn catch_difficulty(catch_rate: u8, current_hp: u16, max_hp: u16) -> (&'static s
     }
 }
 
+/// What the area tab can honestly say about a cartridge it does not know.
+///
+/// Not the vanilla encounter list. A hack that reuses Route 1's map slot with
+/// different encounters would have that list drawn as though it had been read
+/// from the cartridge, and a confident wrong answer is worse than none — it is
+/// the one kind of wrong a player cannot catch, because nothing about it looks
+/// uncertain. The map numbers are still real, so they are still reported.
+fn unknown_dump_dex(area: &FireRedAreaSnapshot) -> AddonSection {
+    AddonSection::list(
+        "dex",
+        "Dex",
+        vec![
+            "This cartridge is not one the encounter tables were written for.".to_string(),
+            "Your party and any battle are read live and stay right; what lives              in an area is not, so it is not guessed at."
+                .to_string(),
+        ],
+    )
+    .with_note(format!(
+        "Unrecognised build - map {}:{}",
+        area.map_group, area.map_num
+    ))
+}
+
 /// Where you are, and everything that lives here.
 ///
 /// One section rather than a header plus a table per method. A player asks
@@ -698,29 +995,30 @@ fn area_dex(area: &FireRedAreaSnapshot) -> AddonSection {
         .flat_map(|group| group.entries.iter().map(|entry| entry.species_name))
         .collect::<BTreeSet<_>>();
 
-    let note = if species.is_empty() {
-        format!("{} ({}) - no encounters known", area.name, area.map_key)
+    // The map constant is how this file names a place; it is not how a player
+    // does, and printing it beside a name they can already read only ever said
+    // "this was written by a program". It earns a line only where it is the
+    // thing being reported — an area with no table, where the numbers are what
+    // identifies the map to whoever comes to add one.
+    let note = if !area.is_mapped() {
+        format!("Unmapped area - map {}:{}", area.map_group, area.map_num)
+    } else if species.is_empty() {
+        format!("{} - nothing wild here", area.name)
     } else {
-        format!(
-            "{} ({}) - {} species",
-            area.name,
-            area.map_key,
-            species.len()
-        )
+        format!("{} - {} species", area.name, species.len())
     };
 
     if entries.is_empty() {
-        // A section that reports nothing at all reads as broken. Saying which
-        // map is unmapped is the difference between "no data" and "no data yet".
-        return AddonSection::list(
-            "dex",
-            "Dex",
-            vec![format!(
-                "No encounter table entered for {} yet.",
-                area.map_key
-            )],
-        )
-        .with_note(note);
+        // A section that reports nothing at all reads as broken, so it says
+        // which of the two nothings this is. A town really has no wild
+        // encounters, and telling a player that a table is missing for one is
+        // reporting an absence that was never going to be filled.
+        let line = if area.is_mapped() {
+            format!("Nothing wild lives in {}.", area.name)
+        } else {
+            "This area has not been mapped yet.".to_string()
+        };
+        return AddonSection::list("dex", "Dex", vec![line]).with_note(note);
     }
 
     let cards = entries
@@ -731,7 +1029,7 @@ fn area_dex(area: &FireRedAreaSnapshot) -> AddonSection {
                     "Lv {}",
                     level_range(entry.min_level, entry.max_level)
                 ))
-                .with_image(species_sprite(entry.species_id, entry.species_name))
+                .with_optional_image(species_sprite(entry.species_id, entry.species_name))
                 // The slot rate against the whole encounter table, so the bars
                 // rank the species against each other rather than against an
                 // abstract hundred.
@@ -793,8 +1091,11 @@ fn frlg_display_name(rom: &RomIdentity) -> &'static str {
     }
 }
 
-fn locate_fire_red_area(memory: &dyn MemoryView) -> Option<FireRedAreaSnapshot> {
-    let save_block1 = memory.read_u32(FIRE_RED_SAVE_BLOCK1_PTR_ADDR);
+fn locate_fire_red_area(
+    memory: &dyn MemoryView,
+    layout: &Gen3Layout,
+) -> Option<FireRedAreaSnapshot> {
+    let save_block1 = memory.read_u32(layout.save_block1_ptr?);
     if !(0x0200_0000..=0x0203_F000).contains(&save_block1) {
         return None;
     }
@@ -802,7 +1103,7 @@ fn locate_fire_red_area(memory: &dyn MemoryView) -> Option<FireRedAreaSnapshot> 
     let location = save_block1 + SAVE_BLOCK1_LOCATION_OFFSET;
     let map_group = memory.read_u8(location + WARP_DATA_MAP_GROUP_OFFSET);
     let map_num = memory.read_u8(location + WARP_DATA_MAP_NUM_OFFSET);
-    Some(fire_red_area_for_map(map_group, map_num))
+    Some((layout.area_for_map)(map_group, map_num))
 }
 
 fn fire_red_area_for_map(map_group: u8, map_num: u8) -> FireRedAreaSnapshot {
@@ -822,7 +1123,7 @@ fn fire_red_area_for_map(map_group: u8, map_num: u8) -> FireRedAreaSnapshot {
         (3, 21) => ("MAP_ROUTE3", "Route 3", route3_encounters()),
         (3, 22) => ("MAP_ROUTE4", "Route 4", route4_encounters()),
         (3, 41) => ("MAP_ROUTE22", "Route 22", route22_encounters()),
-        _ => ("MAP_UNKNOWN", "Unknown Area", Vec::new()),
+        _ => (UNKNOWN_MAP_KEY, "Unknown Area", Vec::new()),
     };
 
     FireRedAreaSnapshot {
@@ -1004,14 +1305,15 @@ fn encounter(
 
 fn locate_fire_red_battle(
     memory: &dyn MemoryView,
+    layout: &Gen3Layout,
     area: Option<&FireRedAreaSnapshot>,
 ) -> Option<FireRedBattleSnapshot> {
-    let battle_type_flags = memory.read_u32(FIRE_RED_BATTLE_TYPE_FLAGS_ADDR);
-    if !fire_red_battle_is_active(memory, battle_type_flags) {
+    let battle_type_flags = memory.read_u32(layout.battle_type_flags?);
+    if !fire_red_battle_is_active(memory, layout, battle_type_flags) {
         return None;
     }
 
-    let member = locate_active_enemy_party_member(memory)?;
+    let member = locate_active_enemy_party_member(memory, layout)?;
     let (species_name, catch_rate) = fire_red_species_info(member.species_id, area);
     let catchable = battle_is_catchable(battle_type_flags);
 
@@ -1043,8 +1345,11 @@ fn locate_fire_red_battle(
     })
 }
 
-fn locate_active_enemy_party_member(memory: &dyn MemoryView) -> Option<FireRedPartyMember> {
-    let enemy_party = parse_party_prefix_at(memory, FIRE_RED_ENEMY_PARTY_BASE)?;
+fn locate_active_enemy_party_member(
+    memory: &dyn MemoryView,
+    layout: &Gen3Layout,
+) -> Option<FireRedPartyMember> {
+    let enemy_party = parse_party_prefix_at(memory, layout.enemy_party)?;
     enemy_party
         .iter()
         .find(|member| !member.is_egg && member.current_hp > 0)
@@ -1052,8 +1357,12 @@ fn locate_active_enemy_party_member(memory: &dyn MemoryView) -> Option<FireRedPa
         .cloned()
 }
 
-fn fire_red_battle_is_active(memory: &dyn MemoryView, battle_type_flags: u32) -> bool {
-    battle_type_flags != 0 && memory.read_u8(FIRE_RED_BATTLE_OUTCOME_ADDR) == BATTLE_OUTCOME_NONE
+fn fire_red_battle_is_active(
+    memory: &dyn MemoryView,
+    layout: &Gen3Layout,
+    battle_type_flags: u32,
+) -> bool {
+    battle_type_flags != 0 && memory.read_u8(layout.battle_outcome) == BATTLE_OUTCOME_NONE
 }
 
 fn battle_kind_label(flags: u32) -> &'static str {
@@ -1519,20 +1828,24 @@ fn fallback_species_info(species_id: u16) -> Option<(&'static str, u8)> {
     }
 }
 
-fn locate_fire_red_party(memory: &dyn MemoryView) -> Option<(u32, Vec<FireRedPartyMember>)> {
-    let expected_party_count = read_party_count(memory);
+fn locate_fire_red_party(
+    memory: &dyn MemoryView,
+    layout: &Gen3Layout,
+) -> Option<(u32, Vec<FireRedPartyMember>)> {
+    let expected_party_count = read_party_count(memory, layout);
     let mut best_candidate =
-        scan_party_candidate_at(memory, FIRE_RED_PARTY_BASE, expected_party_count);
+        scan_party_candidate_at(memory, layout.party_base, expected_party_count);
 
-    let last_candidate =
-        FIRE_RED_PARTY_SCAN_END.saturating_sub((PARTY_SLOT_SIZE * PARTY_SLOT_COUNT) as u32);
-    for base in (FIRE_RED_PARTY_SCAN_START..=last_candidate).step_by(4) {
+    let last_candidate = layout
+        .scan_end
+        .saturating_sub((PARTY_SLOT_SIZE * PARTY_SLOT_COUNT) as u32);
+    for base in (layout.scan_start..=last_candidate).step_by(4) {
         let Some(candidate) = scan_party_candidate_at(memory, base, expected_party_count) else {
             continue;
         };
         if best_candidate
             .as_ref()
-            .is_none_or(|current| candidate_better_than(&candidate, current))
+            .is_none_or(|current| candidate_better_than(&candidate, current, layout))
         {
             best_candidate = Some(candidate);
         }
@@ -1541,12 +1854,16 @@ fn locate_fire_red_party(memory: &dyn MemoryView) -> Option<(u32, Vec<FireRedPar
     best_candidate.map(|candidate| (candidate.base_address, candidate.party))
 }
 
-fn read_party_count(memory: &dyn MemoryView) -> Option<usize> {
-    let count = memory.read_u8(FIRE_RED_PARTY_COUNT_ADDR) as usize;
+fn read_party_count(memory: &dyn MemoryView, layout: &Gen3Layout) -> Option<usize> {
+    let count = memory.read_u8(layout.party_count) as usize;
     (1..=PARTY_SLOT_COUNT).contains(&count).then_some(count)
 }
 
-fn parse_party_at(memory: &dyn MemoryView, base: u32, party_count: usize) -> Option<Vec<FireRedPartyMember>> {
+fn parse_party_at(
+    memory: &dyn MemoryView,
+    base: u32,
+    party_count: usize,
+) -> Option<Vec<FireRedPartyMember>> {
     let mut party = Vec::with_capacity(party_count);
     for slot in 0..party_count {
         let raw = read_party_slot(memory, base + (slot * PARTY_SLOT_SIZE) as u32);
@@ -1599,7 +1916,11 @@ fn scan_party_candidate_at(
     })
 }
 
-fn candidate_better_than(candidate: &PartyCandidate, current: &PartyCandidate) -> bool {
+fn candidate_better_than(
+    candidate: &PartyCandidate,
+    current: &PartyCandidate,
+    layout: &Gen3Layout,
+) -> bool {
     if candidate.party.len() != current.party.len() {
         return candidate.party.len() > current.party.len();
     }
@@ -1608,8 +1929,10 @@ fn candidate_better_than(candidate: &PartyCandidate, current: &PartyCandidate) -
         return candidate.matched_expected_count;
     }
 
-    let candidate_distance = candidate.base_address.abs_diff(FIRE_RED_PARTY_BASE);
-    let current_distance = current.base_address.abs_diff(FIRE_RED_PARTY_BASE);
+    // Ties break towards where this game usually keeps its party, so a
+    // coincidental match elsewhere in EWRAM loses to the real one.
+    let candidate_distance = candidate.base_address.abs_diff(layout.party_base);
+    let current_distance = current.base_address.abs_diff(layout.party_base);
     if candidate_distance != current_distance {
         return candidate_distance < current_distance;
     }
@@ -1765,8 +2088,7 @@ fn held_item(item_id: u16) -> Option<FireRedHeldItem> {
 /// several hundred a Generation 3 game has — which is exactly why reading it
 /// out of the ROM was worth doing.
 fn item_display_name(item_id: u16) -> String {
-    gen3_names::item(item_id)
-        .unwrap_or_else(|| fallback_item_name(item_id).to_string())
+    gen3_names::item(item_id).unwrap_or_else(|| fallback_item_name(item_id).to_string())
 }
 
 fn fallback_item_name(item_id: u16) -> &'static str {
@@ -2325,8 +2647,8 @@ fn short_name(name: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::GbaMemory;
-    use tinybird_addons::schema::{AddonMeter, AddonSectionContent};
     use std::path::Path;
+    use tinybird_addons::schema::{AddonMeter, AddonSectionContent};
     use tinybird_core::Gba;
 
     /// Adapt a real emulator to the read-only view addons are given.
@@ -2429,6 +2751,9 @@ mod tests {
         FireRedSnapshot {
             source: "test",
             party_base_address: 0x0202_4284,
+            // The tables are the subject of most of these tests, so the
+            // default is the cartridge they were written for.
+            tabled_dump: true,
             party,
             area: None,
             battle: None,
@@ -2480,7 +2805,10 @@ mod tests {
         for label in ["Ability", "IVs", "EVs", "Move 1"] {
             field(&card.fields, label);
         }
-        assert_eq!(field(&card.fields, "IVs").meter, Some(AddonMeter::new(186, 186)));
+        assert_eq!(
+            field(&card.fields, "IVs").meter,
+            Some(AddonMeter::new(186, 186))
+        );
 
         // Every stat says which stat it is, and carries its own IV and EV.
         // These used to be three rows of six bare numbers under one legend,
@@ -2553,7 +2881,9 @@ mod tests {
         let sections = fire_red_sections(&snapshot_of(vec![member(1, 0, 30), asleep]));
 
         assert!(
-            !sections.iter().any(|section| section.section_id == "summary"),
+            !sections
+                .iter()
+                .any(|section| section.section_id == "summary"),
             "the team should not be a section any more"
         );
 
@@ -2607,7 +2937,7 @@ mod tests {
         let sections = fire_red_sections(&snapshot);
         assert_eq!(
             section(&sections, "dex").note.as_deref(),
-            Some("Route 1 (3:19) - 1 species")
+            Some("Route 1 - 1 species")
         );
         assert_eq!(cards(section(&sections, "dex"))[0].title, "Pidgey");
 
@@ -2764,7 +3094,7 @@ mod tests {
         );
 
         let area = section(&sections, "dex");
-        assert_eq!(area.note.as_deref(), Some("Route 1 (3:19) - 2 species"));
+        assert_eq!(area.note.as_deref(), Some("Route 1 - 2 species"));
 
         match &area.content {
             AddonSectionContent::Cards(cards) => {
@@ -2820,7 +3150,7 @@ mod tests {
 
         let sections = fire_red_sections(&snapshot);
         let area = section(&sections, "dex");
-        assert_eq!(area.note.as_deref(), Some("Route 1 (3:19) - 2 species"));
+        assert_eq!(area.note.as_deref(), Some("Route 1 - 2 species"));
 
         match &area.content {
             AddonSectionContent::Cards(cards) => {
@@ -2834,15 +3164,233 @@ mod tests {
     }
 
     /// An area nobody has entered a table for says so, rather than reporting an
-    /// empty list that reads as a broken addon.
+    /// empty list that reads as a broken addon. The map constant stays out of
+    /// it; the numbers that identify the map do not.
     #[test]
     fn an_unmapped_area_says_which_map_is_missing() {
         let mut snapshot = snapshot_of(vec![member(1, 30, 30)]);
         snapshot.area = Some(FireRedAreaSnapshot {
             map_group: 16,
             map_num: 1,
-            map_key: "16:1".to_string(),
+            map_key: UNKNOWN_MAP_KEY.to_string(),
             name: "Unknown Area".to_string(),
+            encounter_groups: Vec::new(),
+        });
+
+        let sections = fire_red_sections(&snapshot);
+        let area = section(&sections, "dex");
+        assert_eq!(area.note.as_deref(), Some("Unmapped area - map 16:1"));
+
+        match &area.content {
+            AddonSectionContent::List(lines) => {
+                assert_eq!(lines[0], "This area has not been mapped yet.");
+                assert!(!lines[0].contains("MAP_"), "{:?}", lines[0]);
+            }
+            other => panic!("expected a list, got {other:?}"),
+        }
+    }
+
+    /// A ROM hack is indistinguishable from the game it was built on by every
+    /// field a header carries, so the encounter tables are keyed on the dump
+    /// instead. What is read live keeps working; what was written down here
+    /// stops being asserted about a cartridge it was not measured on.
+    #[test]
+    fn an_unrecognised_build_is_not_told_the_original_games_encounters() {
+        let mut snapshot = snapshot_of(vec![member(1, 30, 30)]);
+        snapshot.tabled_dump = false;
+        snapshot.area = Some(route_with(vec![encounter(16, "Pidgey", 2, 5, 45, 255)]));
+
+        let sections = fire_red_sections(&snapshot);
+        let dex = section(&sections, "dex");
+        assert_eq!(dex.note.as_deref(), Some("Unrecognised build - map 3:19"));
+
+        match &dex.content {
+            AddonSectionContent::List(lines) => {
+                assert!(!lines.join(" ").contains("Pidgey"), "{lines:?}");
+            }
+            other => panic!("expected a list rather than the vanilla list, got {other:?}"),
+        }
+
+        // The party is read out of memory, so it is unaffected.
+        assert_eq!(cards(section(&sections, "party")).len(), 1);
+
+        // And a battle is too: it is live, not tabled.
+        snapshot.battle = Some(battle_with(spread(10), 60));
+        let sections = fire_red_sections(&snapshot);
+        assert_eq!(
+            section(&sections, "dex").note.as_deref(),
+            Some("Wild battle in progress")
+        );
+    }
+
+    /// Each Generation 3 addon claims its own cartridges and no others.
+    #[test]
+    fn ruby_and_sapphire_are_claimed_and_report_a_party_only() {
+        let ruby = RomIdentity {
+            title: "POKEMON RUBY".to_string(),
+            game_code: "AXVE".to_string(),
+            maker_code: "01".to_string(),
+            revision: 0,
+            fingerprint: 0xff69_e7f7_2ab3_45cf,
+        };
+        let sapphire = RomIdentity {
+            title: "POKEMON SAPP".to_string(),
+            game_code: "AXPE".to_string(),
+            ..ruby.clone()
+        };
+
+        assert!(PokemonRubySapphireAddon.supports(&ruby));
+        assert!(PokemonRubySapphireAddon.supports(&sapphire));
+        // Both fields have to move: the title is a fallback for a cartridge
+        // whose game code did not read cleanly, so changing only the code
+        // still leaves a Ruby.
+        assert!(!PokemonRubySapphireAddon.supports(&RomIdentity {
+            title: "POKEMON EMER".to_string(),
+            game_code: "BPEE".to_string(),
+            ..ruby.clone()
+        }));
+        assert!(!PokemonEmeraldAddon.supports(&ruby));
+        assert!(!PokemonFrlgAddon.supports(&ruby));
+
+        // Battle and save block are switched off rather than borrowed from a
+        // game whose addresses happen to be written down.
+        assert!(RUBY_SAPPHIRE_LAYOUT.battle_type_flags.is_none());
+        assert!(RUBY_SAPPHIRE_LAYOUT.save_block1_ptr.is_none());
+        assert_eq!(
+            PokemonRubySapphireAddon.info().capabilities,
+            &["party"],
+            "and it says so rather than claiming to read what it cannot"
+        );
+    }
+
+    /// A layout with no battle address reports no battle, whatever is in
+    /// memory at the address another game would have used.
+    #[test]
+    fn a_game_with_no_battle_address_never_invents_a_battle() {
+        let memory = tinybird_addons::SparseMemory::new()
+            .with(
+                FIRE_RED_BATTLE_TYPE_FLAGS_ADDR,
+                vec![0xFF, 0xFF, 0xFF, 0xFF],
+            )
+            .with(EMERALD_BATTLE_TYPE_FLAGS_ADDR, vec![0xFF, 0xFF, 0xFF, 0xFF]);
+        assert!(locate_fire_red_battle(&memory, &RUBY_SAPPHIRE_LAYOUT, None).is_none());
+        assert!(locate_fire_red_area(&memory, &RUBY_SAPPHIRE_LAYOUT).is_none());
+    }
+
+    /// Hoenn species sit twenty-five slots further along than their Dex
+    /// numbers, and the sprite host is keyed by the Dex number. Handing it the
+    /// internal index put a Ralts on every Torchic.
+    #[test]
+    fn a_hoenn_species_asks_for_its_own_picture_and_not_the_one_25_slots_back() {
+        // Kanto and Johto: the two numberings agree, which is why this went
+        // unnoticed for as long as FireRed was the only game being read.
+        assert_eq!(national_dex_number(1), Some(1), "Bulbasaur");
+        assert_eq!(national_dex_number(251), Some(251), "Celebi");
+
+        // Hoenn: they do not.
+        assert_eq!(national_dex_number(277), Some(252), "Treecko");
+        assert_eq!(national_dex_number(280), Some(255), "Torchic");
+        assert_eq!(national_dex_number(411), Some(386), "Deoxys");
+
+        // The unused slots between them are not a Pokemon and have no picture.
+        assert_eq!(national_dex_number(252), None);
+        assert_eq!(national_dex_number(276), None);
+        assert_eq!(national_dex_number(0), None);
+
+        let torchic = species_sprite(280, "Torchic").expect("Torchic has a picture");
+        assert_eq!(torchic.src, "/sprites/255");
+        assert!(species_sprite(252, "?????").is_none());
+    }
+
+    /// A cartridge with no party in it yet is still that cartridge.
+    ///
+    /// Before this the addon returned nothing until the player had a starter,
+    /// so a fresh Emerald reported "no game-specific addon claimed this ROM"
+    /// over a game it reads fine.
+    #[test]
+    fn a_game_with_no_party_yet_is_still_claimed_and_says_so() {
+        let empty = snapshot_of(Vec::new());
+        let sections = fire_red_sections(&empty);
+        let party = section(&sections, "party");
+        assert_eq!(
+            party.note.as_deref(),
+            Some("No party yet - the save has not been loaded")
+        );
+        assert!(cards(party).is_empty());
+    }
+
+    /// Emerald is the same generation, so it is the same parsers behind a
+    /// different set of addresses — and it must not be caught by the addon
+    /// that carries Kanto's maps, nor that one by this.
+    #[test]
+    fn emerald_and_firered_each_claim_only_their_own_cartridge() {
+        let emerald = RomIdentity {
+            title: "POKEMON EMER".to_string(),
+            game_code: "BPEE".to_string(),
+            maker_code: "01".to_string(),
+            revision: 0,
+            fingerprint: 0x1242_1885_e86d_eb20,
+        };
+        let fire_red = RomIdentity {
+            title: "POKEMON FIRE".to_string(),
+            game_code: "BPRE".to_string(),
+            fingerprint: 0xa370_b3d2_a324_f96e,
+            ..emerald.clone()
+        };
+
+        assert!(PokemonEmeraldAddon.supports(&emerald));
+        assert!(!PokemonEmeraldAddon.supports(&fire_red));
+        assert!(PokemonFrlgAddon.supports(&fire_red));
+        assert!(!PokemonFrlgAddon.supports(&emerald));
+    }
+
+    /// Hoenn's encounter tables are not entered, so every Emerald map reports
+    /// itself as unmapped rather than borrowing Kanto's.
+    #[test]
+    fn emerald_reports_where_you_are_without_inventing_what_lives_there() {
+        let area = (EMERALD_LAYOUT.area_for_map)(3, 19);
+        assert!(!area.is_mapped());
+        assert_eq!(area.map_group, 3);
+        assert_eq!(area.map_num, 19);
+        assert!(area.encounter_groups.is_empty());
+
+        // The same numbers on FireRed are Route 1, which is the point of the
+        // two games having separate map tables rather than one shared guess.
+        assert_eq!((FIRE_RED_LAYOUT.area_for_map)(3, 19).name, "Route 1");
+    }
+
+    /// The dumps the tables were entered against are the ones that get them.
+    #[test]
+    fn only_a_known_dump_is_given_the_compiled_in_tables() {
+        let vanilla = RomIdentity {
+            title: "POKEMON FIRE".to_string(),
+            game_code: "BPRE".to_string(),
+            maker_code: "01".to_string(),
+            revision: 0,
+            fingerprint: 0xa370_b3d2_a324_f96e,
+        };
+        assert!(tables_describe(&vanilla));
+
+        // Pokemon Ultra Violet: the same header in every field, a different
+        // cartridge.
+        let hack = RomIdentity {
+            fingerprint: 0xdfb8_d7b2_56b1_58e2,
+            ..vanilla.clone()
+        };
+        assert!(!tables_describe(&hack));
+    }
+
+    /// A town is not a gap in the table. Reporting a missing encounter list for
+    /// Pallet Town sends a player looking for data that was never going to
+    /// exist; the honest answer is that nothing lives there.
+    #[test]
+    fn a_mapped_area_with_no_encounters_says_so_without_blaming_the_table() {
+        let mut snapshot = snapshot_of(vec![member(1, 30, 30)]);
+        snapshot.area = Some(FireRedAreaSnapshot {
+            map_group: 3,
+            map_num: 0,
+            map_key: "MAP_PALLET_TOWN".to_string(),
+            name: "Pallet Town".to_string(),
             encounter_groups: Vec::new(),
         });
 
@@ -2850,12 +3398,12 @@ mod tests {
         let area = section(&sections, "dex");
         assert_eq!(
             area.note.as_deref(),
-            Some("Unknown Area (16:1) - no encounters known")
+            Some("Pallet Town - nothing wild here")
         );
 
         match &area.content {
             AddonSectionContent::List(lines) => {
-                assert!(lines[0].contains("16:1"), "{:?}", lines[0]);
+                assert_eq!(lines[0], "Nothing wild lives in Pallet Town.");
             }
             other => panic!("expected a list, got {other:?}"),
         }
@@ -2938,6 +3486,8 @@ mod tests {
             game_code: "BPGE".to_string(),
             maker_code: "01".to_string(),
             revision: 1,
+            // Not a real dump; nothing here reads the fingerprint.
+            fingerprint: 0,
         };
 
         assert!(addon.supports(&rom));
@@ -3037,7 +3587,8 @@ mod tests {
             &build_party_member_raw(0x89AB_CDEF, 0x0123_4567, "PIDGEY", 16, 3, 14, 14),
         );
 
-        let (base, party) = locate_fire_red_party(&view(&gba)).expect("party should be found");
+        let (base, party) =
+            locate_fire_red_party(&view(&gba), &FIRE_RED_LAYOUT).expect("party should be found");
         assert_eq!(base, FIRE_RED_PARTY_BASE);
         assert_eq!(party.len(), 2);
         assert_eq!(party[0].nickname, "BULBASAUR");
@@ -3059,7 +3610,8 @@ mod tests {
             &build_party_member_raw(0x3333_3333, 0x4444_4444, "RATTATA", 19, 6, 18, 18),
         );
 
-        let (_, party) = locate_fire_red_party(&view(&gba)).expect("party should be found");
+        let (_, party) =
+            locate_fire_red_party(&view(&gba), &FIRE_RED_LAYOUT).expect("party should be found");
         assert_eq!(party.len(), 2);
         assert_eq!(party[0].nickname, "CHARMANDR");
         assert_eq!(party[1].nickname, "RATTATA");
@@ -3073,7 +3625,8 @@ mod tests {
         gba.write_u8(save_block1 + SAVE_BLOCK1_LOCATION_OFFSET, 3);
         gba.write_u8(save_block1 + SAVE_BLOCK1_LOCATION_OFFSET + 1, 19);
 
-        let area = locate_fire_red_area(&view(&gba)).expect("area should be found");
+        let area =
+            locate_fire_red_area(&view(&gba), &FIRE_RED_LAYOUT).expect("area should be found");
         assert_eq!(area.map_group, 3);
         assert_eq!(area.map_num, 19);
         assert_eq!(area.map_key, "MAP_ROUTE1");
@@ -3093,7 +3646,10 @@ mod tests {
             &build_party_member_raw(0x1111_2222, 0x3333_4444, "RATTATA", 19, 3, 12, 12),
         );
 
-        assert_eq!(locate_fire_red_battle(&view(&gba), None), None);
+        assert_eq!(
+            locate_fire_red_battle(&view(&gba), &FIRE_RED_LAYOUT, None),
+            None
+        );
     }
 
     #[test]
@@ -3107,7 +3663,10 @@ mod tests {
             &build_party_member_raw(0x1111_2222, 0x3333_4444, "MANKEY", 56, 2, 8, 14),
         );
 
-        assert_eq!(locate_fire_red_battle(&view(&gba), None), None);
+        assert_eq!(
+            locate_fire_red_battle(&view(&gba), &FIRE_RED_LAYOUT, None),
+            None
+        );
     }
 
     #[test]
@@ -3122,7 +3681,8 @@ mod tests {
         );
 
         let area = fire_red_area_for_map(3, 19);
-        let battle = locate_fire_red_battle(&view(&gba), Some(&area)).expect("battle should be found");
+        let battle = locate_fire_red_battle(&view(&gba), &FIRE_RED_LAYOUT, Some(&area))
+            .expect("battle should be found");
         assert_eq!(battle.battle_kind, "Wild");
         assert!(battle.catchable);
         assert_eq!(battle.opponent.nickname, "RATTATA");
@@ -3145,7 +3705,8 @@ mod tests {
             &build_party_member_raw(0x3333_4444, 0x5555_6666, "SQUIRTLE", 7, 8, 21, 21),
         );
 
-        let battle = locate_fire_red_battle(&view(&gba), None).expect("battle should be found");
+        let battle = locate_fire_red_battle(&view(&gba), &FIRE_RED_LAYOUT, None)
+            .expect("battle should be found");
         assert_eq!(battle.battle_kind, "Trainer");
         assert!(!battle.catchable);
         assert_eq!(battle.opponent.species_name, "Squirtle");
@@ -3168,7 +3729,8 @@ mod tests {
             &build_party_member_raw(0x2222_3333, 0x4444_5555, "PIDGEY", 16, 5, 17, 17),
         );
 
-        let battle = locate_fire_red_battle(&view(&gba), None).expect("battle should be found");
+        let battle = locate_fire_red_battle(&view(&gba), &FIRE_RED_LAYOUT, None)
+            .expect("battle should be found");
         assert_eq!(battle.battle_kind, "Trainer");
         assert_eq!(battle.opponent.nickname, "PIDGEY");
         assert_eq!(battle.opponent.species_id, 16);
@@ -3181,6 +3743,40 @@ mod tests {
     /// the unit tests plant their own tables, so they prove the search works on
     /// a table shaped the way this code expects. Only a real ROM proves the
     /// shape is right.
+    #[test]
+    #[ignore = "Needs commercial ROMs"]
+    fn the_tabled_dumps_are_the_cartridges_they_claim_to_be() {
+        // The fingerprints in `TABLED_DUMPS` were computed from the ROM files
+        // directly. This is what checks that reading the same bytes back
+        // through the bus agrees — if it does not, every genuine cartridge
+        // quietly reads as an unrecognised build and loses its encounter
+        // tables, with nothing to say why.
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let cases: &[(&str, u64)] = &[
+            ("roms/pokemon_fire_red.gba", 0xa370_b3d2_a324_f96e),
+            ("roms/Pokemon - Leaf Green Version (U) (V1.1)/Pokemon - Leaf Green Version (U) (V1.1).gba", 0x4de1_c3a0_0e28_e109),
+            ("roms/Pokemon - Emerald Version (USA, Europe)/Pokemon - Emerald Version (USA, Europe).gba", 0x1242_1885_e86d_eb20),
+        ];
+
+        for (relative, expected) in cases {
+            let path = workspace.join(relative);
+            if !path.is_file() {
+                eprintln!("no ROM at {}; nothing to check", path.display());
+                continue;
+            }
+
+            let mut gba = Gba::new();
+            gba.load_rom(std::fs::read(&path).expect("read ROM"));
+            let rom = tinybird_addons::read_rom_identity(&view(&gba)).expect("header");
+            assert_eq!(
+                rom.fingerprint, *expected,
+                "{relative} fingerprinted {:#018x} through the bus",
+                rom.fingerprint
+            );
+            assert!(tables_describe(&rom), "{relative} should get its tables");
+        }
+    }
+
     #[test]
     #[ignore = "Needs a commercial ROM"]
     fn name_tables_are_found_in_a_real_cartridge() {
@@ -3214,6 +3810,67 @@ mod tests {
         assert_eq!(gen3_names::item(13).as_deref(), Some("Potion"));
 
         eprintln!("item 179 = {:?}", gen3_names::item(179));
+    }
+
+    #[test]
+    #[ignore = "Needs a commercial ROM and a local savestate"]
+    fn a_real_emerald_party_reads_back_the_pokemon_that_is_in_it() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let rom_path = workspace
+            .join("roms/Pokemon - Emerald Version (USA, Europe)/Pokemon - Emerald Version (USA, Europe).gba");
+        let state_path = workspace.join("Pokemon_-_Emerald_Version_USA_Europe_.state");
+        if !state_path.is_file() || !rom_path.is_file() {
+            eprintln!("need both an Emerald ROM and a savestate; nothing to check");
+            return;
+        }
+
+        let mut gba = Gba::new();
+        gba.load_rom(std::fs::read(&rom_path).expect("read Emerald ROM"));
+        gba.load_state_bytes(&std::fs::read(&state_path).expect("read savestate"))
+            .expect("deserialize Emerald savestate");
+
+        let memory = view(&gba);
+        let rom = tinybird_addons::read_rom_identity(&memory).expect("header");
+        assert_eq!(rom.game_code, "BPEE");
+        gen3_names::ensure(&memory, &rom);
+
+        let snapshot = PokemonEmeraldAddon
+            .snapshot(&memory, &rom)
+            .expect("Emerald should report a party from a real savestate");
+
+        let AddonData::FireRed(data) = &snapshot.data else {
+            panic!("expected Generation 3 data");
+        };
+        assert!(!data.party.is_empty(), "the savestate has a party in it");
+
+        let lead = &data.party[0];
+        eprintln!(
+            "lead: {} (internal {}) Lv{} - party base {:#010x}",
+            lead.species_name, lead.species_id, lead.level, data.party_base_address
+        );
+
+        // The bug this pins: the sprite host is keyed by National Dex number
+        // and the cartridge stores an internal index. Torchic is internal 280,
+        // and National Dex 280 is a Ralts - which is the picture that came
+        // back before `national_dex_number` sat between them.
+        if lead.species_name.eq_ignore_ascii_case("Torchic") {
+            assert_eq!(lead.species_id, 280, "Torchic's internal index");
+            assert_eq!(
+                national_dex_number(lead.species_id),
+                Some(255),
+                "and its National Dex number, which is what the sprite is fetched by"
+            );
+        }
+
+        let party = section(&snapshot.sections, "party");
+        let card = &cards(party)[0];
+        assert_eq!(
+            card.image.as_ref().map(|image| image.src.as_str()),
+            national_dex_number(lead.species_id)
+                .map(|dex| format!("/sprites/{dex}"))
+                .as_deref(),
+            "the card asks for the picture of the species it names"
+        );
     }
 
     #[test]

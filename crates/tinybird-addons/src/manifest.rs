@@ -155,7 +155,10 @@ pub enum Value {
     U8(Address),
     U16(Address),
     U32(Address),
-    Text { at: Address, len: u32 },
+    Text {
+        at: Address,
+        len: u32,
+    },
     /// A fixed string. Useful as a card title when the game stores no name.
     Literal(String),
     /// Which repeat this is, counting from one. Cards need slot numbers.
@@ -214,7 +217,10 @@ fn apply_offset(base: u32, offset: i64) -> Option<u32> {
 /// `"0x02024284"`, `"0x2024284"` or `"33702532"`.
 fn parse_address(text: &str) -> Option<u32> {
     let trimmed = text.trim();
-    match trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+    match trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
         Some(hex) => u32::from_str_radix(hex, 16).ok(),
         None => trimmed.parse().ok(),
     }
@@ -261,7 +267,8 @@ impl Value {
                 let Some(address) = at.resolve(memory, step) else {
                     return Read::dead();
                 };
-                let text = crate::memory::read_ascii(memory, address, (*len).min(MAX_TEXT_LEN) as usize);
+                let text =
+                    crate::memory::read_ascii(memory, address, (*len).min(MAX_TEXT_LEN) as usize);
                 let live = !text.trim().is_empty();
                 Read {
                     text,
@@ -523,6 +530,8 @@ mod tests {
             game_code: code.to_string(),
             maker_code: "01".to_string(),
             revision: 0,
+            // Not a real dump; nothing here reads the fingerprint.
+            fingerprint: 0,
         }
     }
 
@@ -584,7 +593,10 @@ mod tests {
         let snapshot = read_of(&addon(WALLET), &memory).expect("a live section");
         assert_eq!(snapshot.addon_id, "custom.wallet");
         assert_eq!(snapshot.sections.len(), 1);
-        assert_eq!(snapshot.sections[0].note.as_deref(), Some("Read from the save block"));
+        assert_eq!(
+            snapshot.sections[0].note.as_deref(),
+            Some("Read from the save block")
+        );
 
         match &snapshot.sections[0].content {
             AddonSectionContent::KeyValue(fields) => {
