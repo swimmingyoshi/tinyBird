@@ -73,6 +73,7 @@ const el = {
   share: $("opt-share"),
   link: $("opt-link"),
   linkNote: $("lobby-link-note"),
+  lobbyWorkspace: $("lobby-workspace"),
   lobbyWatch: $("lobby-watch"),
   lobbyScreen: $("lobby-screen"),
   lobbyCaption: $("lobby-caption"),
@@ -2948,6 +2949,15 @@ const liveSince = new Map();
  */
 const LIVE_TIMEOUT_MS = 2000;
 
+/** Remove the remote picture and return the play space to its solo layout. */
+function clearWatchedScreen() {
+  el.lobbyWatch.hidden = true;
+  el.lobbyScreen.removeAttribute("src");
+  el.lobbyScreen.alt = "Shared game screen";
+  el.lobbyCaption.textContent = "\u2014";
+  el.lobbyWorkspace.dataset.view = "solo";
+}
+
 /** Whether a member's screen is currently arriving. */
 function isLive(id) {
   const at = liveSince.get(id);
@@ -2968,9 +2978,7 @@ function expireStaleSharers() {
       changed = true;
       if (watching === id) {
         watching = null;
-        el.lobbyWatch.hidden = true;
-        el.lobbyScreen.removeAttribute("src");
-        el.lobbyCaption.textContent = "—";
+        clearWatchedScreen();
       }
     }
   }
@@ -3038,11 +3046,11 @@ function onMembersChanged(members) {
 
 /** Start showing a member's screen, or stop if they are already shown. */
 function watchMember(id) {
-  watching = watching === id ? null : id;
-  if (!watching) {
-    el.lobbyWatch.hidden = true;
-    el.lobbyScreen.removeAttribute("src");
-  }
+  const next = watching === id ? null : id;
+  // A frame belongs to the old selection until the newly selected member sends
+  // one. Clear it now so their name is never attached to somebody else's game.
+  if (next !== watching) clearWatchedScreen();
+  watching = next;
   if (lobby) renderMembers(lobby.members);
 }
 
@@ -3065,9 +3073,13 @@ function showFrame(from, frame) {
   el.lobbyWatch.hidden = false;
   el.lobbyScreen.src = frame;
   const member = lobby?.members.find((m) => m.id === from);
+  el.lobbyScreen.alt = member
+    ? `${member.name}'s shared game screen`
+    : "Shared game screen";
   el.lobbyCaption.textContent = member
     ? `${member.name}${member.playing ? ` · ${member.playing}` : ""}`
     : "watching";
+  el.lobbyWorkspace.dataset.view = "shared";
 }
 
 /** Send a picture of our screen, if anyone is there to see it. */
@@ -3283,8 +3295,7 @@ function leaveRoom() {
   el.lobbyMembers.replaceChildren();
   watching = null;
   liveSince.clear();
-  el.lobbyWatch.hidden = true;
-  el.lobbyScreen.removeAttribute("src");
+  clearWatchedScreen();
 
   // The cable goes with the room. `lobby` is already null, so reseating
   // unplugs, and the shape is cleared so rejoining is seen as a change.

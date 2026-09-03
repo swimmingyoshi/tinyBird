@@ -57,36 +57,58 @@
       <main class="deck">
         <!-- Screen ----------------------------------------------------- -->
         <section class="screen-col">
-          <div class="screen" id="screen" data-mode="empty" data-grid="off">
-            <!-- Sized by script to a whole multiple of 240x160 so the picture
-                 lands on exact pixel boundaries, the way the desktop scales. -->
-            <div class="screen__panel" id="screen-panel">
-              <canvas id="canvas" width="240" height="160" aria-label="Game screen"></canvas>
-              <div class="screen__grid" aria-hidden="true"></div>
-              <div class="screen__boot" id="boot" aria-hidden="true"></div>
-            </div>
+          <!-- The second slot appears only while another player is being
+               watched. Keeping both pictures in one grid makes a shared lobby
+               read as one play space instead of putting the remote game below
+               the controls, far away from the local game it accompanies. -->
+          <div class="screens" id="lobby-workspace" data-view="solo">
+            <figure class="screens__player screens__player--local">
+              <div class="screen" id="screen" data-mode="empty" data-grid="off">
+                <!-- Sized by script to a whole multiple of 240x160 so the picture
+                     lands on exact pixel boundaries, the way the desktop scales. -->
+                <div class="screen__panel" id="screen-panel">
+                  <canvas id="canvas" width="240" height="160" aria-label="Game screen"></canvas>
+                  <div class="screen__grid" aria-hidden="true"></div>
+                  <div class="screen__boot" id="boot" aria-hidden="true"></div>
+                </div>
 
-            <!-- The library lives here rather than in the rail.
+                <!-- The library lives here rather than in the rail.
 
-                 It was a permanent tab listing ROMs, which is a list you need
-                 exactly once — when there is no cartridge in — and which is
-                 empty on most setups because the ROM has to come off your own
-                 disk anyway. On the empty screen it is the thing you came to
-                 do; once a game is running it is gone. -->
-            <div class="screen__empty" id="empty-state">
-              <p class="screen__empty-title">No cartridge</p>
-              <p class="screen__empty-body">
-                Drop a <code>.gba</code> file anywhere on this page, or pick one
-                below.
-              </p>
-              <ul class="vault__list" id="vault-list">
-                <li class="vault__empty" id="vault-empty">Looking for ROMs…</li>
-              </ul>
-              <label class="key key--file" id="vault-load">
-                Load a local ROM<span class="panel__note" id="vault-note"></span>
-                <input type="file" id="file-rom" accept=".gba,.bin,.agb" hidden />
-              </label>
-            </div>
+                     It was a permanent tab listing ROMs, which is a list you need
+                     exactly once — when there is no cartridge in — and which is
+                     empty on most setups because the ROM has to come off your own
+                     disk anyway. On the empty screen it is the thing you came to
+                     do; once a game is running it is gone. -->
+                <div class="screen__empty" id="empty-state">
+                  <p class="screen__empty-title">No cartridge</p>
+                  <p class="screen__empty-body">
+                    Drop a <code>.gba</code> file anywhere on this page, or pick one
+                    below.
+                  </p>
+                  <ul class="vault__list" id="vault-list">
+                    <li class="vault__empty" id="vault-empty">Looking for ROMs…</li>
+                  </ul>
+                  <label class="key key--file" id="vault-load">
+                    Load a local ROM<span class="panel__note" id="vault-note"></span>
+                    <input type="file" id="file-rom" accept=".gba,.bin,.agb" hidden />
+                  </label>
+                </div>
+              </div>
+              <figcaption class="lobby__caption screens__local-caption">
+                Your game
+              </figcaption>
+            </figure>
+
+            <figure class="lobby__watch" id="lobby-watch" hidden>
+              <img
+                class="lobby__screen"
+                id="lobby-screen"
+                alt="Shared game screen"
+                width="240"
+                height="160"
+              />
+              <figcaption class="lobby__caption" id="lobby-caption">&mdash;</figcaption>
+            </figure>
           </div>
 
           <!-- The control deck.
@@ -270,15 +292,6 @@
               </div>
             </section>
           </div>
-
-          <!-- Someone else's screen, when you are watching one. Left on the
-               page rather than moved into the lobby dialog: watching is the
-               part of a room that lasts, and it belongs next to your own
-               screen rather than behind a button. -->
-          <figure class="lobby__watch" id="lobby-watch" hidden>
-            <img class="lobby__screen" id="lobby-screen" alt="" width="240" height="160" />
-            <figcaption class="lobby__caption" id="lobby-caption">—</figcaption>
-          </figure>
 
           <!-- Filled in from the live bindings, so it cannot contradict them. -->
           <p class="hint" id="deck-hint"></p>

@@ -457,8 +457,8 @@ Ten a second, not sixty: a frame is a few kilobytes where a read-out is a few
 hundred bytes, and it is relayed to everyone in the room. That number decides
 whether a room of four is comfortable or is a hundred kilobytes a second leaving
 somebody's house. JPEG rather than PNG for the same reason — about a tenth the
-size at this scale, and the artefacts are invisible once the picture is a
-thumbnail in a sidebar.
+size at this scale, and the artefacts are unobtrusive in the half-width peer
+view used while two games share the play space.
 
 Nobody announces that they have stopped sharing; they just stop sending. A
 member counts as live for two seconds after their last frame, and the check for
@@ -1006,7 +1006,7 @@ What used to be in that right rail and is not any more:
 |---|---|---|
 | Cartridge panel | One-line strip | The header bar already names the ROM and the read-out heading already names the addon; the box was mostly those facts a second time. |
 | Library tab | The empty screen | A list of ROMs is one you need exactly once — when there is no cartridge in. It is now part of the "No cartridge" state and gone once a game runs. |
-| Lobby panel | A dialog | Hosting or joining happens once at the start of a session. What lasts — the watched screen, and whether the cable is live — stayed on the page: the screen sits under your own, and the deck key carries a badge. |
+| Lobby panel | A dialog | Hosting or joining happens once at the start of a session. What lasts — the watched screen, and whether the cable is live — stayed on the page: local and watched screens become equal columns above the controls, stack on a narrow display, and the deck key carries a badge. |
 
 ### Input
 

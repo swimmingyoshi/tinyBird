@@ -319,6 +319,32 @@ code {
   min-width: 0;
 }
 
+/* Local and watched games are one workspace. In solo play the local picture
+   keeps every pixel; once a remote frame arrives, the space divides evenly. */
+.screens {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: calc(var(--unit) * 2);
+  align-items: start;
+}
+
+.screens[data-view="shared"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.screens__player {
+  min-width: 0;
+  margin: 0;
+}
+
+.screens__local-caption {
+  display: none;
+}
+
+.screens[data-view="shared"] .screens__local-caption {
+  display: block;
+}
+
 /* Screen ---------------------------------------------------------------- */
 
 .screen {
@@ -2195,7 +2221,8 @@ button.card__head:hover .card__title {
 }
 
 .lobby__watch {
-  margin: var(--unit) 0 0;
+  min-width: 0;
+  margin: 0;
 }
 
 /* Someone else's screen, at whole-pixel scale like our own. */
@@ -2212,6 +2239,12 @@ button.card__head:hover .card__title {
   margin-top: 4px;
   font-size: 11px;
   color: var(--dim);
+}
+
+@media (max-width: 620px) {
+  .screens[data-view="shared"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* Who opened the room. Small, because it matters once and then never. */
