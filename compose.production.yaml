@@ -1,0 +1,49 @@
+services:
+  tinybird-web:
+    image: tinybird-web:${TINYBIRD_IMAGE_TAG:-local}
+    build:
+      context: .
+      target: runtime
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: ${TINYBIRD_ENV_FILE:-./deploy/tinybird.env}
+        required: true
+    environment:
+      TINYBIRD_WEB_HOST: 0.0.0.0
+      TINYBIRD_WEB_PORT: 8877
+      TINYBIRD_WEB_WASM: /app/tinybird_wasm.wasm
+      TINYBIRD_WEB_SNAPSHOT: /app/data/current-game.json
+      TINYBIRD_WEB_SPRITES: /app/data/sprites
+      TINYBIRD_ADDONS: /app/addons
+      TINYBIRD_LOCAL_ROMS: "off"
+      TINYBIRD_WEB_OVERLAY: "off"
+    expose:
+      - "8877"
+    networks:
+      cloudflare:
+        aliases:
+          - tinybird-web
+    volumes:
+      - tinybird-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8877/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+networks:
+  cloudflare:
+    external: true
+    name: ${TINYBIRD_TUNNEL_NETWORK:?Set TINYBIRD_TUNNEL_NETWORK to the network used by cloudflared}
+
+volumes:
+  tinybird-data:

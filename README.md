@@ -202,6 +202,8 @@ The desktop frontend writes a structured snapshot to `stream-data/current-game.j
 ## Web
 
 The same core runs in a browser tab. See [`docs/WEB.md`](docs/WEB.md).
+For the single-container VPS deployment behind Cloudflare Tunnel, see
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ```bash
 # Build the emulator module (one-time target install)
