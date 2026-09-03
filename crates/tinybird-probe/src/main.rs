@@ -115,7 +115,9 @@ EXAMPLES
 
 fn parse_number(text: &str) -> Result<u64, String> {
     let trimmed = text.trim();
-    let parsed = if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X"))
+    let parsed = if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
     {
         u64::from_str_radix(hex, 16)
     } else {
@@ -181,8 +183,7 @@ fn parse_args() -> Result<Options, String> {
 
     while let Some(arg) = args.next() {
         let mut next = |flag: &str| -> Result<String, String> {
-            args.next()
-                .ok_or_else(|| format!("{flag} needs a value"))
+            args.next().ok_or_else(|| format!("{flag} needs a value"))
         };
 
         match arg.as_str() {
@@ -199,14 +200,22 @@ fn parse_args() -> Result<Options, String> {
             "--region" => options.regions = Regions::parse(&next("--region")?)?,
             "--find-text" => options.find_text.push(next("--find-text")?),
             "--find-relative" => options.find_relative.push(next("--find-relative")?),
-            "--find-bytes" => options.find_bytes.push(parse_hex_bytes(&next("--find-bytes")?)?),
-            "--find-u32" => options.find_u32.push(parse_number(&next("--find-u32")?)? as u32),
-            "--find-u16" => options.find_u16.push(parse_number(&next("--find-u16")?)? as u16),
+            "--find-bytes" => options
+                .find_bytes
+                .push(parse_hex_bytes(&next("--find-bytes")?)?),
+            "--find-u32" => options
+                .find_u32
+                .push(parse_number(&next("--find-u32")?)? as u32),
+            "--find-u16" => options
+                .find_u16
+                .push(parse_number(&next("--find-u16")?)? as u16),
             "--dump" => options.dump.push(parse_dump(&next("--dump")?)?),
             "--stride" => options.stride = Some(parse_number(&next("--stride")?)? as u32),
             "--save-state" => options.save_state = Some(PathBuf::from(next("--save-state")?)),
             "--screenshot" => options.screenshot = Some(PathBuf::from(next("--screenshot")?)),
-            "--strings" => options.strings = Some(parse_number(&next("--strings")?)?.max(2) as usize),
+            "--strings" => {
+                options.strings = Some(parse_number(&next("--strings")?)?.max(2) as usize)
+            }
             other if other.starts_with("--") => return Err(format!("unknown option {other}")),
             other if !rom_seen => {
                 options.rom = PathBuf::from(other);
@@ -276,11 +285,8 @@ fn run_with_mashing(gba: &mut Gba, frames: u32, buttons: GbaButton, period: u32)
     let half = (period / 2).max(1);
     for frame in 0..frames {
         let pressed = (frame % period) < half;
-        gba.input.set_buttons(if pressed {
-            buttons
-        } else {
-            GbaButton::empty()
-        });
+        gba.input
+            .set_buttons(if pressed { buttons } else { GbaButton::empty() });
         gba.run_frames(1);
     }
     gba.input.set_buttons(GbaButton::empty());
@@ -311,8 +317,8 @@ fn parse_buttons(spec: &str) -> Result<GbaButton, String> {
 }
 
 fn load_state_into(gba: &mut Gba, path: &Path) -> Result<(), String> {
-    let bytes = fs::read(path)
-        .map_err(|err| format!("cannot read state '{}': {err}", path.display()))?;
+    let bytes =
+        fs::read(path).map_err(|err| format!("cannot read state '{}': {err}", path.display()))?;
     gba.load_state_bytes(&bytes)
         .map_err(|err| format!("cannot load state '{}': {err}", path.display()))
 }
@@ -342,7 +348,9 @@ fn report_hits(label: &str, pattern: &[u8], regions: &[MemoryRegion], codec: Cod
         }
     );
     if hits.is_empty() {
-        println!("  (nothing found — try a different --region, or a state where the value is on screen)");
+        println!(
+            "  (nothing found — try a different --region, or a state where the value is on screen)"
+        );
         return;
     }
     for hit in hits.iter().take(MAX_HITS) {
@@ -362,7 +370,10 @@ fn report_stride(regions: &[MemoryRegion], pattern: &[u8], stride: u32) {
     let Some(first) = hits.first() else {
         return;
     };
-    println!("\nstride check: {stride} (={stride:#X}) bytes from {:#010X}", first.address);
+    println!(
+        "\nstride check: {stride} (={stride:#X}) bytes from {:#010X}",
+        first.address
+    );
     let mut consecutive = 0;
     for index in 0..8u32 {
         let address = first.address + index * stride;
@@ -411,7 +422,11 @@ fn report_diff(before: &[MemoryRegion], after: &[MemoryRegion]) {
         println!("  (no differences — are the two states really different?)");
         return;
     }
-    println!("  {} changed run(s), showing the {} shortest", runs.len(), MAX_HITS.min(runs.len()));
+    println!(
+        "  {} changed run(s), showing the {} shortest",
+        runs.len(),
+        MAX_HITS.min(runs.len())
+    );
 
     // Short runs are the interesting ones: a counter or a flag, rather than a
     // whole re-rendered buffer.
@@ -434,8 +449,10 @@ fn report_diff(before: &[MemoryRegion], after: &[MemoryRegion]) {
 /// than guessing an address, dump everything that decodes as text and look for
 /// something recognisable from the screen.
 fn report_strings(regions: &[MemoryRegion], min_len: usize, codec: Codec) {
-    println!("
-text runs of >= {min_len} characters");
+    println!(
+        "
+text runs of >= {min_len} characters"
+    );
     let mut found = 0usize;
 
     for region in regions {
@@ -515,10 +532,18 @@ fn run() -> Result<(), String> {
     for text in &options.find_text {
         let pattern = options.codec.encode(text);
         if pattern.is_empty() {
-            println!("\nfind-text {text:?}: nothing encodable with --codec {}", options.codec.name());
+            println!(
+                "\nfind-text {text:?}: nothing encodable with --codec {}",
+                options.codec.name()
+            );
             continue;
         }
-        report_hits(&format!("find-text {text:?}"), &pattern, &regions, options.codec);
+        report_hits(
+            &format!("find-text {text:?}"),
+            &pattern,
+            &regions,
+            options.codec,
+        );
         if let Some(stride) = options.stride {
             report_stride(&regions, &pattern, stride);
         }
@@ -526,8 +551,11 @@ fn run() -> Result<(), String> {
 
     for text in &options.find_relative {
         let hits = scan::find_relative(&regions, text);
-        println!("
-find-relative {text:?}  {} hit(s)", hits.len());
+        println!(
+            "
+find-relative {text:?}  {} hit(s)",
+            hits.len()
+        );
         if hits.is_empty() {
             println!("  (nothing — try a shorter, single-case fragment)");
         }

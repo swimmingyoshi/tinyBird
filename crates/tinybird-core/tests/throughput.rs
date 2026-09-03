@@ -68,7 +68,10 @@ fn frame_cost_against_the_frame_budget() {
     eprintln!("  measured    {ms:.2} ms/frame");
     eprintln!("  headroom    {headroom:.2} ms");
     eprintln!("  realtime    {:.1}x", FRAME_BUDGET_MS / ms);
-    eprintln!("  ceiling     {:.1}x fast-forward before frames are dropped", FRAME_BUDGET_MS / ms);
+    eprintln!(
+        "  ceiling     {:.1}x fast-forward before frames are dropped",
+        FRAME_BUDGET_MS / ms
+    );
     eprintln!("----------------------------------------------------------");
 
     assert!(ms > 0.0, "a frame has to take some time");
@@ -132,6 +135,8 @@ fn scanning_the_whole_rom_through_a_memory_view() {
     }
     let ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    eprintln!("  ROM scan    {ms:.1} ms for {} MB (checksum {checksum})", len / 1_048_576);
+    eprintln!(
+        "  ROM scan    {ms:.1} ms for {} MB (checksum {checksum})",
+        len / 1_048_576
+    );
 }
-

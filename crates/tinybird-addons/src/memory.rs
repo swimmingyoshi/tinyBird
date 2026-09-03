@@ -132,7 +132,13 @@ impl SparseMemory {
     }
 
     /// Write a standard GBA cartridge header so ROM identification works.
-    pub fn with_rom_header(mut self, title: &str, game_code: &str, maker: &str, revision: u8) -> Self {
+    pub fn with_rom_header(
+        mut self,
+        title: &str,
+        game_code: &str,
+        maker: &str,
+        revision: u8,
+    ) -> Self {
         let mut title_bytes = [0u8; 12];
         for (slot, byte) in title_bytes.iter_mut().zip(title.bytes()) {
             *slot = byte;

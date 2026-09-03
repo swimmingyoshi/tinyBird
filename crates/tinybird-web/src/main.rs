@@ -1102,10 +1102,19 @@ async fn sign_in_route(
     }
 
     match auth::sign_in(&state.auth, &state.sessions, path, body).await {
-        Ok((id, user)) => {
+        Ok(auth::SignInOutcome::Session { id, user }) => {
             let cookie = auth::session_cookie(&id, is_secure(&headers));
             user_response(&user, Some(cookie))
         }
+        Ok(auth::SignInOutcome::VerificationRequired { delivery_status }) => text(
+            StatusCode::ACCEPTED,
+            serde_json::json!({
+                "verificationRequired": true,
+                "deliveryStatus": delivery_status,
+            })
+            .to_string(),
+            "application/json; charset=utf-8",
+        ),
         Err(err) => auth_error(&err),
     }
 }

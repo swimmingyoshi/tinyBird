@@ -4,12 +4,12 @@
 
 use tinybird_addons::schema::{AddonSection, AddonSectionContent};
 
+use crate::pokemon_assets::{PokemonSpriteStore, SpriteBitmap};
 use tinybird_games::{
     AddonData, FireRedAreaSnapshot, FireRedBattleSnapshot, FireRedEncounterEntry,
     FireRedEncounterGroup, FireRedMoveSlot, FireRedPartyMember, FireRedSnapshot, FireRedStatSpread,
     StreamSnapshot,
 };
-use crate::pokemon_assets::{PokemonSpriteStore, SpriteBitmap};
 
 /// Character width and height (pixels per glyph cell).
 pub const CHAR_W: usize = 8;
@@ -1069,7 +1069,10 @@ pub fn draw_addon_panel(
         has_rich_renderer && expanded && panel_w >= preview_w + 460 && panel_h >= 300;
 
     let (content_x, content_w) = if expanded && !has_rich_renderer {
-        let card_w = panel_w.saturating_sub(32).min(GENERIC_CONTENT_MAX_W).max(180);
+        let card_w = panel_w
+            .saturating_sub(32)
+            .min(GENERIC_CONTENT_MAX_W)
+            .max(180);
         (panel_x + panel_w.saturating_sub(card_w + 16), card_w)
     } else {
         let start = if side_by_side_preview {
@@ -1267,7 +1270,17 @@ fn draw_addon_sections(
     let row_h = 12;
 
     if sections.is_empty() {
-        draw_text(buf, buf_w, buf_h, x, top, "No sections reported", 1, muted, bg);
+        draw_text(
+            buf,
+            buf_w,
+            buf_h,
+            x,
+            top,
+            "No sections reported",
+            1,
+            muted,
+            bg,
+        );
         return;
     }
 

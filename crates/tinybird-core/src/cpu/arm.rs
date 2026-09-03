@@ -1276,7 +1276,12 @@ fn exec_stm<B: Bus>(bus: &mut B, regs: &mut Registers, decoded: &DecodedInstruct
 ///
 /// The read happens before the write, which is what makes `SWP Rd, Rd, [Rn]`
 /// meaningful — the destination and the source can be the same register.
-fn exec_swap<B: Bus>(bus: &mut B, regs: &mut Registers, decoded: &DecodedInstruction, is_byte: bool) {
+fn exec_swap<B: Bus>(
+    bus: &mut B,
+    regs: &mut Registers,
+    decoded: &DecodedInstruction,
+    is_byte: bool,
+) {
     let addr = decoded.rn.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
     let source = decoded.rm.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
 

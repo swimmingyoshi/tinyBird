@@ -1,10 +1,10 @@
-use tinybird_games::{AddonData, StreamSnapshot};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
+use tinybird_games::{AddonData, StreamSnapshot};
 
 const SPRITE_CACHE_DIR: &str = "stream-data/pokemon-sprites";
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(12);

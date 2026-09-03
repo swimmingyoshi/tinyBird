@@ -371,12 +371,8 @@ pub fn menu_bar(
 
     // --- the bar itself ---
     ui.canvas.fill_rect(bar, ui.palette.chrome);
-    ui.canvas.hline(
-        bar.x,
-        bar.bottom() - 1,
-        bar.w,
-        ui.palette.chrome_border,
-    );
+    ui.canvas
+        .hline(bar.x, bar.bottom() - 1, bar.w, ui.palette.chrome_border);
 
     let titles = title_rects(bar, menus);
     for (index, title) in titles.iter().enumerate() {
@@ -721,7 +717,10 @@ mod tests {
     fn sample_menus() -> Vec<Menu> {
         vec![
             Menu::new("File", sample_entries()),
-            Menu::new("Help", vec![MenuEntry::action("About", UiCommand::ShowAbout)]),
+            Menu::new(
+                "Help",
+                vec![MenuEntry::action("About", UiCommand::ShowAbout)],
+            ),
         ]
     }
 
@@ -738,8 +737,8 @@ mod tests {
     fn dropdown_is_wide_enough_for_the_longest_label_and_shortcut() {
         let entries = sample_entries();
         let (w, h) = dropdown_size(&entries);
-        let widest = text_width("Open ROM...", TEXT_SCALE) + SHORTCUT_GAP
-            + text_width("Ctrl+O", TEXT_SCALE);
+        let widest =
+            text_width("Open ROM...", TEXT_SCALE) + SHORTCUT_GAP + text_width("Ctrl+O", TEXT_SCALE);
         assert!(w >= widest, "dropdown {w} too narrow for {widest}");
         // Four normal entries plus one separator, plus padding.
         assert_eq!(h, ENTRY_HEIGHT * 4 + SEPARATOR_HEIGHT + DROPDOWN_PAD_Y * 2);
@@ -824,7 +823,10 @@ mod tests {
 
         handle_key(&mut state, &menus, UiKey::Left);
         assert!(state.path.is_empty());
-        assert!(state.is_open(), "backing out of a submenu keeps the menu open");
+        assert!(
+            state.is_open(),
+            "backing out of a submenu keeps the menu open"
+        );
     }
 
     #[test]
@@ -906,11 +908,23 @@ mod tests {
         let mut input = UiInput::new();
         let titles = title_rects(BAR, &menus);
 
-        click_at(&mut input, &mut state, &menus, titles[0].center_x(), titles[0].center_y());
+        click_at(
+            &mut input,
+            &mut state,
+            &menus,
+            titles[0].center_x(),
+            titles[0].center_y(),
+        );
         assert!(state.is_open());
         input.end_frame();
 
-        click_at(&mut input, &mut state, &menus, titles[0].center_x(), titles[0].center_y());
+        click_at(
+            &mut input,
+            &mut state,
+            &menus,
+            titles[0].center_x(),
+            titles[0].center_y(),
+        );
         assert!(!state.is_open());
     }
 
@@ -921,7 +935,13 @@ mod tests {
         let mut input = UiInput::new();
         let titles = title_rects(BAR, &menus);
 
-        click_at(&mut input, &mut state, &menus, titles[0].center_x(), titles[0].center_y());
+        click_at(
+            &mut input,
+            &mut state,
+            &menus,
+            titles[0].center_x(),
+            titles[0].center_y(),
+        );
         input.end_frame();
 
         // Move to the next title without pressing anything.
@@ -937,7 +957,13 @@ mod tests {
         let mut input = UiInput::new();
         let titles = title_rects(BAR, &menus);
 
-        click_at(&mut input, &mut state, &menus, titles[0].center_x(), titles[0].center_y());
+        click_at(
+            &mut input,
+            &mut state,
+            &menus,
+            titles[0].center_x(),
+            titles[0].center_y(),
+        );
         input.end_frame();
 
         // "Open ROM..." is the first entry of the File dropdown.
@@ -961,15 +987,18 @@ mod tests {
         let mut input = UiInput::new();
         let titles = title_rects(BAR, &menus);
 
-        click_at(&mut input, &mut state, &menus, titles[0].center_x(), titles[0].center_y());
+        click_at(
+            &mut input,
+            &mut state,
+            &menus,
+            titles[0].center_x(),
+            titles[0].center_y(),
+        );
         input.end_frame();
 
         // Entry 2 is the disabled "Reload ROM", after entry 0 and a separator.
-        let entry_y = BAR.bottom()
-            + DROPDOWN_PAD_Y
-            + ENTRY_HEIGHT
-            + SEPARATOR_HEIGHT
-            + ENTRY_HEIGHT / 2;
+        let entry_y =
+            BAR.bottom() + DROPDOWN_PAD_Y + ENTRY_HEIGHT + SEPARATOR_HEIGHT + ENTRY_HEIGHT / 2;
         input.set_pointer(titles[0].x + 20, entry_y);
         input.set_button(MouseButton::Left, true);
         frame(&input, &mut state, &menus);
@@ -988,15 +1017,18 @@ mod tests {
         let mut input = UiInput::new();
         let titles = title_rects(BAR, &menus);
 
-        click_at(&mut input, &mut state, &menus, titles[0].center_x(), titles[0].center_y());
+        click_at(
+            &mut input,
+            &mut state,
+            &menus,
+            titles[0].center_x(),
+            titles[0].center_y(),
+        );
         input.end_frame();
 
         // Entry 3 is the "Save State" submenu.
-        let entry_y = BAR.bottom()
-            + DROPDOWN_PAD_Y
-            + ENTRY_HEIGHT * 2
-            + SEPARATOR_HEIGHT
-            + ENTRY_HEIGHT / 2;
+        let entry_y =
+            BAR.bottom() + DROPDOWN_PAD_Y + ENTRY_HEIGHT * 2 + SEPARATOR_HEIGHT + ENTRY_HEIGHT / 2;
         input.set_pointer(titles[0].x + 20, entry_y);
         frame(&input, &mut state, &menus);
 
@@ -1010,7 +1042,13 @@ mod tests {
         let mut input = UiInput::new();
         let titles = title_rects(BAR, &menus);
 
-        click_at(&mut input, &mut state, &menus, titles[0].center_x(), titles[0].center_y());
+        click_at(
+            &mut input,
+            &mut state,
+            &menus,
+            titles[0].center_x(),
+            titles[0].center_y(),
+        );
         input.end_frame();
 
         input.set_pointer(700, 500);

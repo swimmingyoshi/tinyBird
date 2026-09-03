@@ -103,7 +103,10 @@ mod tests {
 
     #[test]
     fn ffta_round_trips() {
-        assert_eq!(Codec::Ffta.decode(&Codec::Ffta.encode("Montblanc")), "Montblanc");
+        assert_eq!(
+            Codec::Ffta.decode(&Codec::Ffta.encode("Montblanc")),
+            "Montblanc"
+        );
     }
 
     #[test]
@@ -113,7 +116,10 @@ mod tests {
 
     #[test]
     fn unencodable_characters_are_dropped_not_substituted() {
-        assert_eq!(Codec::Ffta.encode("Clan Nutsy!"), Codec::Ffta.encode("ClanNutsy"));
+        assert_eq!(
+            Codec::Ffta.encode("Clan Nutsy!"),
+            Codec::Ffta.encode("ClanNutsy")
+        );
         assert!(Codec::Ffta.encode("123").is_empty());
     }
 

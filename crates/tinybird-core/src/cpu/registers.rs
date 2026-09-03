@@ -525,7 +525,11 @@ mod tests {
         regs.set_cpsr(cpsr, true);
 
         assert!(regs.is_thumb_mode(), "T should have taken");
-        assert_ne!(regs.cpsr() & CpsrFlags::T.bits(), 0, "T should be in the CPSR");
+        assert_ne!(
+            regs.cpsr() & CpsrFlags::T.bits(),
+            0,
+            "T should be in the CPSR"
+        );
     }
 
     #[test]
@@ -542,7 +546,10 @@ mod tests {
     #[test]
     fn the_interrupt_masks_still_survive_a_cpsr_write() {
         let mut regs = Registers::new();
-        regs.set_cpsr(regs.cpsr() | CpsrFlags::I.bits() | CpsrFlags::F.bits(), true);
+        regs.set_cpsr(
+            regs.cpsr() | CpsrFlags::I.bits() | CpsrFlags::F.bits(),
+            true,
+        );
         assert_ne!(regs.cpsr() & CpsrFlags::I.bits(), 0);
         assert_ne!(regs.cpsr() & CpsrFlags::F.bits(), 0);
     }

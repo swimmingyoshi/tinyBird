@@ -183,8 +183,7 @@ impl UiInput {
 
     /// Whether the pointer is currently inside `rect`.
     pub fn hovering(&self, rect: Rect) -> bool {
-        self.pointer
-            .is_some_and(|(x, y)| rect.contains(x, y))
+        self.pointer.is_some_and(|(x, y)| rect.contains(x, y))
     }
 
     /// Whether `button` went down inside `rect` this frame.

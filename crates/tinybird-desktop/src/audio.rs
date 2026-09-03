@@ -383,7 +383,11 @@ mod tests {
         append_bounded(&mut buffer, &huge, 4);
 
         assert_eq!(buffer.len(), 4);
-        assert_eq!(contents(&buffer), vec![996, 997, 998, 999], "keeps the newest audio");
+        assert_eq!(
+            contents(&buffer),
+            vec![996, 997, 998, 999],
+            "keeps the newest audio"
+        );
     }
 
     #[test]

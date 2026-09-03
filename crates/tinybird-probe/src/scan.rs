@@ -304,7 +304,10 @@ mod tests {
         let regions = vec![region("ewram", 0x0200_0000, bytes)];
 
         let hits = find_relative(&regions, "arche");
-        let wide = hits.iter().find(|hit| hit.stride == 2).expect("stride 2 hit");
+        let wide = hits
+            .iter()
+            .find(|hit| hit.stride == 2)
+            .expect("stride 2 hit");
         assert_eq!(wide.address, 0x0200_0004);
         assert_eq!(wide.implied_offset, 0x20);
     }
