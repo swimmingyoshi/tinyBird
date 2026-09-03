@@ -18,6 +18,7 @@ stream-data/
 .env
 .env.*
 !.env.example
+deploy/tinybird.env
 
 # Editor/tool configs
 .claude/
