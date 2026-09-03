@@ -204,6 +204,23 @@ export function mountAccount({ onChange } = {}) {
       const body = await response.json();
       if (!response.ok) throw new Error(body.error ?? `${response.status}`);
 
+      if (body.verificationRequired) {
+        // Auth has accepted the account but deliberately has not issued a
+        // session until the address is verified. Keep the form available for
+        // sign-in after they follow the link instead of pretending registration
+        // failed or rendering an empty account.
+        setMode("signin");
+        el.password.value = "";
+        el.password2.value = "";
+        say(
+          body.deliveryStatus === "sent"
+            ? "Verification email sent. Follow its link, then sign in here."
+            : "Account created, but the verification email could not be delivered. Please contact support.",
+          body.deliveryStatus === "sent" ? "good" : "bad",
+        );
+        return;
+      }
+
       setMode("signin");
       // The password has done its job; no reason to leave it in a field a
       // screenshot or a shoulder would catch.

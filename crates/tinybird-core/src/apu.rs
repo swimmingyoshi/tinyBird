@@ -1590,7 +1590,10 @@ mod tests {
             let value = (index % 1000) as i16;
             apu.push_stereo(value, value);
         }
-        let last = *apu.sample_buffer.last().expect("buffer should not be empty");
+        let last = *apu
+            .sample_buffer
+            .last()
+            .expect("buffer should not be empty");
         assert_eq!(
             last,
             ((total - 1) % 1000) as i16,

@@ -301,7 +301,11 @@ impl Sio {
     /// The caller writes the values into `SIOMULTI0-3`, clears `START`, and
     /// raises the interrupt if `SIOCNT` asked for one.
     pub fn tick(&mut self, cycles: u32) -> Option<[u16; MAX_PLAYERS]> {
-        let Some(Phase::Clocking { cycles_left, values }) = &mut self.phase else {
+        let Some(Phase::Clocking {
+            cycles_left,
+            values,
+        }) = &mut self.phase
+        else {
             return None;
         };
         *cycles_left = cycles_left.saturating_sub(cycles);
@@ -478,7 +482,11 @@ mod tests {
         child.connect(2, 4);
         let seen = child.apply_terminal_bits(0x0000);
         assert_eq!(seen & 0x0004, 0x0004, "a child's SI terminal is high");
-        assert_eq!((seen >> 4) & 0b11, 2, "the player number survives a zero write");
+        assert_eq!(
+            (seen >> 4) & 0b11,
+            2,
+            "the player number survives a zero write"
+        );
     }
 
     #[test]
@@ -486,7 +494,11 @@ mod tests {
         let sio = Sio::new();
         let seen = sio.apply_terminal_bits(0xFFFF);
         assert_eq!(seen & 0x0008, 0, "SD is low with nothing attached");
-        assert_eq!(sio.apply_busy_bit(seen) & 0x0080, 0, "and nothing is ever busy");
+        assert_eq!(
+            sio.apply_busy_bit(seen) & 0x0080,
+            0,
+            "and nothing is ever busy"
+        );
     }
 
     #[test]

@@ -35,11 +35,7 @@ pub struct Ui<'a, 'buf> {
 }
 
 impl<'a, 'buf> Ui<'a, 'buf> {
-    pub fn new(
-        canvas: &'a mut Canvas<'buf>,
-        input: &'a UiInput,
-        palette: &'a Palette,
-    ) -> Self {
+    pub fn new(canvas: &'a mut Canvas<'buf>, input: &'a UiInput, palette: &'a Palette) -> Self {
         Self {
             canvas,
             input,
@@ -119,14 +115,25 @@ pub fn button_styled(
         ui.palette.chrome_border
     };
     ui.canvas.stroke_rect(rect, 1, border);
-    ui.canvas
-        .text_in(rect, Align::Center, label, TEXT_SCALE, state.ink(ui.palette));
+    ui.canvas.text_in(
+        rect,
+        Align::Center,
+        label,
+        TEXT_SCALE,
+        state.ink(ui.palette),
+    );
 
     enabled && ui.input.clicked(rect)
 }
 
 /// A labelled checkbox. Returns `true` when toggled; the caller owns the value.
-pub fn checkbox(ui: &mut Ui<'_, '_>, rect: Rect, label: &str, checked: bool, enabled: bool) -> bool {
+pub fn checkbox(
+    ui: &mut Ui<'_, '_>,
+    rect: Rect,
+    label: &str,
+    checked: bool,
+    enabled: bool,
+) -> bool {
     let hovered = ui.hovered(rect, enabled);
     let state = ControlState::resolve(hovered, false, enabled);
 
@@ -237,12 +244,7 @@ pub fn slider_fraction_at(rect: Rect, px: i32) -> f32 {
 pub fn slider(ui: &mut Ui<'_, '_>, rect: Rect, value: f32, enabled: bool) -> Option<f32> {
     let value = value.clamp(0.0, 1.0);
     let track_h = 4;
-    let track = Rect::new(
-        rect.x,
-        rect.y + (rect.h - track_h) / 2,
-        rect.w,
-        track_h,
-    );
+    let track = Rect::new(rect.x, rect.y + (rect.h - track_h) / 2, rect.w, track_h);
 
     ui.canvas.fill_rect(track, ui.palette.surface_sunken);
     let filled_w = (track.w as f32 * value).round() as i32;
@@ -323,11 +325,7 @@ pub fn list(
         if wheel > 0.0 {
             scroll = scroll.saturating_sub(wheel.ceil() as usize);
         } else if wheel < 0.0 {
-            scroll = clamp_scroll(
-                scroll + (-wheel).ceil() as usize,
-                items.len(),
-                visible,
-            );
+            scroll = clamp_scroll(scroll + (-wheel).ceil() as usize, items.len(), visible);
         }
     }
 
@@ -398,14 +396,15 @@ pub fn tab_rects(rect: Rect, labels: &[&str], scale: i32) -> Vec<Rect> {
 }
 
 /// A horizontal tab strip. Returns the newly selected tab, if any.
-pub fn tab_strip(ui: &mut Ui<'_, '_>, rect: Rect, labels: &[&str], selected: usize) -> Option<usize> {
+pub fn tab_strip(
+    ui: &mut Ui<'_, '_>,
+    rect: Rect,
+    labels: &[&str],
+    selected: usize,
+) -> Option<usize> {
     ui.canvas.fill_rect(rect, ui.palette.surface);
-    ui.canvas.hline(
-        rect.x,
-        rect.bottom() - 1,
-        rect.w,
-        ui.palette.chrome_border,
-    );
+    ui.canvas
+        .hline(rect.x, rect.bottom() - 1, rect.w, ui.palette.chrome_border);
 
     let mut chosen = None;
     for (index, tab) in tab_rects(rect, labels, TEXT_SCALE).into_iter().enumerate() {
@@ -446,8 +445,10 @@ pub fn panel(ui: &mut Ui<'_, '_>, rect: Rect, title: Option<&str>) -> Rect {
 
     let header_h = ROW_HEIGHT + CONTROL_PAD_Y;
     let (header, body) = rect.split_top(header_h);
-    ui.canvas
-        .fill_rect(Rect::new(header.x, header.y, header.w, 2), ui.palette.accent);
+    ui.canvas.fill_rect(
+        Rect::new(header.x, header.y, header.w, 2),
+        ui.palette.accent,
+    );
     ui.canvas.text_in(
         Rect::new(header.x + CONTROL_PAD_X, header.y, header.w, header.h),
         Align::Left,
@@ -485,10 +486,7 @@ mod tests {
         let segments = segment_rects(row, 4, 2);
         assert_eq!(segments.len(), 4);
         for pair in segments.windows(2) {
-            assert!(
-                pair[0].right() <= pair[1].x,
-                "segments {pair:?} overlap"
-            );
+            assert!(pair[0].right() <= pair[1].x, "segments {pair:?} overlap");
         }
         assert!(segments.last().unwrap().right() <= row.right());
     }

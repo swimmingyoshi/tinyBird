@@ -333,7 +333,10 @@ mod tests {
     fn an_address_past_the_end_wraps_rather_than_panicking() {
         let mut chip = Eeprom::new();
         // 6-bit part, but the game clocks in an address of 63 plus a carry.
-        write_bits(&mut chip, &write_command(0xFFFF, SMALL_ADDRESS_BITS, [7; 8]));
+        write_bits(
+            &mut chip,
+            &write_command(0xFFFF, SMALL_ADDRESS_BITS, [7; 8]),
+        );
         chip.read_bit();
         write_bits(&mut chip, &read_command(0xFFFF & 63, SMALL_ADDRESS_BITS));
         assert_eq!(read_block(&mut chip), [7; 8]);

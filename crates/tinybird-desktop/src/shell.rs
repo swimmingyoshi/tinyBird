@@ -269,13 +269,10 @@ impl App {
         let volume_entries = VOLUME_CHOICES
             .iter()
             .map(|&percent| {
-                MenuEntry::action(
-                    format!("{percent}%"),
-                    UiCommand::SetVolumePercent(percent),
-                )
-                // Nearest step wins, so a volume nudged with `[` / `]` still
-                // shows a sensible mark rather than none at all.
-                .radio(current.abs_diff(percent) < 10)
+                MenuEntry::action(format!("{percent}%"), UiCommand::SetVolumePercent(percent))
+                    // Nearest step wins, so a volume nudged with `[` / `]` still
+                    // shows a sensible mark rather than none at all.
+                    .radio(current.abs_diff(percent) < 10)
             })
             .collect();
 
@@ -502,9 +499,7 @@ impl App {
 
             // --- Addons ---
             UiCommand::ToggleDashboard => self.toggle_addon_dashboard(),
-            UiCommand::ShowTeamPanel => {
-                self.show_docked_addon_view(overlay::AddonViewMode::Team)
-            }
+            UiCommand::ShowTeamPanel => self.show_docked_addon_view(overlay::AddonViewMode::Team),
             UiCommand::ShowEncountersPanel => {
                 self.show_docked_addon_view(overlay::AddonViewMode::Encounters)
             }
@@ -573,10 +568,8 @@ impl App {
                         format!("Settings file: {}", path.display()),
                         overlay::ToastTone::Info,
                     ),
-                    None => self.set_status(
-                        "No config directory available",
-                        overlay::ToastTone::Warning,
-                    ),
+                    None => self
+                        .set_status("No config directory available", overlay::ToastTone::Warning),
                 }
             }
             UiCommand::ShowRomInfo => {
@@ -597,7 +590,8 @@ impl App {
                 self.set_status(info, overlay::ToastTone::Info);
             }
             UiCommand::ShowAddonStatus => {
-                let status = tinybird_games::describe_addon_status(self.rom_loaded.then_some(&*self.gba));
+                let status =
+                    tinybird_games::describe_addon_status(self.rom_loaded.then_some(&*self.gba));
 
                 // The toast fits one line; the full report goes to stdout,
                 // where it is the first thing to check when bringing up a game.
@@ -720,22 +714,27 @@ impl App {
 
     fn take_screenshot(&mut self) {
         let Some(path) = self.screenshot_path() else {
-            self.set_status("No screenshot folder available", overlay::ToastTone::Warning);
+            self.set_status(
+                "No screenshot folder available",
+                overlay::ToastTone::Warning,
+            );
             return;
         };
         if let Some(parent) = path.parent() {
             if let Err(err) = std::fs::create_dir_all(parent) {
                 eprintln!("Failed to create screenshot folder: {err}");
-                self.set_status("Could not create screenshot folder", overlay::ToastTone::Warning);
+                self.set_status(
+                    "Could not create screenshot folder",
+                    overlay::ToastTone::Warning,
+                );
                 return;
             }
         }
 
         let framebuffer = self.gba.ppu.get_framebuffer();
         let lookup = crate::rgb555_lookup(self.color_correction);
-        let mut rgb = Vec::with_capacity(
-            crate::SCREEN_WIDTH as usize * crate::SCREEN_HEIGHT as usize * 3,
-        );
+        let mut rgb =
+            Vec::with_capacity(crate::SCREEN_WIDTH as usize * crate::SCREEN_HEIGHT as usize * 3);
         for pixel in framebuffer.as_slice() {
             let color = lookup[pixel.color.to_rgb555() as usize];
             rgb.push(((color >> 16) & 0xFF) as u8);
@@ -749,7 +748,10 @@ impl App {
 
         match saved {
             Ok(()) => self.set_status(
-                format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()),
+                format!(
+                    "Saved {}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ),
                 overlay::ToastTone::Success,
             ),
             Err(err) => {
@@ -813,7 +815,8 @@ impl App {
 
     /// Feed a pointer position, in physical pixels, to the UI.
     pub(crate) fn on_cursor_moved(&mut self, x: f64, y: f64) {
-        self.ui_input.set_pointer(x.round() as i32, y.round() as i32);
+        self.ui_input
+            .set_pointer(x.round() as i32, y.round() as i32);
         self.update_chrome_reveal();
         if self.chrome_visible() || self.menu_state.is_open() {
             self.request_redraw();
@@ -1008,7 +1011,8 @@ pub(crate) fn draw_chrome(
 /// Draw the status bar: ROM on the left, then performance, audio, and slot.
 fn draw_status_bar(ui: &mut Ui<'_, '_>, rect: Rect, fields: &[String; 4]) {
     ui.canvas.fill_rect(rect, ui.palette.chrome);
-    ui.canvas.hline(rect.x, rect.y, rect.w, ui.palette.chrome_border);
+    ui.canvas
+        .hline(rect.x, rect.y, rect.w, ui.palette.chrome_border);
 
     let pad = 8;
     ui.canvas.text_in(

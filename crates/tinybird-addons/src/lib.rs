@@ -27,7 +27,6 @@ pub use registry::{
     read_rom_identity, AddonInfo, AddonRegistry, Detection, GameAddon, RomIdentity,
 };
 pub use schema::{
-    AddonBadge, AddonCard, AddonField, AddonImage, AddonMeter, AddonSection,
-    AddonSectionContent, AddonSnapshot, AddonTable, AddonTone, StreamSnapshot,
-    SNAPSHOT_SCHEMA_VERSION,
+    AddonBadge, AddonCard, AddonField, AddonImage, AddonMeter, AddonSection, AddonSectionContent,
+    AddonSnapshot, AddonTable, AddonTone, StreamSnapshot, SNAPSHOT_SCHEMA_VERSION,
 };

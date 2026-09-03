@@ -155,7 +155,10 @@ impl Exchange {
     }
 }
 
-fn exchange(before: (&[(u32, u32)], &[(u32, u32)]), after: (&[(u32, u32)], &[(u32, u32)])) -> Exchange {
+fn exchange(
+    before: (&[(u32, u32)], &[(u32, u32)]),
+    after: (&[(u32, u32)], &[(u32, u32)]),
+) -> Exchange {
     let (parent_before, child_before) = before;
     let (parent_after, child_after) = after;
 
@@ -298,9 +301,7 @@ fn run_with_jitter(
                 };
                 if lead > 0 {
                     let until = consoles[1].total_cycles + lead;
-                    while consoles[1].total_cycles < until
-                        && !consoles[1].link_transfer_pending()
-                    {
+                    while consoles[1].total_cycles < until && !consoles[1].link_transfer_pending() {
                         consoles[1].step();
                     }
                 }
@@ -537,10 +538,12 @@ fn how_much_network_a_trade_survives() {
         return;
     }
 
-    println!("{:>9}  {:>10}  {:>8}  {:>8}", "latency", "transfers", "parent", "child");
+    println!(
+        "{:>9}  {:>10}  {:>8}  {:>8}",
+        "latency", "transfers", "parent", "child"
+    );
     for latency in [0.0, 0.5, 1.0, 2.0, 5.0, 13.0] {
-        let outcome =
-            run_with_latency(full_trade, 30, None, 0, true, latency).expect("consoles");
+        let outcome = run_with_latency(full_trade, 30, None, 0, true, latency).expect("consoles");
         println!(
             "{:>7.1}ms  {:>10}  {:>8}  {:>8}",
             latency, outcome.transfers, outcome.parent_values, outcome.child_values
@@ -561,7 +564,10 @@ fn how_much_jitter_a_trade_survives() {
         return;
     }
 
-    println!("{:>28}  {:>10}  {:>7}  {:>6}", "link", "transfers", "parent", "child");
+    println!(
+        "{:>28}  {:>10}  {:>7}  {:>6}",
+        "link", "transfers", "parent", "child"
+    );
     for (label, base, spike, every) in [
         ("1ms flat", 1.0, 0.0, 0),
         ("1ms, 17ms every 100", 1.0, 17.0, 100),

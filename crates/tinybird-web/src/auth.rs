@@ -93,6 +93,18 @@ pub struct User {
     pub role: String,
 }
 
+/// What a successful sign-in-shaped request produced.
+///
+/// Registration is successful before it is a session: Auth first sends a
+/// verification email and deliberately withholds tokens until the address is
+/// verified. Keeping that state distinct prevents TinyBird from turning a
+/// successful registration into a misleading 502.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignInOutcome {
+    Session { id: String, user: User },
+    VerificationRequired { delivery_status: Option<String> },
+}
+
 /// What the auth service says about a token.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Claims {
@@ -280,6 +292,23 @@ fn expiry_from(value: &serde_json::Value) -> SystemTime {
     }
 }
 
+/// The successful, tokenless response Auth uses while a new account waits for
+/// email verification. A login response with a similarly named field must not
+/// be mistaken for registration.
+fn verification_delivery(path: &str, value: &serde_json::Value) -> Option<Option<String>> {
+    (path == "/api/auth/register"
+        && value
+            .get("verificationRequired")
+            .and_then(|field| field.as_bool())
+            == Some(true))
+    .then(|| {
+        value
+            .get("deliveryStatus")
+            .and_then(|field| field.as_str())
+            .map(str::to_string)
+    })
+}
+
 /// Ask the auth service what a token means.
 ///
 /// This is the only call that uses the project secret. Running it once after
@@ -371,7 +400,7 @@ pub async fn sign_in(
     sessions: &Sessions,
     path: &str,
     body: serde_json::Value,
-) -> Result<(String, User), AuthError> {
+) -> Result<SignInOutcome, AuthError> {
     if !config.is_configured() {
         return Err(AuthError::NotConfigured);
     }
@@ -403,6 +432,10 @@ pub async fn sign_in(
     }
 
     let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    if let Some(delivery_status) = verification_delivery(path, &value) {
+        return Ok(SignInOutcome::VerificationRequired { delivery_status });
+    }
+
     let access_token = value
         .get("accessToken")
         .and_then(|v| v.as_str())
@@ -450,7 +483,7 @@ pub async fn sign_in(
             user: user.clone(),
         },
     );
-    Ok((id, user))
+    Ok(SignInOutcome::Session { id, user })
 }
 
 /// The signed-in user for a session id, refreshing the token if it is stale.
@@ -807,6 +840,23 @@ mod tests {
         let expiry = expiry_from(&serde_json::json!({}));
         assert!(expiry <= now_plus(15 * 60));
         assert!(expiry > SystemTime::now());
+    }
+
+    #[test]
+    fn registration_can_succeed_while_waiting_for_email_verification() {
+        let response = serde_json::json!({
+            "verificationRequired": true,
+            "deliveryStatus": "sent"
+        });
+        assert_eq!(
+            verification_delivery("/api/auth/register", &response),
+            Some(Some("sent".to_string()))
+        );
+        assert_eq!(verification_delivery("/api/auth/login", &response), None);
+        assert_eq!(
+            verification_delivery("/api/auth/register", &serde_json::json!({})),
+            None
+        );
     }
 
     #[test]
