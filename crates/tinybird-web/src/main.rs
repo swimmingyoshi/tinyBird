@@ -2408,6 +2408,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn shared_lobby_screens_live_in_one_workspace() {
+        let workspace = PLAY_HTML
+            .split_once("id=\"lobby-workspace\"")
+            .and_then(|(_, rest)| rest.split_once("</section>"))
+            .expect("the play page should contain the lobby workspace")
+            .0;
+
+        assert!(workspace.contains("id=\"screen\""));
+        assert!(workspace.contains("id=\"lobby-watch\""));
+        assert!(CONSOLE_CSS.contains(".screens[data-view=\"shared\"]"));
+        assert!(PLAY_JS.contains("el.lobbyWorkspace.dataset.view = \"shared\""));
+        assert!(PLAY_JS.contains("el.lobbyWorkspace.dataset.view = \"solo\""));
+    }
+
     /// Ids a script reaches for with `$("...")` that the markup has not got.
     fn missing_ids<'a>(js: &'a str, html: &str) -> Vec<&'a str> {
         let mut missing: Vec<&str> = Vec::new();
