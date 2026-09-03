@@ -66,6 +66,7 @@ const PLAY_JS: &str = include_str!("assets/play.js");
 const HOME_JS: &str = include_str!("assets/home.js");
 const CONTACT_PAGE_JS: &str = include_str!("assets/contact.js");
 const TICKETS_JS: &str = include_str!("assets/tickets.js");
+const TICKET_STATUS_JS: &str = include_str!("assets/ticketstatus.js");
 /// The account menu, imported by every page's own module.
 const ACCOUNT_JS: &str = include_str!("assets/account.js");
 /// The shared header wiring: the account menu and the server-up dot.
@@ -216,6 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/support/tickets", get(tickets_page))
         .route("/support/tickets/{ticket_id}", get(tickets_page))
         .route("/tickets.js", get(tickets_js))
+        .route("/ticketstatus.js", get(ticket_status_js))
         .route("/info", get(info_page))
         .route("/info.js", get(info_js))
         .route("/tinybird.js", get(tinybird_js))
@@ -503,6 +505,10 @@ async fn tickets_page() -> Html<&'static str> {
 
 async fn tickets_js() -> Response {
     static_text(TICKETS_JS, "application/javascript; charset=utf-8")
+}
+
+async fn ticket_status_js() -> Response {
+    static_text(TICKET_STATUS_JS, "application/javascript; charset=utf-8")
 }
 
 async fn account_js() -> Response {
@@ -1217,11 +1223,11 @@ async fn contact_state(State(state): State<AppState>, headers: axum::http::Heade
         body["name"] = serde_json::Value::String(who.name);
         body["email"] = serde_json::Value::String(who.email);
     }
-    text(
+    no_store(text(
         StatusCode::OK,
         body.to_string(),
         "application/json; charset=utf-8",
-    )
+    ))
 }
 
 /// 202, the same answer the contact service gives.
@@ -1330,11 +1336,11 @@ fn contact_error(err: &contact::ContactError) -> Response {
 
 /// Answer with whatever the service said, unchanged.
 fn ticket_answer(value: &serde_json::Value) -> Response {
-    text(
+    no_store(text(
         StatusCode::OK,
         value.to_string(),
         "application/json; charset=utf-8",
-    )
+    ))
 }
 
 /// `limit` and `offset` out of a query string, if they are there and are numbers.
@@ -2237,6 +2243,15 @@ fn text(status: StatusCode, body: String, content_type: &'static str) -> Respons
     response
 }
 
+/// Keep account-specific responses out of browser and intermediary caches.
+fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response
+}
+
 fn binary(status: StatusCode, body: Vec<u8>, content_type: &'static str) -> Response {
     let mut response = (status, body).into_response();
     response
@@ -2477,5 +2492,14 @@ mod tests {
         assert!(TICKETS_JS.contains("const ROOT = \"/support/tickets\""));
         assert!(TICKETS_HTML.contains("href=\"/support/tickets\""));
         assert!(CONTACT_HTML.contains("href=\"/support/tickets\""));
+    }
+
+    #[test]
+    fn ticket_answers_are_never_cached() {
+        let response = ticket_answer(&serde_json::json!({ "tickets": [] }));
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static("private, no-store"))
+        );
     }
 }

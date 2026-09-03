@@ -41,6 +41,9 @@ docker compose -f compose.production.yaml build
 docker compose -f compose.production.yaml up -d
 ```
 
+On the current 0xstash VPS this was verified as `code_media`. Re-check it before
+each rollout rather than assuming the Docker network has kept that name.
+
 Configure the existing tunnel's published application for:
 
 ```yaml
@@ -62,9 +65,17 @@ curl --fail https://gba.0xstash.dev/api/auth/me
 curl --fail https://gba.0xstash.dev/api/contact
 ```
 
-Also verify `/tinybird.wasm`, `/play`, and a WebSocket lobby connection. Only
-after authenticated ticket isolation and reply idempotency pass should Contact
-switch its customer portal from hosted mode to `gba.0xstash.dev`.
+Also verify `/tinybird.wasm`, `/play`, and a WebSocket lobby connection. Then use
+a verified disposable account to submit one message and confirm all of these:
+
+- the sender receives the TinyBird acknowledgment email;
+- `/support/tickets` lists the new ticket for that account only;
+- `/support/tickets/{ticketId}` shows its message history;
+- repeating one reply with the same idempotency key creates one message; and
+- a different signed-in account cannot read the ticket.
+
+Only after those checks pass should Contact switch its customer portal from
+hosted mode to `https://gba.0xstash.dev/support/tickets/{ticketId}`.
 
 The container intentionally carries no GBA BIOS. Players can use the emulator's
 HLE behavior; distributing a BIOS or ROM in the image is out of scope.

@@ -1263,6 +1263,11 @@ something else costs the sender a link and nothing more. It is withheld
 without a session, where the message was never bound to an account and the
 link would only lead to a panel saying so.
 
+After that acceptance the page says the request was received, names the address
+where Contact is sending its acknowledgment, and links directly to the new
+ticket. The acknowledgment itself belongs to Contact's separately retried mail
+queue; a browser success message is not a substitute for that delivery path.
+
 That leaves the honeypot's `202` distinguishable from a real one, which it
 was not before. Telling them apart needs a bot that has registered, verified
 an address, signed in, and then filled in a field it cannot see — by which
@@ -1408,6 +1413,14 @@ is the failure it exists to prevent. The server refuses a reply that arrives
 without a usable one rather than inventing it — inventing it here would put the
 key back on the wrong side of the retry.
 
+Resolved and closed tickets do not show the composer. Contact rejects replies
+to those states, so offering a box that can only fail would imply the thread is
+still open. The ticket and its history remain readable.
+
+Ticket JSON and the contact-state response carry `Cache-Control: private,
+no-store`. They can include account details or a private conversation and must
+not become an intermediary cache entry merely because they are `GET` requests.
+
 **Nothing about a ticket's shape is assumed.** The service has published no
 schema for one, so the relay passes its JSON through whole rather than reshaping
 it, and [`tickets.js`](../crates/tinybird-web/src/assets/tickets.js) reads every
@@ -1428,11 +1441,13 @@ service takes it. The form links straight to it and `/contact` carries a
 standing link to the list. The emailed link still works and still matters — it
 is what reaches somebody who has closed the tab — but nobody has to wait for it.
 
-**The portal stays hosted.** Emailed ticket links open the service's own private
-page, which is right while this is a thing people run on `localhost`: a link has
-to work on whatever device opens the mail. Pointing the project's portal at
-`https://gba.0xstash.dev/support/tickets/{ticketId}` is a change made in the
-operator dashboard once that route is live, not from here.
+**The portal stays hosted until the production route passes acceptance.** A
+mailed link has to work on whatever device opens it, so Contact must not point at
+the custom page while `gba.0xstash.dev` has no reachable origin. Once that host
+passes authenticated ticket isolation and reply-idempotency checks, the project
+portal becomes
+`https://gba.0xstash.dev/support/tickets/{ticketId}`. The page asks the visitor
+to sign in and then reads only the tickets bound to that Auth subject.
 
 ---
 

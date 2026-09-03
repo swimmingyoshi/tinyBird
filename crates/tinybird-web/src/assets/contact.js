@@ -12,6 +12,8 @@ const $ = (id) => document.getElementById(id);
 let minMessage = 10;
 /** Whether the reply address comes from the session rather than the form. */
 let signedIn = false;
+/** The verified address Contact will acknowledge and support will answer. */
+let replyAddress = "";
 
 /** Say something under the Send button, in the tone the news deserves. */
 function sayContact(words, tone = "") {
@@ -28,11 +30,10 @@ function sayContact(words, tone = "") {
  * an id — an anonymous send, or a service that named none — the sentence stands
  * on its own, which is what it did before.
  */
-function saySent(ticket) {
+function saySent(ticket, email) {
   sayContact(
-    signedIn
-      ? "Sent. A reply goes to the address above, and onto your tickets. "
-      : "Sent. A reply goes to the address above.",
+    `Received. A confirmation is on its way${email ? ` to ${email}` : ""}. ` +
+      "Support will respond as soon as possible. ",
     "good",
   );
   if (!ticket) return;
@@ -70,6 +71,7 @@ async function render() {
 
   minMessage = state.minMessage ?? minMessage;
   signedIn = Boolean(state.signedIn);
+  replyAddress = signedIn && typeof state.email === "string" ? state.email : "";
   $("contact-message").minLength = minMessage;
 
   // Drawn before the gate check, because it is the one thing on this page
@@ -144,7 +146,8 @@ async function send() {
     $("contact-subject").value = "";
     $("contact-message").value = "";
     $("contact-note").textContent = "sent";
-    saySent(signedIn && typeof body.ticket === "string" ? body.ticket : "");
+    const email = signedIn ? replyAddress : $("contact-email").value.trim();
+    saySent(signedIn && typeof body.ticket === "string" ? body.ticket : "", email);
   } catch (error) {
     sayContact(error.message, "bad");
   } finally {

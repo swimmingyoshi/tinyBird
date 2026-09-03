@@ -12,6 +12,7 @@
 // rendering, and a field nobody anticipated is simply not drawn.
 
 import { mountChrome } from "/chrome.js";
+import { ticketIsLocked } from "/ticketstatus.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -354,6 +355,8 @@ async function drawTicket(id) {
   }
 
   const subject = pick(ticket, "subject", "title") || "(no subject)";
+  const state = String(pick(ticket, "status", "state")).toLowerCase();
+  const locked = ticketIsLocked(state);
   $("ticket-subject").textContent = subject;
   document.title = `tinyBird · ${subject}`;
   drawFacts(ticket);
@@ -361,14 +364,17 @@ async function drawTicket(id) {
   const box = $("reply-message");
   box.maxLength = maxReply;
   box.value = recall(DRAFT(id));
-  $("ticket-reply").hidden = false;
-  sayReply(
-    box.value
-      ? "Unsent, kept from last time. It sends as one message however many times you press the button."
-      : "Goes onto this ticket and reaches the same person by email.",
-  );
+  $("ticket-reply").hidden = locked;
+  $("ticket-locked").hidden = !locked;
+  if (!locked) {
+    sayReply(
+      box.value
+        ? "Unsent, kept from last time. It sends as one message however many times you press the button."
+        : "Goes onto this ticket and reaches the same person by email.",
+    );
+  }
 
-  note(pick(ticket, "status", "state").toLowerCase());
+  note(state);
   show("ticket-detail");
 }
 
