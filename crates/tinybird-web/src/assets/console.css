@@ -1,23 +1,4 @@
-/* tinyBird console
-   ----------------------------------------------------------------------
-   The page's job is to boot a cartridge, so the running screen is the hero
-   and everything else is instrumentation around it.
-
-   Two decisions carry the identity:
-
-   1. Everything is monospace. Nearly all the content is machine data — game
-      codes, HP values, byte counts, addresses — and a mono body face makes
-      those columns line up without tabular-figure tricks. Silkscreen, a true
-      bitmap face, is used only for headings and the cartridge label, where
-      its poor legibility at small sizes does not matter.
-
-   2. Amber marks identity, teal marks live data. The pair is inherited from
-      the desktop app's palette so the two frontends read as one product.
-
-   Hard edges throughout: no border-radius anywhere. A GBA is a moulded
-   plastic brick and a 240x160 grid of square pixels; rounding corners here
-   would fight both.
-   ---------------------------------------------------------------------- */
+/* Shared console components and the /play Playroom layout. */
 
 :root {
   /* Palette ------------------------------------------------------------ */
@@ -515,25 +496,6 @@ code {
      while the left is carrying party cards whose names wrap the moment the
      column gets tight. */
   grid-template-columns: 320px minmax(0, 1fr) 256px;
-}
-
-/* The way back, in the corner it would be looked for. Not a control — the key
-   does the work — just a reminder that the key exists. */
-.focus-exit {
-  position: fixed;
-  right: var(--gutter);
-  bottom: var(--gutter);
-  z-index: 5;
-  padding: 4px 8px;
-  background: var(--shell);
-  border: var(--edge);
-  color: var(--dim);
-  font-size: 10px;
-  pointer-events: none;
-}
-
-.rig[data-focus="off"] .focus-exit {
-  display: none;
 }
 
 /* Controls -------------------------------------------------------------- */

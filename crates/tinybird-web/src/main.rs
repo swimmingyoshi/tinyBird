@@ -79,7 +79,11 @@ const LOBBY_JS: &str = include_str!("assets/lobby.js");
 const LINK_JS: &str = include_str!("assets/link.js");
 const CONTROLS_JS: &str = include_str!("assets/controls.js");
 const STYLES_CSS: &str = include_str!("assets/styles.css");
-const CONSOLE_CSS: &str = include_str!("assets/console.css");
+const CONSOLE_CSS: &str = concat!(
+    include_str!("assets/console.css"),
+    include_str!("assets/site.css"),
+    include_str!("assets/playroom.css"),
+);
 const FFTA_HUMAN_PNG: &[u8] = include_bytes!("assets/ffta-races/human.png");
 const FFTA_BANGAA_PNG: &[u8] = include_bytes!("assets/ffta-races/bangaa.png");
 const FFTA_NU_MOU_PNG: &[u8] = include_bytes!("assets/ffta-races/nu-mou.png");
@@ -2241,7 +2245,13 @@ async fn ffta_job_png(Path(job): Path<String>) -> Response {
 }
 
 fn static_text(body: &'static str, content_type: &'static str) -> Response {
-    text(StatusCode::OK, body.to_string(), content_type)
+    let mut response = text(StatusCode::OK, body.to_string(), content_type);
+    // These stable asset URLs change when the server is rebuilt.
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
+    response
 }
 
 fn text(status: StatusCode, body: String, content_type: &'static str) -> Response {

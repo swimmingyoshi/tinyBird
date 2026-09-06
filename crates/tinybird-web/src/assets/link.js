@@ -51,24 +51,16 @@
 import { gzip, gunzip } from "./saveformat.js";
 
 /**
- * Instructions per slice while stepping a console.
- *
- * Nothing waits on the event loop here — the cable is resolved in this process
- * — so this only has to be large enough that the per-call overhead disappears.
- * The core stops a slice by itself the moment a transfer begins, which is the
- * boundary that actually matters, so a slice almost never runs to this bound.
+ * Alternate consoles in short instruction slices. Stopping the parent at a
+ * transfer is not enough: the child must also stop near that instant, before
+ * it changes its send register or checks its VBlank transfer count. A whole
+ * frame on the child reproduces FireRed's link error even with zero network
+ * latency and identical state hashes in both browsers.
  */
-const SLICE_STEPS = 0x40000;
+const SLICE_STEPS = 32;
 
-/**
- * How many times round the stepping loop before declaring a frame wedged.
- *
- * A frame is nine transfers and a handful of slices, so double figures is
- * normal. This is four thousand: high enough that no legitimate frame reaches
- * it, low enough that a wedge is caught within one frame rather than hanging
- * the page.
- */
-const MAX_ROUNDS = 4096;
+/** Bounded work even if a core stops advancing. Covers a full CPU-bound frame. */
+const MAX_ROUNDS = 65536;
 
 /** Frames of input history kept. Must exceed `MAX_DELAY` by a wide margin. */
 const RING = 256;
@@ -191,9 +183,14 @@ export class LinkSession {
   desyncedAt = null;
   /** Set when a frame could not be completed. */
   wedged = false;
+  /** Transfers carried locally, useful when diagnosing an in-game link error. */
+  transfers = 0;
+  /** Latest frame whose state hash matched the other browser. */
+  lastVerifiedFrame = 0;
 
   /** Input masks by frame and seat, as a ring. `UNKNOWN` where not yet known. */
   #inputs;
+  #clockOrigins;
   /** State hashes this browser computed, by frame, awaiting a peer's word. */
   #mine = new Map();
   /** State hashes the peer sent for frames this browser has not reached. */
@@ -204,6 +201,7 @@ export class LinkSession {
     this.consoles = consoles;
     this.mySeat = mySeat;
     this.delay = delay;
+    this.#clockOrigins = consoles.map(core => core.cycleCount ?? 0);
     this.#inputs = new Int32Array(RING * consoles.length).fill(UNKNOWN);
 
     // Nothing was pressed before the session began, and saying so lets the
@@ -258,6 +256,7 @@ export class LinkSession {
    * papers over.
    */
   acceptInput(seat, frame, keys) {
+    if (!Number.isInteger(seat) || !Number.isInteger(keys) || keys < 0 || keys > 0x3ff) return false;
     if (seat === this.mySeat || seat < 0 || seat >= this.consoles.length) return false;
     if (!Number.isSafeInteger(frame) || frame < this.frame) return false;
     if (frame >= this.frame + RING) return false;
@@ -310,6 +309,7 @@ export class LinkSession {
    * is wrong with the cable rather than with the network.
    */
   runFrame() {
+    if (!this.ready) return false;
     const cores = this.consoles;
     const targets = new Array(cores.length);
     for (let seat = 0; seat < cores.length; seat += 1) {
@@ -317,21 +317,38 @@ export class LinkSession {
       targets[seat] = cores[seat].frameCount + 1;
     }
 
+    const time = seat => cores[seat].cycleCount - this.#clockOrigins[seat];
     let finished = false;
     for (let round = 0; round < MAX_ROUNDS && !finished; round += 1) {
       let advanced = false;
 
-      for (let seat = 0; seat < cores.length; seat += 1) {
-        const core = cores[seat];
-        // A console with a transfer outstanding must not run: emulated time
-        // may not cross a transfer that has not been carried. Carrying it is
-        // the next thing this loop does.
-        if (core.frameCount >= targets[seat] || core.linkPending) continue;
-        core.runSlice(SLICE_STEPS);
-        advanced = true;
+      // Keep emulated clocks together, not instruction counts: one console
+      // can be doing DMA or waiting for VBlank while the other executes code.
+      if (cores[0].linkPending) {
+        const transferTime = time(0);
+        for (let seat = 1; seat < cores.length; seat += 1) {
+          if (!cores[seat].linkPending && time(seat) < transferTime) {
+            cores[seat].runSlice(SLICE_STEPS);
+            advanced = true;
+          }
+        }
+        if (cores.every((core, seat) => seat === 0 || core.linkPending || time(seat) >= transferTime)) {
+          if (carryTransfer(cores)) {
+            this.transfers += 1;
+            advanced = true;
+          }
+        }
+      } else {
+        let next = -1;
+        for (let seat = 0; seat < cores.length; seat += 1) {
+          if (cores[seat].frameCount >= targets[seat] || cores[seat].linkPending) continue;
+          if (next < 0 || time(seat) < time(next)) next = seat;
+        }
+        if (next >= 0) {
+          cores[next].runSlice(SLICE_STEPS);
+          advanced = true;
+        }
       }
-
-      if (carryTransfer(cores)) advanced = true;
 
       finished = true;
       for (let seat = 0; seat < cores.length; seat += 1) {
@@ -398,6 +415,7 @@ export class LinkSession {
     } else {
       this.#theirs.delete(frame);
       if (theirs !== value) this.desyncedAt = frame;
+      else this.lastVerifiedFrame = Math.max(this.lastVerifiedFrame, frame);
     }
     this.#forget();
     return this.desyncedAt;
@@ -411,6 +429,7 @@ export class LinkSession {
     } else {
       this.#mine.delete(frame);
       if (mine !== value) this.desyncedAt = frame;
+      else this.lastVerifiedFrame = Math.max(this.lastVerifiedFrame, frame);
     }
     this.#forget();
     return this.desyncedAt;
@@ -440,6 +459,7 @@ export class LinkSession {
       }
     }
     this.consoles = [this.local];
+    this.mySeat = 0;
   }
 }
 
@@ -466,12 +486,19 @@ export async function openSession({
   bios,
   makeConsole,
   resolveRom,
+  isCurrent = () => true,
 }) {
   const consoles = new Array(seats.length);
 
+  // Finish asynchronous preparation before touching the running cartridge.
+  const prepared = [];
   for (const entry of seats) {
-    const core = entry.seat === mySeat ? localEmu : await makeConsole();
     const rom = await resolveRom(entry);
+    const core = entry.seat === mySeat ? localEmu : await makeConsole();
+    prepared.push({ entry, core, rom });
+  }
+  if (!isCurrent()) throw new Error("Link setup cancelled");
+  for (const { entry, core, rom } of prepared) {
 
     core.loadRom(rom);
     // Before the state, which carries the BIOS with it but only if the state

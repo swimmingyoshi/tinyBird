@@ -8,17 +8,13 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Silkscreen:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Silkscreen:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/console.css" />
   </head>
   <body>
-    <!-- `data-focus` is the whole of focus mode: the header and the control
-         deck are hidden by CSS, the screen takes the room they left, and the
-         read-out rails stay because they are what you are reading while you
-         play. Tab switches it. -->
-    <div class="rig" id="rig" data-focus="off">
+    <div class="rig" id="rig" data-focus="off" data-play-view="desk">
       <!-- Chrome ------------------------------------------------------- -->
       <header class="bar">
         <a class="bar__mark" href="/">
@@ -45,6 +41,19 @@
       <!-- Frame rate and the last thing that happened. Above the deck rather
            than under it: this is the line you check while playing, and at the
            bottom of a tall page it was usually scrolled out of view. -->
+      <div class="play-toolbar">
+        <div class="play-toolbar__intro">
+          <span class="play-toolbar__eyebrow">THE PLAYROOM</span><h1 class="play-toolbar__title">A little time to play.</h1>
+          <span id="view-description">Your game, with everything you need close by</span>
+        </div>
+        <div class="view-picker" role="group" aria-label="Play view">
+          <button type="button" data-play-view-button="desk" aria-pressed="true">Desk</button>
+          <button type="button" data-play-view-button="focus" aria-pressed="false">Focus</button>
+          <button type="button" data-play-view-button="cinema" aria-pressed="false">Cinema</button>
+        </div>
+        <span class="play-toolbar__shortcut"><kbd>Tab</kbd> switch view</span>
+      </div>
+
       <div class="status">
         <span class="status__perf" id="foot-perf">—</span>
         <span class="status__msg" id="foot-msg" role="status" aria-live="polite"></span>
@@ -80,18 +89,20 @@
                      disk anyway. On the empty screen it is the thing you came to
                      do; once a game is running it is gone. -->
                 <div class="screen__empty" id="empty-state">
-                  <p class="screen__empty-title">No cartridge</p>
+                  <div class="empty-cartridge" aria-hidden="true"><span>tinyBird</span><i></i></div>
+                  <p class="screen__empty-title">Choose your next adventure.</p>
                   <p class="screen__empty-body">
-                    Drop a <code>.gba</code> file anywhere on this page, or pick one
-                    below.
+                    Open a Game Boy Advance ROM, or drag a <code>.gba</code> file onto this page.
                   </p>
                   <ul class="vault__list" id="vault-list">
                     <li class="vault__empty" id="vault-empty">Looking for ROMs…</li>
                   </ul>
                   <label class="key key--file" id="vault-load">
-                    Load a local ROM<span class="panel__note" id="vault-note"></span>
+                    Choose a game
                     <input type="file" id="file-rom" accept=".gba,.bin,.agb" hidden />
                   </label>
+                  <span class="library-notice" id="vault-note" role="status"></span>
+                  <p class="empty-help">Already have a save state? Open your game first, then use Save &amp; load.</p>
                 </div>
               </div>
               <figcaption class="lobby__caption screens__local-caption">
@@ -120,11 +131,8 @@
                the same thing pushed to an account. Each group now says what it
                is for, and every key carries the shortcut that also does it, so
                the deck teaches the keyboard instead of competing with it. -->
-          <div class="deckplate">
-            <section class="rack">
-              <p class="rack__label">Game</p>
-              <div class="rack__keys">
-                <button
+          <div class="transport" role="group" aria-label="Game controls">
+            <div class="transport__primary"><button
                   class="key"
                   id="btn-play"
                   type="button"
@@ -134,25 +142,7 @@
                 >
                   Resume
                 </button>
-                <button
-                  class="key"
-                  id="btn-reset"
-                  type="button"
-                  disabled
-                  title="Restart the cartridge from its boot screen"
-                >
-                  Reset
-                </button>
-                <button
-                  class="key"
-                  id="btn-eject"
-                  type="button"
-                  disabled
-                  title="Take the cartridge out and clear the machine"
-                >
-                  Eject
-                </button>
-                <button
+              <button
                   class="key"
                   id="btn-ff"
                   type="button"
@@ -162,7 +152,24 @@
                 >
                   Fast forward<kbd class="key__hint" data-shortcut="FAST_FORWARD"></kbd>
                 </button>
-                <button
+            </div>
+            <div class="transport__secondary"><button
+                  class="key"
+                  id="btn-lobby"
+                  type="button"
+                  title="Host or join a room and play alongside other people"
+                >
+                  Lobby / Link cable<span class="key__badge" id="lobby-badge" hidden>in</span>
+                </button>
+              <button
+                  class="key"
+                  id="btn-controls"
+                  type="button"
+                  title="Change the keyboard and controller bindings"
+                >
+                  Controls<span class="key__badge" id="pad-badge" hidden>pad</span>
+                </button>
+              <button
                   class="key"
                   id="btn-full"
                   type="button"
@@ -171,14 +178,20 @@
                 >
                   Full screen
                 </button>
-              </div>
-            </section>
-
-            <section class="rack">
+            </div>
+          </div>
+          <div class="deckplate tools">
+            <div class="tools__nav" role="group" aria-label="Game tools">
+              <button type="button" class="tool-tab" aria-expanded="false" aria-controls="tool-saves" data-tool="saves">Save &amp; load <span>01</span></button>
+              <button type="button" class="tool-tab" aria-expanded="false" aria-controls="tool-settings" data-tool="settings">Audio &amp; video <span>02</span></button>
+              <button type="button" class="tool-tab" aria-expanded="false" aria-controls="tool-cartridge" data-tool="cartridge">Cartridge <span>03</span></button>
+            </div>
+            <div class="tool-body" id="tool-saves" hidden>
+              <section class="rack">
               <p class="rack__label">
-                Save states<span class="rack__note">a snapshot of the whole machine</span>
+                Save states<span class="rack__note">Resume from this exact moment</span>
               </p>
-              <div class="rack__keys">
+              <p class="tool-description">Save states capture this moment. Use the game's own Save option to keep normal progress on the cartridge.</p><div class="rack__keys">
                 <button
                   class="key"
                   id="btn-save"
@@ -223,8 +236,9 @@
                 </button>
               </div>
             </section>
-
-            <section class="rack">
+            </div>
+            <div class="tool-body" id="tool-settings" hidden>
+              <section class="rack">
               <p class="rack__label">Sound and picture</p>
               <div class="rack__keys rack__keys--dials">
                 <label class="dial">
@@ -256,41 +270,36 @@
                 </label>
               </div>
             </section>
+            </div>
+            <div class="tool-body" id="tool-cartridge" hidden>
+              <section class="rack">
+              <p class="rack__label">Cartridge</p>
+              <p class="tool-description">Restart this game or remove the cartridge to choose another one.</p><div class="rack__keys">
 
-            <section class="rack">
-              <p class="rack__label">Setup</p>
-              <div class="rack__keys">
                 <button
                   class="key"
-                  id="btn-controls"
+                  id="btn-reset"
                   type="button"
-                  title="Change the keyboard and controller bindings"
+                  disabled
+                  title="Restart the cartridge from its boot screen"
                 >
-                  Controls<span class="key__badge" id="pad-badge" hidden>pad</span>
+                  Reset
                 </button>
                 <button
                   class="key"
-                  id="btn-lobby"
+                  id="btn-eject"
                   type="button"
-                  title="Host or join a room and play alongside other people"
+                  disabled
+                  title="Take the cartridge out and clear the machine"
                 >
-                  Lobby<span class="key__badge" id="lobby-badge" hidden>in</span>
+                  Eject
                 </button>
-              </div>
-              <!-- The stream overlay is switched off while it is reworked: it
-                   reads the desktop app's export rather than the emulator in
-                   this page, so on a server run by itself it shows a snapshot
-                   that never changes. The control stays in the markup, hidden,
-                   rather than being deleted — everything it drives still works
-                   and comes back with one attribute. `/overlay` says the same
-                   thing server-side, and TINYBIRD_WEB_OVERLAY=1 re-enables. -->
-              <div class="rack__toggles" hidden>
-                <label class="toggle" title="Show the OBS stream overlay under the deck">
-                  <input type="checkbox" id="opt-overlay" />
-                  <span>Stream overlay</span>
-                </label>
+
+
               </div>
             </section>
+            </div>
+            <div hidden><input type="checkbox" id="opt-overlay" /></div>
           </div>
 
           <!-- Filled in from the live bindings, so it cannot contradict them. -->
@@ -304,6 +313,8 @@
              Tabs rather than a stack because a party of six is taller than the
              screen it describes, and spreading the sections over two rails is
              how you get to see two of them at once. -->
+        <div class="companion">
+          <div class="companion__head"><span class="companion__dot" aria-hidden="true"></span><h2>Game companion</h2><span>DETAILS</span></div>
         <aside class="readout readout--addons">
           <section class="panel deckpanel" id="live-panel" hidden>
             <p class="panel__eyebrow rail__head">
@@ -316,15 +327,7 @@
           <!-- Only ever seen with no cartridge in: once a ROM loads, the
                cartridge addon claims whatever no other addon does, so the
                panel above always has something to say. -->
-          <p class="rail-note" id="addon-empty">
-            Addons read the running game's memory as it plays and report what
-            is inside it — your party and its health, where you are standing,
-            what you are fighting.
-            <br /><br />
-            FireRed and LeafGreen are covered in full, Final Fantasy Tactics
-            Advance in part, and every other cartridge falls back to its header
-            and save type. Load one and it appears here.
-          </p>
+          <p class="rail-note" id="addon-empty">Your game at a glance.<br /><br />Load a game to see supported live details here: your party, health, location and progress.</p>
         </aside>
 
         <!-- Cartridge, saves, library ----------------------------------- -->
@@ -388,6 +391,7 @@
                that looks the page up by id, including us. -->
           <div id="pane-park" hidden></div>
         </aside>
+        </div>
       </main>
 
       <!-- Lobby.
@@ -397,37 +401,42 @@
            the part that stays, and it does not need the room code, the join
            field and the member list sitting under it for the rest of the
            evening. -->
-      <dialog class="sheet" id="lobby-sheet">
+      <dialog class="sheet" id="lobby-sheet" aria-label="Lobby and link cable">
         <form method="dialog" class="sheet__head">
           <p class="panel__eyebrow">
-            Lobby<span class="panel__note" id="lobby-note"></span>
+            Lobby &amp; link cable<span class="panel__note" id="lobby-note"></span>
           </p>
           <button class="key key--slim" type="submit">Close</button>
         </form>
 
         <div class="sheet__body">
           <div id="lobby-out">
+            <div class="lobby-intro"><span class="section-kicker">TWO PLAYERS. ONE CONNECTION.</span><h2>Better with a friend.</h2><p>Start a room and share the code, or join a friend who is already playing.</p></div>
+            <p class="lobby-step">Join with a room code</p>
             <div class="lobby__row">
               <input
                 type="text"
                 id="lobby-code"
                 placeholder="Room code"
+                aria-label="Room code"
                 maxlength="16"
                 autocomplete="off"
                 spellcheck="false"
               />
               <button class="key key--slim" id="btn-join" type="button">Join</button>
             </div>
+            <div class="lobby-divider"><span>or host your own</span></div>
             <button class="key key--slim key--wide" id="btn-host" type="button">
               Start a room
             </button>
             <p class="lobby__hint" id="lobby-hint">
-              Share the code and play together. Each player runs their own copy;
-              only the read-out is shared.
+              Load a game on each device. Start a room, share its code, then
+              enable Link cable on both screens to play together.
             </p>
           </div>
 
           <div id="lobby-in" hidden>
+            <p class="lobby-step">Your room code <span>Share this with your friend</span></p>
             <p class="lobby__code">
               <span id="lobby-room">—</span>
               <button class="saves__act" id="btn-copy-code" type="button">copy</button>
@@ -445,10 +454,14 @@
               <input type="checkbox" id="opt-link" />
               <span>Link cable</span>
             </label>
-            <p class="lobby__hint" id="lobby-link-note">
+            <p class="lobby__hint" id="lobby-link-note" role="status" aria-live="polite">
               Off. Games will not see each other.
             </p>
 
+            <button class="key key--slim" id="btn-link-retry" type="button" hidden>Reconnect cable</button>
+            <p class="lobby__hint">Each browser needs both cartridges when playing different games.
+              Keep both tabs running during a trade or battle. Use the multiplayer
+              area inside each game once the cable says Connected.</p>
             <ul class="lobby__list" id="lobby-members"></ul>
           </div>
         </div>
@@ -459,7 +472,7 @@
            The rail can only ever show a thumbnail, and a 240x160 picture shown
            at 60px is a reminder that a screenshot exists rather than a way to
            look at one. -->
-      <dialog class="sheet sheet--shot" id="shot-viewer">
+      <dialog class="sheet sheet--shot" id="shot-viewer" aria-label="Screenshot">
         <form method="dialog" class="sheet__head">
           <p class="panel__eyebrow">
             Screenshot<span class="panel__note" id="shot-when"></span>
@@ -482,7 +495,7 @@
            do once and then never think about, and it needs the whole keyboard
            to itself while it is open — a page listening for the next keypress
            cannot also be a page you can tab around. -->
-      <dialog class="sheet" id="controls-sheet">
+      <dialog class="sheet" id="controls-sheet" aria-label="Controls">
         <form method="dialog" class="sheet__head">
           <p class="panel__eyebrow">Controls</p>
           <button class="key key--slim" id="btn-controls-close" type="submit">Close</button>
@@ -504,7 +517,7 @@
         </div>
       </dialog>
 
-      <p class="focus-exit" aria-hidden="true">Tab to leave focus mode</p>
+
 
       <!-- The real OBS overlay, embedded and fed by the emulator in this page
            rather than by the desktop app's JSON export. Same page, same code. -->

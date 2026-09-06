@@ -1,0 +1,85 @@
+/* Shared website tokens, components, and content layouts.
+   Served after console primitives and before the isolated Playroom layout. */
+:root {
+  --body: "Inter", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --void: #06090f;
+  --shell: #111923;
+  --rule: #293746;
+  --ink: #edf2f8;
+  --dim: #a2b0c2;
+  --primary: #b9eed4;
+  --radius: 12px;
+}
+code, pre, kbd { font-family: var(--mono); }
+.rig { max-width: 1600px; padding: 24px 36px; gap: 24px; font-size: 14px; }
+.bar { flex-wrap: wrap; padding-bottom: 20px; }
+.bar__nav { gap: 24px; font-size: 13px; }
+.bar__nav a { padding-block: 8px; }
+.bar__state { font-size: 10px; }
+.key { min-height: 44px; padding: 11px 16px; border-radius: 8px; background: #1a2532; font: 500 13px var(--body); letter-spacing: 0; }
+.key:hover:not(:disabled) { background: #263646; border-color: #6b9b91; }
+.key--lead, .key--lead:hover { background: var(--primary); color: #102b23; border-color: var(--primary); }
+.panel { border-radius: var(--radius); background: var(--shell); }
+.panel__eyebrow { font: 600 12px var(--body); letter-spacing: .04em; }
+.panel__lead, .panel__foot { font-size: 14px; line-height: 1.8; color: var(--dim); }
+.panel__note { overflow-wrap: anywhere; }
+.sheet { border-radius: 16px; background: var(--shell); width: min(620px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); }
+.sheet::backdrop { background: #040a12ba; backdrop-filter: blur(6px); }
+.sheet__head, .sheet__body, .sheet__lead, .sheet__foot { padding: 20px 24px; }
+.account__toggle { min-height: 36px; border-radius: 7px; padding: 8px 12px; }
+.account__menu { border-radius: 12px; max-width: calc(100vw - 24px); }
+input, select, textarea { font: inherit; color-scheme: dark; }
+.contact__field input, .contact__field select, .contact__field textarea,
+.account input { border-radius: 8px; padding: 12px; background: #0b131d; border: var(--edge); min-width: 0; }
+.contact__field { font-size: 13px; gap: 8px; }
+.contact__hint, .contact__as, .contact__gate { font-size: 13px; line-height: 1.8; }
+.foot { color: var(--dim); line-height: 1.8; }
+.site-page { max-width: 1280px; }
+.site-page main { min-width: 0; width: 100%; }
+.site-page main > .panel { margin-bottom: 24px; padding: 24px; }
+.site-page .hero { padding: 48px 0 40px; }
+.site-page .hero__title { font: 600 clamp(32px, 4.5vw, 58px)/1.12 var(--body); letter-spacing: -.045em; max-width: 22ch; }
+.site-page .hero--slim .hero__title { font-size: clamp(30px, 4vw, 44px); }
+.site-page .hero__lede { font-size: 16px; line-height: 1.85; max-width: 65ch; }
+.site-page .hero__kicker { font: 600 11px var(--body); letter-spacing: .15em; margin-bottom: 20px; }
+.site-page .home { gap: 48px; }
+.site-page .strip__title { font: 600 20px var(--body); letter-spacing: -.02em; text-transform: none; color: var(--ink); padding-bottom: 16px; }
+.site-page .strip__lede { font-size: 14px; }
+.site-page .tiles, .site-page .split { grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 20px; }
+.site-page .tile { padding: 24px; border-radius: var(--radius); gap: 12px; border-top-width: 1px; }
+.site-page .tile--go, .site-page .tile--link { border-top-color: var(--rule); }
+.site-page .tile__index { color: var(--dim); font-family: var(--mono); }
+.site-page .tile__name { font-size: 19px; letter-spacing: -.02em; }
+.site-page .tile__body, .site-page .tile__link { font-size: 14px; line-height: 1.8; }
+.site-page .tile__link { color: var(--primary); padding-top: 12px; }
+.site-page .code { border-radius: 8px; max-width: 100%; }
+.site-page .roster dd, .site-page .roster dt, .site-page .track__body,
+.site-page .track__head, .site-page .facts dd { font-size: 14px; }
+.site-page .roster > div { padding-block: 12px; }
+.site-page .facts dt { color: var(--dim); }
+.site-page .facts dd { overflow-wrap: anywhere; }
+.site-page .track { gap: 24px; }
+.site-page .track__tag { border-radius: 5px; font-family: var(--body); }
+.site-page .tickets__link { border-radius: 10px; padding: 18px; gap: 12px; }
+.site-page .tickets__subject { font-size: 16px; overflow-wrap: anywhere; }
+.site-page .tickets__meta { line-height: 1.8; }
+@media (max-width: 700px) {
+  .rig { padding: 20px; }
+  .bar { gap: 12px; }
+  .bar__nav { order: 3; width: 100%; margin-left: 0; gap: 20px; overflow-x: auto; }
+  .bar__state { display: none; }
+  .account { margin-left: auto; }
+  .site-page .hero { padding: 28px 0; }
+  .site-page .home { gap: 32px; }
+  .site-page .contact__row { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 400px) {
+  .rig { padding: 16px 12px; }
+  .bar__nav { gap: 16px; }
+  .site-page .tile, .site-page main > .panel { padding: 18px; }
+  .hero__actions .key { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
