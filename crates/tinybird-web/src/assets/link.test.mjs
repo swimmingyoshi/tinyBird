@@ -9,13 +9,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { LinkSession, carryTransfer, delayForRoundTrip } from "./link.js";
+import { LinkSession, carryTransfer, delayForRoundTrip, openSession } from "./link.js";
 
 /** A console that counts what was done to it. */
 function fakeConsole(seat) {
   return {
     seat,
     frameCount: 0,
+    cycleCount: 0,
     linkPending: false,
     linkBusy: false,
     linkSendValue: 0x1000 + seat,
@@ -31,6 +32,7 @@ function fakeConsole(seat) {
       // A slice stops at a transfer; otherwise it finishes the frame.
       if (this.linkPending) return false;
       this.frameCount += 1;
+      this.cycleCount += 256;
       return true;
     },
     linkJoin() {
@@ -210,4 +212,110 @@ test("detaching unplugs every console and keeps the player's own", () => {
   session.detach();
   for (const console of [mine]) assert.equal(console.disconnected, true);
   assert.deepEqual(session.consoles, [mine], "the other seat is let go of");
+});
+
+
+test("waiting frames cannot consume unknown buttons", () => {
+  const session = makeSession({ delay: 1 });
+  session.runFrame();
+  assert.equal(session.runFrame(), false);
+  assert.equal(session.frame, 1);
+  assert.equal(session.wedged, false);
+});
+
+test("detaching Player 2 preserves local access and is repeatable", () => {
+  const session = makeSession({ mySeat: 1 });
+  const mine = session.local;
+  session.detach();
+  assert.equal(session.local, mine);
+  session.detach();
+  assert.equal(session.local, mine);
+});
+
+test("invalid input cannot write fractional seats or coerced buttons", () => {
+  const session = makeSession();
+  for (const [seat, keys] of [[0.5, 1], [1, NaN], [1, -1], [1, 1024]]) {
+    assert.equal(session.acceptInput(seat, 3, keys), false);
+  }
+});
+
+test("cancelled setup never replaces the local cartridge", async () => {
+  let loads = 0;
+  const local = { loadRom() { loads++; } };
+  await assert.rejects(openSession({
+    id: "cancelled", seats: [{ seat: 0 }, { seat: 1 }], mySeat: 0,
+    localEmu: local, delay: 3, seed: 0,
+    resolveRom: async () => new Uint8Array(1),
+    makeConsole: async () => ({}), isCurrent: () => false,
+  }), /cancelled/);
+  assert.equal(loads, 0);
+});
+
+test("missing peer cartridge leaves the local game untouched", async () => {
+  let loads = 0;
+  await assert.rejects(openSession({
+    id: "missing", seats: [{ seat: 0 }, { seat: 1 }], mySeat: 0,
+    localEmu: { loadRom() { loads++; } }, delay: 3, seed: 0,
+    resolveRom: async (entry) => {
+      if (entry.seat === 1) throw new Error("missing cartridge");
+      return new Uint8Array(1);
+    }, makeConsole: async () => ({}),
+  }), /missing cartridge/);
+  assert.equal(loads, 0);
+});
+
+
+test("a child cannot run past its send-register update before a pending transfer is carried", () => {
+  const parent = fakeConsole(0);
+  const child = fakeConsole(1);
+  let parentTime = 0;
+  let childTime = 0;
+  let transferred = false;
+  parent.runSlice = (steps) => {
+    parentTime = Math.min(parentTime + steps, transferred ? 256 : 16);
+    parent.cycleCount = parentTime;
+    if (!transferred && parentTime === 16) parent.linkPending = true;
+    if (parentTime === 256) parent.frameCount = 1;
+  };
+  child.runSlice = (steps) => {
+    childTime = Math.min(childTime + steps, 256);
+    child.cycleCount = childTime;
+    // Software prepares a different halfword later in the frame. The first
+    // transfer must sample the current halfword, not that future one.
+    child.linkSendValue = childTime < 128 ? 0x1234 : 0xabcd;
+    if (childTime === 256) child.frameCount = 1;
+  };
+  parent.linkDeliver = (values) => {
+    assert.equal(values[1], 0x1234, "the child's future send value crossed the cable");
+    transferred = true;
+    parent.linkPending = false;
+  };
+  const session = new LinkSession({ id: "timing", consoles: [parent, child], mySeat: 0, delay: 2 });
+  assert.equal(session.runFrame(), true);
+  assert.equal(transferred, true);
+});
+
+
+test("different instruction speeds still sample the child at the parent's clock", () => {
+  const parent = fakeConsole(0);
+  const child = fakeConsole(1);
+  let transferred = false;
+  parent.runSlice = steps => {
+    parent.cycleCount = Math.min(parent.cycleCount + steps * 8, transferred ? 1024 : 512);
+    if (!transferred && parent.cycleCount === 512) parent.linkPending = true;
+    if (parent.cycleCount === 1024) parent.frameCount = 1;
+  };
+  child.runSlice = steps => {
+    child.cycleCount = Math.min(child.cycleCount + steps, 1024);
+    if (child.cycleCount === 1024) child.frameCount = 1;
+  };
+  parent.linkDeliver = () => {
+    assert.ok(child.cycleCount >= 512 && child.cycleCount < 600,
+      `child was at cycle ${child.cycleCount} when the parent transferred at 512`);
+    parent.linkPending = false;
+    transferred = true;
+  };
+  const session = new LinkSession({ id: "clocks", consoles: [parent, child], mySeat: 0, delay: 2 });
+  assert.equal(session.runFrame(), true);
+  assert.equal(session.transfers, 1);
 });

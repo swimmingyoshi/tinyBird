@@ -200,16 +200,17 @@ const heldKeys = new Set();
 let heldPad = new Set();
 
 function onKey(event, down) {
-  // Let the browser have the page while the user is typing, and let the
-  // rebinding panel have every key while it is listening for one.
   if (capturing) return;
-  if (event.target instanceof HTMLInputElement) return;
-  if (event.target instanceof HTMLSelectElement) return;
-
+  const interactive = event.target instanceof Element && event.target.closest(
+    "button, input, select, textarea, a, label, summary, [role=button], [contenteditable=true]",
+  );
+  const inDialog = document.querySelector("dialog[open]");
+  // Space and Enter activate the focused UI control, not the game. Always
+  // release keys that began in the game even if focus moved before keyup.
+  if (down && (interactive || inDialog)) return;
   const action = controls.actionForKey(event.code);
-  if (action === null) return;
-
-  event.preventDefault();
+  if (action === null || (!down && !heldKeys.has(action))) return;
+  if (!interactive && !inDialog) event.preventDefault();
   if (down) heldKeys.add(action);
   else heldKeys.delete(action);
   applyInput();
@@ -227,7 +228,9 @@ function applyInput() {
   const mask = Controls.maskFor(held);
   if (mask !== buttons) {
     buttons = mask;
-    if (emu) emu.setButtons(buttons);
+    // Linked input belongs to a future frame. Mutating just this console now
+    // would make state hashes depend on when a keyboard event arrived.
+    if (emu && !session) emu.setButtons(buttons);
   }
   // The deck button latches and the binding is momentary, so either one alone
   // is enough. Without the latch in this expression, pressing any other key
@@ -238,9 +241,9 @@ function applyInput() {
 /** Fast forward switched on at the deck, as opposed to held on an input. */
 let ffLatched = false;
 
-// --- focus mode ---------------------------------------------------------
+// --- play views ---------------------------------------------------------
 //
-// Tab hides the header and the deck and leaves the game and the read-out.
+// Tab cycles Desk, Focus (game and read-outs), and Cinema (games only).
 //
 // Taking Tab is not free: it is how a keyboard moves between controls, and a
 // page that swallows it everywhere is a page that cannot be used without a
@@ -248,13 +251,60 @@ let ffLatched = false;
 // nothing focused, no dialog open — and never when someone has bound it to the
 // game themselves. Tabbing through the deck still works.
 
-function setFocusMode(on) {
-  el.rig.dataset.focus = on ? "on" : "off";
-  remember("focus", on ? "on" : "off");
-  // The screen is sized to its container, and the container just changed.
+const playViews = ["desk", "focus", "cinema"];
+const viewDescriptions = {
+  desk: "Your game, with everything you need close by",
+  focus: "Game and live details. Esc returns to Desk",
+  cinema: "Wide screen, essential controls. Esc returns to Desk",
+};
+
+function setPlayView(view, announce = true) {
+  if (!playViews.includes(view)) view = "desk";
+  el.rig.dataset.playView = view;
+  el.rig.dataset.focus = view === "desk" ? "off" : "on";
+  remember("play-view", view);
+  document.querySelectorAll("[data-play-view-button]").forEach(button => {
+    button.setAttribute("aria-pressed", String(button.dataset.playViewButton === view));
+  });
+  document.querySelector("#view-description").textContent = viewDescriptions[view];
   fitScreen();
-  say(on ? "Focus mode. Tab to leave." : "");
+  if (announce) say(`${view[0].toUpperCase() + view.slice(1)} view. Tab switches views.`);
 }
+
+for (const button of document.querySelectorAll("[data-play-view-button]")) {
+  button.addEventListener("click", () => setPlayView(button.dataset.playViewButton));
+}
+
+// Keep secondary tools out of the play area until they are needed.
+for (const button of document.querySelectorAll("[data-tool]")) {
+  button.addEventListener("click", () => {
+    const opening = button.getAttribute("aria-expanded") !== "true";
+    for (const tab of document.querySelectorAll("[data-tool]")) {
+      const selected = tab === button && opening;
+      tab.setAttribute("aria-expanded", String(selected));
+      $(tab.getAttribute("aria-controls")).hidden = !selected;
+    }
+    if (opening) requestAnimationFrame(() => {
+      $(button.getAttribute("aria-controls")).scrollIntoView({
+        block: "nearest",
+        behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      });
+    });
+  });
+}
+
+// Native file inputs stay visually hidden; their labels expose keyboard access.
+for (const [label, input] of [[el.loadState, el.fileState], [$("vault-load"), el.fileRom]]) {
+  label.tabIndex = 0;
+  label.setAttribute("role", "button");
+  label.addEventListener("keydown", event => {
+    if (!["Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    if (!input.disabled) input.click();
+  });
+}
+el.canvas.tabIndex = 0;
+el.canvas.addEventListener("pointerdown", () => el.canvas.focus({ preventScroll: true }));
 
 function focusModeWantsTab(event) {
   if (event.code !== "Tab" || event.altKey || event.ctrlKey || event.metaKey) return false;
@@ -273,17 +323,20 @@ window.addEventListener(
   (event) => {
     if (!focusModeWantsTab(event)) return;
     event.preventDefault();
-    setFocusMode(el.rig.dataset.focus !== "on");
+    if (event.repeat) return;
+    const index = playViews.indexOf(el.rig.dataset.playView);
+    setPlayView(playViews[(index + (event.shiftKey ? 2 : 1)) % playViews.length]);
   },
   true,
 );
 
 // Escape leaves as well, because it is what everyone tries first.
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && el.rig.dataset.focus === "on") setFocusMode(false);
+  if (event.key === "Escape" && el.rig.dataset.playView !== "desk"
+      && !document.querySelector("dialog[open]")) setPlayView("desk");
 });
 
-setFocusMode(recall("focus") === "on");
+setPlayView(recall("play-view") ?? (recall("focus") === "on" ? "focus" : "desk"), false);
 
 window.addEventListener("keydown", (e) => onKey(e, true));
 window.addEventListener("keyup", (e) => onKey(e, false));
@@ -790,7 +843,7 @@ function tick(now) {
   // page, so a transfer costs a function call and there is nothing to freeze
   // for. What a session waits on instead is the next frame's input, which is
   // once a frame rather than nine times, and `runLockstep` handles it.
-  const linkWaiting = !session && (emu.linkPending || heldAtBarrier(now));
+  const linkWaiting = !session && (sessionPhase === "opening" || emu.linkPending || heldAtBarrier(now));
   if (linkWaiting) frameClock = 0;
 
   const unlimited = fastForward && fastForwardSpeed === 0;
@@ -1315,8 +1368,8 @@ function buildSlot(side, index, available, item) {
   const other = side === "left" ? "right" : "left";
   head.append(
     railButton(
-      side === "left" ? "move \u2192" : "\u2190 move",
-      `Show ${item.title} in the ${other} column instead`,
+      side === "left" ? "move right" : "move left",
+      `Show ${item.title} in the ${side === "left" ? "right" : "left"} companion group`,
       () => moveTo(item.id, other),
     ),
   );
@@ -1794,6 +1847,7 @@ function setControlsEnabled(enabled) {
   // why rather than leaving a dead control unexplained.
   el.fileState.disabled = !enabled;
   el.loadState.dataset.disabled = String(!enabled);
+  el.loadState.setAttribute("aria-disabled", String(!enabled));
   el.loadState.title = enabled
     ? "Open a save state from this computer"
     : "Load a game first — a save state does not carry one";
@@ -2242,6 +2296,9 @@ function reseatCable() {
  */
 function renderLinkNote() {
   if (!el.linkNote) return;
+  paintLobbyBadge();
+  $("btn-link-retry").hidden = sessionPhase !== "failed";
+  el.linkNote.dataset.tone = "";
   if (!el.link.checked) {
     el.linkNote.textContent = "Off. Games will not see each other.";
     return;
@@ -2267,17 +2324,14 @@ function renderLinkNote() {
           ? "Starting both consoles…"
           : sessionPhase === "offering"
             ? "Offering this console…"
-            : "Waiting for a second console.";
+            : !emu?.hasRom
+              ? "Load your game first, then enable the cable on both screens."
+              : "Waiting for Player 2. Both players must load a game and enable Link cable.";
       return;
     }
-    const who =
-      session.mySeat === 0
-        ? `Player 1 of ${session.players}, driving the cable`
-        : `Player ${session.mySeat + 1} of ${session.players}`;
-    const stalls = stalledFrames > 0 ? ` · ${stalledFrames} waits` : "";
-    el.linkNote.textContent =
-      `${who} · ${session.players} consoles here · ${session.delay}f delay` +
-      ` · ${session.bufferedFrames}f buffered${stalls}`;
+    el.linkNote.textContent = waitingSince > 0 && performance.now() - waitingSince > 750
+      ? `Player ${session.mySeat + 1}: Waiting for the other player. Keep both game tabs open and running.`
+      : `Connected: Player ${session.mySeat + 1} of ${session.players}. Open the multiplayer area in both games.`;
     return;
   }
 
@@ -2387,12 +2441,16 @@ const LOCKSTEP = new URLSearchParams(window.location.search).get("relay") !== "1
 
 /** The live session, or null. */
 let session = null;
+let sessionGeneration = 0;
+let openingSessionId = "";
+let pendingInputs = [];
 /** `off`, `offering`, `opening`, `live` or `failed`. */
 let sessionPhase = "off";
 /** Why the last session stopped, for the read-out. */
 let sessionNote = "";
 /** What every seated console published about itself, by member id. */
 const hellos = new Map();
+let helloReannounced = false;
 /**
  * Which console each member is, by member id.
  *
@@ -2422,6 +2480,7 @@ let helloSentAt = 0;
 let relayRoundTripMs = 60;
 /** Frames the session wanted to run but could not, for want of input. */
 let stalledFrames = 0;
+let waitingSince = 0;
 /** Library listing, fetched once when a session needs somebody else's game. */
 let libraryCache = null;
 
@@ -2456,8 +2515,10 @@ async function offerConsole() {
   sessionNote = "";
   renderLinkNote();
 
+  const generation = sessionGeneration;
   try {
     const state = await packState(emu.saveState());
+    if (generation !== sessionGeneration || !lockstepWanted()) return;
     helloSentAt = performance.now();
     lobby.publishLinkHello({
       seat: mySeat(),
@@ -2467,7 +2528,7 @@ async function offerConsole() {
       state,
     });
   } catch (error) {
-    failSession(`could not offer this console: ${error.message}`);
+    if (generation === sessionGeneration) failSession(`could not offer this console: ${error.message}`);
   }
 }
 
@@ -2479,7 +2540,20 @@ async function offerConsole() {
  * terms on every machine rather than three machines' opinions.
  */
 function acceptHello(from, message) {
+  if (!lockstepWanted()) return;
+  if (sessionPhase === "failed" && from !== lobby.you) endSession();
   hellos.set(from, message);
+
+  // The other player may enable the cable long after our first offer.
+  // Repeat it once when both offers are present, before the parent begins.
+  const ownHello = hellos.get(lobby.you);
+  if (sessionPhase === "offering" && ownHello && hellos.size > 1 && !helloReannounced) {
+    helloReannounced = true;
+    lobby.publishLinkHello({
+      seat: ownHello.seat, romHash: ownHello.rom_hash,
+      romName: ownHello.rom_name, gameCode: ownHello.game_code, state: ownHello.state,
+    });
+  }
 
   if (from === lobby.you && helloSentAt) {
     // Our own hello coming back has been to the server and returned, which is
@@ -2541,6 +2615,9 @@ async function beginSession(message) {
     });
   }
 
+  const generation = sessionGeneration;
+  openingSessionId = message.session;
+  pendingInputs = [];
   sessionPhase = "opening";
   sessionNote = "";
   sessionSeats = new Map(ids.map((id, seat) => [id, seat]));
@@ -2554,7 +2631,7 @@ async function beginSession(message) {
 
     for (const entry of entries) entry.state = await unpackState(entry.packed);
 
-    session = await openSession({
+    const opened = await openSession({
       id: message.session,
       seats: entries,
       mySeat: mine,
@@ -2564,16 +2641,27 @@ async function beginSession(message) {
       bios: biosBytes,
       makeConsole: () => spareConsole(entries.length),
       resolveRom: resolvePeerRom,
+      isCurrent: () => generation === sessionGeneration,
     });
 
+    if (generation !== sessionGeneration) return;
+    session = opened;
+    for (const input of pendingInputs) {
+      if (!session.acceptInput(input.seat, input.frame, input.keys)) {
+        throw new Error("The other player got too far ahead during setup. Reconnect the cable.");
+      }
+    }
+    pendingInputs = [];
+    openingSessionId = "";
     sessionPhase = "live";
     stalledFrames = 0;
+    waitingSince = 0;
     framesOwed = 0;
     frameClock = 0;
     running = true;
-    say(`Linked with ${entries.length - 1} other player. Running both consoles here.`);
+    say(`Link connected. You are Player ${mine + 1}. Open the multiplayer area in both games.`);
   } catch (error) {
-    failSession(error.message);
+    if (generation === sessionGeneration) failSession(error.message);
   } finally {
     renderLinkNote();
   }
@@ -2634,16 +2722,22 @@ async function resolvePeerRom(entry) {
 
 /** Stop the session, saying why. */
 function failSession(reason) {
+  if (openingSessionId && lobby?.connected) lobby.publishLinkBye(openingSessionId);
+  sessionGeneration += 1;
+  openingSessionId = "";
+  pendingInputs = [];
   if (session) {
-    session.detach();
+    if (lobby?.connected) lobby.publishLinkBye(session.id);
     for (let seat = 0; seat < session.consoles.length; seat += 1) {
       if (seat !== session.mySeat) peerConsoles.set(seat, session.consoles[seat]);
     }
   }
+  session?.detach();
   session = null;
   sessionPhase = "failed";
   sessionNote = reason;
   hellos.clear();
+  helloReannounced = false;
   begunSession = "";
   say(`Link stopped: ${reason}`, "bad");
   renderLinkNote();
@@ -2651,6 +2745,10 @@ function failSession(reason) {
 
 /** Take the session down without calling it a failure. */
 function endSession() {
+  if (openingSessionId && lobby?.connected) lobby.publishLinkBye(openingSessionId);
+  sessionGeneration += 1;
+  openingSessionId = "";
+  pendingInputs = [];
   if (session) {
     if (lobby?.connected) lobby.publishLinkBye(session.id);
     // Kept for the next session. Instantiating the module means fetching and
@@ -2665,6 +2763,7 @@ function endSession() {
   sessionPhase = "off";
   sessionNote = "";
   hellos.clear();
+  helloReannounced = false;
   begunSession = "";
 }
 
@@ -2696,6 +2795,7 @@ function runLockstep(now) {
       // would be spent racing ahead the moment it lands, so it is dropped —
       // the same rule the unlinked loop uses when the page was paused.
       stalledFrames += 1;
+      if (!waitingSince) waitingSince = now;
       framesOwed = 0;
       frameClock = 0;
       break;
@@ -2706,6 +2806,7 @@ function runLockstep(now) {
       return 0;
     }
 
+    waitingSince = 0;
     framesOwed -= 1;
     framesRun += 1;
     ran += 1;
@@ -3100,6 +3201,12 @@ el.share.addEventListener("change", () => {
   if (!el.share.checked) lastFrameAt = 0;
 });
 
+$("btn-link-retry").addEventListener("click", () => {
+  endSession();
+  reseatCable();
+  offerConsole();
+});
+
 el.link.addEventListener("change", () => {
   remember("link", el.link.checked ? "1" : "0");
   reseatCable();
@@ -3235,6 +3342,11 @@ async function joinRoom(code) {
     },
 
     onLinkInput: (from, id, frame, keys) => {
+      if (sessionPhase === "opening" && id === openingSessionId) {
+        const seat = seatOf(from);
+        if (seat !== null && pendingInputs.length < 1024) pendingInputs.push({ seat, frame, keys });
+        return;
+      }
       if (!session || id !== session.id) return;
       const seat = seatOf(from);
       if (seat === null) return;
@@ -3255,10 +3367,12 @@ async function joinRoom(code) {
     },
 
     onLinkBye: (from, id) => {
-      if (!session || id !== session.id) return;
+      if ((!session || id !== session.id) && id !== openingSessionId) return;
       // Said on purpose, so this is not a failure — the other player closed
       // the cable rather than fell off it.
       endSession();
+      sessionPhase = "failed";
+      sessionNote = "The other player disconnected the cable. Reconnect when both players are ready.";
       say("The other player left the link.");
       renderLinkNote();
     },
@@ -3275,6 +3389,11 @@ async function joinRoom(code) {
         // next cartridge change.
         lobby.setPlaying(romName || null, gameCode || null);
       } else if (status !== "closed") {
+        if (status === "reconnecting") {
+          endSession();
+          cableShape = "none";
+          renderLinkNote();
+        }
         // "closed" is something we did on purpose, and follows a refusal we
         // have already explained; reporting it would overwrite the reason.
         el.lobbyNote.textContent = status;
@@ -3284,6 +3403,7 @@ async function joinRoom(code) {
 }
 
 function leaveRoom() {
+  endSession();
   lobby?.close();
   lobby = null;
   el.lobbyOut.hidden = false;
@@ -4214,16 +4334,12 @@ async function loadLibrary() {
   const [vault, local] = await Promise.all([fetchVault(), fetchLocal()]);
   const entries = [...vault.assets, ...local];
 
-  el.vaultNote.textContent = vault.note;
+  el.vaultNote.textContent = vault.note === "error" || vault.note === "unreachable"
+    ? "The game library is unavailable. You can still open a local game." : "";
 
+  el.vaultList.hidden = entries.length === 0;
   if (entries.length === 0) {
-    el.vaultList.replaceChildren(
-      note(
-        vault.configured
-          ? "No ROMs found. Drop a .gba file to play one."
-          : "No ROMs in roms/. Drop a .gba file, or set TINYBIRD_MEDIA_KEY in .env to use your vault.",
-      ),
-    );
+    el.vaultList.replaceChildren();
     return;
   }
 
@@ -4519,6 +4635,13 @@ async function boot() {
       get link() {
         return {
           ...linkTally,
+          sessionPhase,
+          sessionFrame: session?.frame ?? null,
+          sessionTransfers: session?.transfers ?? 0,
+          lastVerifiedFrame: session?.lastVerifiedFrame ?? 0,
+          sessionId: session?.id ?? null,
+          sessionNote,
+          bufferedFrames: session?.bufferedFrames ?? null,
           frame: linkFrame,
           granted: grantedFrame,
           phase: linkPhase,

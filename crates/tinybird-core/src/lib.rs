@@ -12,6 +12,7 @@
 
 pub mod apu;
 pub mod bios;
+mod bios_task;
 pub mod bus;
 pub mod cpu;
 pub mod debug;

@@ -5,6 +5,7 @@
 
 use crate::apu::{Apu, LegacyApuV2};
 use crate::bios::Bios;
+use crate::bios_task::BiosTask;
 use crate::bus::{Bus, SimpleBus, DEBUG_CYCLE, DEBUG_PC};
 use crate::cpu::{Cpu, CpuMode};
 use crate::debug::config as debug_config;
@@ -50,7 +51,7 @@ pub enum GbaState {
 }
 
 const SAVESTATE_MAGIC: &[u8; 4] = b"TBSV";
-const SAVESTATE_VERSION: u32 = 4;
+const SAVESTATE_VERSION: u32 = 5;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Savestate {
@@ -73,6 +74,12 @@ struct Savestate {
     total_cycles: u64,
     frame_count: u64,
     use_bios: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavestateV5 {
+    machine: Savestate,
+    bios_tasks: Vec<BiosTask>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -182,6 +189,10 @@ pub struct Gba {
     /// state gives you a console that has just been unplugged.
     #[serde(skip)]
     pub sio: crate::sio::Sio,
+    /// Resumable bulk BIOS calls, including calls nested inside IRQ handlers.
+    /// Encoded in the version 5 wrapper to keep legacy machine layouts readable.
+    #[serde(skip)]
+    bios_tasks: Vec<BiosTask>,
 }
 
 impl From<&Gba> for Savestate {
@@ -232,6 +243,7 @@ impl From<Savestate> for Gba {
             input: state.input,
             scheduler: state.scheduler,
             sio: crate::sio::Sio::new(),
+            bios_tasks: Vec::new(),
             state: state.state,
             speed: state.speed,
             audio_enabled: state.audio_enabled,
@@ -262,6 +274,7 @@ impl From<LegacySavestateV2> for Gba {
             input: state.input,
             scheduler: state.scheduler,
             sio: crate::sio::Sio::new(),
+            bios_tasks: Vec::new(),
             state: state.state,
             speed: state.speed,
             audio_enabled: state.audio_enabled,
@@ -343,6 +356,7 @@ impl From<LegacySavestateV1> for Gba {
             input: state.input,
             scheduler: state.scheduler,
             sio: crate::sio::Sio::new(),
+            bios_tasks: Vec::new(),
             state: state.state,
             speed: state.speed,
             audio_enabled: state.audio_enabled,
@@ -377,6 +391,7 @@ impl Gba {
             input: Input::new(),
             scheduler: Scheduler::new(),
             sio: crate::sio::Sio::new(),
+            bios_tasks: Vec::new(),
             state: GbaState::Stopped,
             speed: EmulationSpeed::FullSpeed,
             audio_enabled: true,
@@ -429,6 +444,7 @@ impl Gba {
         self.last_dispcnt = u16::MAX;
         self.last_dispstat_control = u16::MAX;
         self.bios_intr_wait_mask = None;
+        self.bios_tasks.clear();
 
         // Start the PPU one cycle ahead to avoid pathological CPU/PPU lockstep
         // in tight polling loops that sample IRQ flags at a fixed phase.
@@ -516,9 +532,8 @@ impl Gba {
 
         let dbg = debug_config();
         let pc_before = self.cpu.fetch_addr();
-        let pending_intr_wait = self
-            .current_hle_swi_comment(pc_before)
-            .filter(|comment| matches!(comment, 0x04 | 0x05));
+        let hle_swi = self.current_hle_swi_comment(pc_before);
+        let pending_intr_wait = hle_swi.filter(|comment| matches!(comment, 0x04 | 0x05));
         // Only pay TLS write cost when at least one debug trace mode is active
         if dbg.trace_range.is_some() || dbg.watch_addr.is_some() || dbg.pc_trace {
             DEBUG_CYCLE.with(|c| c.set(self.total_cycles));
@@ -541,7 +556,30 @@ impl Gba {
                     self.cpu.registers.get_reg(13), self.cpu.registers.get_reg(14));
             }
         }
-        let cpu_cycles = self.cpu.step(&mut self.bus) as u64;
+        // Bulk HLE helpers used to perform tens of thousands of bus cycles
+        // inside one CPU step. A child loading Summary could miss an entire
+        // serial word even with an instruction-at-a-time cable scheduler.
+        let resuming = self
+            .bios_tasks
+            .last()
+            .is_some_and(|task| task.can_resume(&self.cpu));
+        let cpu_cycles = if resuming || hle_swi.is_some_and(BiosTask::supports) {
+            self.bus.begin_instruction_timing();
+            if !resuming {
+                // Fetch once, as for an ordinary SWI; subsequent pieces are
+                // BIOS work, not repeated executions of the calling opcode.
+                self.cpu.pipeline.fetch(&self.bus);
+                self.cpu.cycles += 1;
+                self.bios_tasks
+                    .push(BiosTask::new(hle_swi.unwrap(), &self.cpu, &mut self.bus));
+            }
+            if self.bios_tasks.last_mut().unwrap().step(&mut self.bus) {
+                self.bios_tasks.pop().unwrap().finish(&mut self.cpu);
+            }
+            self.bus.finish_instruction_timing() as u64
+        } else {
+            self.cpu.step(&mut self.bus) as u64
+        };
         self.total_cycles += cpu_cycles;
         if self.audio_enabled {
             self.sync_io_to_apu();
@@ -879,7 +917,10 @@ impl Gba {
         // Same reasoning for the rendered picture: it is drawn again from
         // video memory the moment the state starts running.
         state.ppu.framebuffer.forget_pixels();
-        let payload = bincode::serialize(&state)?;
+        let payload = bincode::serialize(&SavestateV5 {
+            machine: state,
+            bios_tasks: self.bios_tasks.clone(),
+        })?;
         let mut bytes = Vec::with_capacity(SAVESTATE_MAGIC.len() + 4 + payload.len());
         bytes.extend_from_slice(SAVESTATE_MAGIC);
         bytes.extend_from_slice(&SAVESTATE_VERSION.to_le_bytes());
@@ -899,8 +940,17 @@ impl Gba {
                     .expect("savestate header slice has fixed length"),
             );
             return match version {
-                4 => {
-                    let mut state: Savestate = bincode::deserialize(&bytes[version_offset + 4..])?;
+                4 | 5 => {
+                    let (mut state, bios_tasks) = if version == 5 {
+                        let saved: SavestateV5 =
+                            bincode::deserialize(&bytes[version_offset + 4..])?;
+                        (saved.machine, saved.bios_tasks)
+                    } else {
+                        (
+                            bincode::deserialize::<Savestate>(&bytes[version_offset + 4..])?,
+                            Vec::new(),
+                        )
+                    };
                     // The state carries no cartridge, so it comes from the
                     // machine. Loading one without a game in is the one case
                     // this format cannot serve, and it is worth saying so
@@ -913,6 +963,7 @@ impl Gba {
                     }
                     state.bus.restore_rom(rom);
                     *self = state.into();
+                    self.bios_tasks = bios_tasks;
                     Ok(())
                 }
                 3 => {
@@ -1723,7 +1774,9 @@ impl Gba {
             }
         } else {
             let opcode = self.bus.read_u32(pc);
-            if (opcode >> 24) != 0xEF {
+            if (opcode & 0x0f00_0000) != 0x0f00_0000
+                || !self.cpu.registers.get_cond((opcode >> 28) as u8)
+            {
                 return None;
             }
 
@@ -2126,6 +2179,65 @@ mod tests {
     }
 
     #[test]
+    fn bulk_bios_work_services_serial_irqs_and_survives_a_savestate() {
+        let mut gba = Gba::with_rom(cartridge(1024));
+        gba.start();
+        gba.cpu.set_thumb_mode(false);
+        gba.cpu.pipeline.set_fetch_addr(0x0300_0000);
+        gba.bus.write_u32(0x0300_0000, 0xEF00_000C); // CpuFastSet
+        gba.bus.write_u32(0x0300_0004, 0xEAFF_FFFE); // stop here
+        gba.bus.write_u32(0x0200_0000, 0x1234_ABCD);
+        gba.cpu.registers.set_reg(0, 0x0200_0000);
+        gba.cpu.registers.set_reg(1, 0x0201_0000);
+        gba.cpu.registers.set_reg(2, (1 << 26) | 4096);
+        // Handler acknowledges SERIAL and counts invocations in IWRAM.
+        let handler = [
+            0xE59F0018, 0xE3A01080, 0xE1C010B0, 0xE59F0010, 0xE5901000, 0xE2811001, 0xE5801000,
+            0xE12FFF1E, 0x04000202, 0x03000200,
+        ];
+        for (i, word) in handler.iter().enumerate() {
+            gba.bus.write_u32(0x0300_0100 + i as u32 * 4, *word);
+        }
+        gba.bus.write_u32(0x0300_7FFC, 0x0300_0100);
+        gba.bus.write_io_direct_u16(0x200, 0x80);
+        enable_interrupts(&mut gba);
+        gba.step();
+        assert_eq!(gba.cpu.fetch_addr(), 0x0300_0000);
+        assert_eq!(gba.bus.read_u32(0x0201_0000), 0x1234_ABCD);
+        assert_eq!(gba.bus.read_u32(0x0201_3FFC), 0);
+        for count in 1..=3 {
+            gba.request_irq(0x80);
+            for _ in 0..100 {
+                gba.step();
+            }
+            assert_eq!(gba.bus.read_u32(0x0300_0200), count);
+            assert!(!gba.bios_tasks.is_empty(), "copy must still be in progress");
+        }
+        let bytes = gba.save_state_bytes().unwrap();
+        let mut restored = Gba::with_rom(cartridge(1024));
+        restored.load_state_bytes(&bytes).unwrap();
+        for machine in [&mut gba, &mut restored] {
+            for _ in 0..5000 {
+                if machine.bios_tasks.is_empty() {
+                    break;
+                }
+                machine.step();
+            }
+            assert!(machine.bios_tasks.is_empty());
+            assert_eq!(machine.cpu.fetch_addr(), 0x0300_0004);
+            assert_eq!(machine.bus.read_u32(0x0201_3FFC), 0x1234_ABCD);
+            assert_eq!(machine.bus.read_u32(0x0300_0200), 3);
+        }
+        assert_eq!(gba.total_cycles, restored.total_cycles);
+        assert!(
+            bincode::serialize(&gba.cpu).unwrap() == bincode::serialize(&restored.cpu).unwrap()
+        );
+        for offset in (0..16384).step_by(4) {
+            assert_eq!(restored.bus.read_u32(0x0201_0000 + offset), 0x1234_ABCD);
+        }
+    }
+
+    #[test]
     fn test_intr_wait_ignores_unrelated_irq_bits() {
         let mut gba = Gba::new();
         gba.start();
@@ -2421,6 +2533,21 @@ mod tests {
         let mut rom = vec![0u8; size];
         rom[0xAC..0xB0].copy_from_slice(b"BPRE");
         rom
+    }
+
+    #[test]
+    fn version_4_states_load_without_pending_bios_work() {
+        let mut gba = Gba::with_rom(cartridge(1024));
+        gba.bus.write_u32(0x0300_0000, 0x1234_ABCD);
+        let mut old = Savestate::from(&gba);
+        old.bus.take_rom();
+        old.ppu.framebuffer.forget_pixels();
+        let mut bytes = b"TBSV".to_vec();
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend(bincode::serialize(&old).unwrap());
+        gba.load_state_bytes(&bytes).unwrap();
+        assert!(gba.bios_tasks.is_empty());
+        assert_eq!(gba.bus.read_u32(0x0300_0000), 0x1234_ABCD);
     }
 
     #[test]

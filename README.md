@@ -89,6 +89,103 @@ Theme, dashboard layout, panel sizes, window scale, volume, mute, color
 correction, fullscreen, wallpaper, and the recent-ROM list all persist. A
 missing or damaged file falls back to defaults rather than failing to launch.
 
+## Two-player link cable in the web UI
+
+1. Open `/play` on each device and load each player's game and save.
+2. Open **Lobby**, choose **Start a room**, and share the room code.
+3. The other player enters the code and chooses **Join**.
+4. Enable **Link cable** on both screens. Wait for **Connected**, then enter
+   the multiplayer area in each game to trade or battle.
+
+For different cartridges, both browsers need access to both ROMs through the
+library. Keep both game tabs open and running during multiplayer. If the cable
+stops, the lobby explains why and offers **Reconnect cable**. Leaving the room
+also disconnects the cable.
+
+The default link mode runs both consoles in each browser and exchanges inputs.
+This requires more CPU than solo play. Compatibility and performance still
+need checking with the particular games and devices you use.
+
+### Trade regression tests
+
+The full-trade tests use `roms/pokemon_fire_red.gba`, `TradeTest1.state`, and
+`TradeTest2.state`. They select and exchange the first Pokemon, check both
+parties and their checksums, and reboot from the resulting battery saves.
+They fail if no exchange completes; a connected lobby alone is not a pass.
+The original fixtures are only read. Outputs go under `target/`.
+
+Set `TINYBIRD_TEST_SCENARIO=summary` for the regression that opens Summary on
+both consoles, browses pages, returns, and selects Trade with Player 2 acting
+137 frames later. Both the WASM test and the live browser test support it.
+This catches a core bug where a bulk BIOS graphics operation advanced roughly
+60,000 cycles in one step, dropping a serial interrupt on the child console.
+Bulk BIOS copies and decompression now yield between small pieces of work.
+Save-state version 5 preserves unfinished BIOS work; versions 2?4 remain readable.
+
+```sh
+cargo build -p tinybird-wasm --target wasm32-unknown-unknown --release
+cargo build -p tinybird-web
+node --test crates/tinybird-web/src/assets/*.test.mjs
+node tests/wasm_link_trade.mjs
+```
+
+In PowerShell, run the Summary regression with:
+
+```powershell
+$env:TINYBIRD_TEST_SCENARIO = "summary"
+node tests/wasm_link_trade.mjs
+```
+
+For the full web UI test, run the web server on port 8878 and two isolated
+Chromium browser profiles with remote debugging on ports 9223 and 9224:
+
+```sh
+node tests/browser_link_live.mjs
+```
+
+`TINYBIRD_TEST_BASE` and `TINYBIRD_TEST_DEVTOOLS` override those addresses.
+The browser profiles must be able to create a room (sign in if accounts are
+required). Set `TINYBIRD_TEST_INPUT_DELAY_MS=40` to add input latency plus
+periodic 60 ms jitter. The browser test also delays Player 2's emulator setup,
+enables the cable at different times, checks matching state hashes after the
+trade, disconnects/reconnects, and verifies battery-save recovery.
+`TINYBIRD_TEST_ROM`, `TINYBIRD_TEST_STATE_1`, `TINYBIRD_TEST_STATE_2`, and
+`TINYBIRD_TEST_OUTPUT` can override fixture and artifact paths.
+
+After rebuilding the web server, restart it and refresh both browser pages
+before retesting. If a game already shows a link error, reload the original
+trade-counter state before starting a new session.
+
+## Browser play views
+
+The `/play` Playroom puts playback and multiplayer controls under the game,
+with live details and saved items in balanced side rails on desktop. Save & load,
+Audio & video, and Cartridge tools expand on demand. The view picker offers
+Desk (the complete workspace), Focus (game and live details), and Cinema
+(game screens and essential controls). With the game focused, `Tab`
+cycles views and `Shift+Tab` cycles backward; `Esc` returns to Desk. The chosen
+view is remembered. Tab still navigates buttons, fields, links and dialogs,
+and a custom game binding for Tab takes priority.
+
+With a local web server on port 8878 and Chromium remote debugging on 9223,
+run `node tests/browser_play_ui.mjs` to check file loading and save downloads,
+keyboard playback, tool panels, dialogs, view persistence, and responsive
+layouts. This uses the same local ROM/state fixtures as the trade tests;
+screenshots and downloaded files go to `target/browser-play-ui/`.
+
+### Website styling
+
+The `/console.css` response bundles three source files in order: `console.css`
+holds the existing console component primitives, `site.css` owns shared design
+tokens, navigation, forms and public page layouts, and `playroom.css` owns the
+emulator workspace. Scope public content layouts to `.site-page` and play
+overrides to `[data-play-view]` so one route cannot change another's navigation.
+The OBS overlay keeps its independent `styles.css` for its transparent stream
+surface. CSS is embedded in the server binary; rebuild after editing it.
+
+The browser check above also visits Home, Info, Contact and Tickets at widths
+from 320 to 1440 pixels, checking navigation visibility and horizontal overflow.
+
 ## Controls
 
 - `Esc`: open the pause menu / resume gameplay
