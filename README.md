@@ -1,6 +1,10 @@
 # tinyBird
 
-A Game Boy Advance emulator written in Rust.
+A programmable Game Boy Advance runtime written in Rust, with browser and desktop play, a plugin workshop, memory research tools, multiplayer, and headless automation.
+
+For Python control, repeatable frame actions, and named memory observations, see
+[Headless automation](docs/automation.md). The runtime is a separate layer above
+`tinybird-core` and can also be embedded directly in Rust.
 
 ## Features
 
