@@ -3243,6 +3243,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tinybird-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tinybird-core",
+]
+
+[[package]]
 name = "tinybird-wasm"
 version = "0.1.0"
 dependencies = [

@@ -6,6 +6,7 @@ members = [
     "crates/tinybird-desktop",
     "crates/tinybird-games",
     "crates/tinybird-probe",
+    "crates/tinybird-runtime",
     "crates/tinybird-wasm",
     "crates/tinybird-web",
 ]

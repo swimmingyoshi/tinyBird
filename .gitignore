@@ -2,6 +2,10 @@
 /target/
 **/*.rs.bk
 
+# Python automation client artifacts
+__pycache__/
+*.pyc
+
 # ROM files and BIOS (copyrighted)
 *.gba
 *.gb
