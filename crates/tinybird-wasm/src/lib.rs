@@ -36,10 +36,10 @@ use std::ptr::addr_of_mut;
 
 // `Bus` is needed for the register read and write below; the rest of this
 // module works through `Gba` and never touches memory directly.
-use tinybird_addons::ManifestAddon;
+use tinybird_addons::manifest::{Manifest, MAX_INSTALLED_MANIFESTS, MAX_MANIFEST_BYTES};
 use tinybird_core::bus::Bus;
 use tinybird_core::{Gba, GbaButton, GbaState};
-use tinybird_games::{capture_stream_snapshot, snapshot_to_json};
+use tinybird_games::capture_stream_snapshot_excluding;
 
 /// GBA screen width in pixels.
 pub const SCREEN_WIDTH: usize = 240;
@@ -58,6 +58,9 @@ pub const TB_ERR_BAD_ARGUMENT: i32 = -2;
 pub const TB_ERR_FAILED: i32 = -3;
 
 struct Emulator {
+    disabled_builtins: Vec<String>,
+    manifests: Vec<Manifest>,
+    manifest_error: String,
     gba: Box<Gba>,
     /// RGBA8888 pixels, ready for `ImageData`.
     frame: Vec<u8>,
@@ -77,6 +80,9 @@ struct Emulator {
 impl Emulator {
     fn new() -> Self {
         Self {
+            disabled_builtins: Vec::new(),
+            manifests: Vec::new(),
+            manifest_error: String::new(),
             gba: Box::new(Gba::new()),
             frame: vec![0; SCREEN_WIDTH * SCREEN_HEIGHT * BYTES_PER_PIXEL],
             audio: Vec::new(),
@@ -261,33 +267,52 @@ pub unsafe extern "C" fn tb_load_rom(ptr: *const u8, len: usize) -> i32 {
 /// `ptr` must point to `len` readable bytes of UTF-8.
 #[no_mangle]
 pub unsafe extern "C" fn tb_install_manifests(ptr: *const u8, len: usize) -> i32 {
-    if ptr.is_null() || len == 0 {
-        return TB_ERR_BAD_ARGUMENT;
-    }
-
-    let Ok(json) = std::str::from_utf8(std::slice::from_raw_parts(ptr, len)) else {
-        return TB_ERR_BAD_ARGUMENT;
+    let Some(emu) = emulator() else {
+        return TB_ERR_NOT_INITIALISED;
     };
-
-    // A JSON array, so one call installs the lot: the registry can only be set
-    // once, and a per-file entry point would make the second file an error.
-    let Ok(manifests) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
+    if ptr.is_null() || len == 0 || len > MAX_MANIFEST_BYTES * MAX_INSTALLED_MANIFESTS {
+        emu.manifest_error = "Manifest upload is empty or too large.".into();
         return TB_ERR_BAD_ARGUMENT;
-    };
-
-    let mut addons = Vec::with_capacity(manifests.len());
-    for manifest in &manifests {
-        let Ok(addon) = ManifestAddon::parse(&manifest.to_string()) else {
-            // One bad manifest costs that manifest, not the page.
-            continue;
-        };
-        addons.push(addon);
     }
-
-    match tinybird_games::install_manifests(addons) {
-        Ok(count) => count as i32,
-        Err(_) => TB_ERR_BAD_ARGUMENT,
+    let parsed = (|| -> Result<Vec<Manifest>, String> {
+        let values: Vec<serde_json::Value> =
+            serde_json::from_slice(std::slice::from_raw_parts(ptr, len))
+                .map_err(|e| e.to_string())?;
+        if values.len() > MAX_INSTALLED_MANIFESTS {
+            return Err("Install at most 16 readers.".into());
+        }
+        let mut ids = std::collections::HashSet::new();
+        let mut manifests = Vec::new();
+        for value in values {
+            let manifest = Manifest::parse(&value.to_string())?;
+            if !ids.insert(manifest.addon_id.clone()) {
+                return Err("Add-on IDs must be unique.".into());
+            }
+            manifests.push(manifest);
+        }
+        Ok(manifests)
+    })();
+    match parsed {
+        Ok(manifests) => {
+            emu.manifests = manifests;
+            emu.manifest_error.clear();
+            emu.manifests.len() as i32
+        }
+        Err(error) => {
+            emu.manifest_error = error;
+            TB_ERR_BAD_ARGUMENT
+        }
     }
+}
+
+/// Last manifest validation failure, available until the next installation.
+#[no_mangle]
+pub extern "C" fn tb_manifest_error_ptr() -> *const u8 {
+    unsafe { emulator().map_or(std::ptr::null(), |emu| emu.manifest_error.as_ptr()) }
+}
+#[no_mangle]
+pub extern "C" fn tb_manifest_error_len() -> usize {
+    unsafe { emulator().map_or(0, |emu| emu.manifest_error.len()) }
 }
 
 /// Restore battery-backed cartridge save data.
@@ -532,6 +557,28 @@ pub extern "C" fn tb_run_frames(frames: u32) -> i32 {
 
 // ------------------------------------------------------------------- reading
 
+/// Run a bounded solo batch, retaining all audio and converting only the final image.
+#[no_mangle]
+pub extern "C" fn tb_run_audio_frames(frames: u32) -> i32 {
+    unsafe {
+        let Some(emu) = emulator() else {
+            return TB_ERR_NOT_INITIALISED;
+        };
+        emu.audio.clear();
+        for _ in 0..frames.min(240) {
+            if emu.gba.state != GbaState::Running {
+                break;
+            }
+            emu.gba.run_frame();
+            let samples = emu.gba.apu.drain_samples();
+            emu.audio
+                .extend(samples.iter().map(|sample| *sample as f32 / 32768.0));
+        }
+        emu.blit();
+        TB_OK
+    }
+}
+
 /// Pointer to RGBA8888 pixels, `tb_frame_len()` bytes, top row first.
 #[no_mangle]
 pub extern "C" fn tb_frame_ptr() -> *const u8 {
@@ -591,6 +638,40 @@ pub extern "C" fn tb_cycle_count() -> f64 {
 
 // ------------------------------------------------------------------- addons
 
+/// Set disabled built-in reader IDs. An empty array restores all readers.
+/// # Safety
+/// `data` must point to `len` readable bytes containing UTF-8 JSON.
+#[no_mangle]
+pub unsafe extern "C" fn tb_set_disabled_builtins(data: *const u8, len: usize) -> i32 {
+    if data.is_null() || len == 0 || len > 4096 { return TB_ERR_BAD_ARGUMENT; }
+    let Ok(ids) = serde_json::from_slice::<Vec<String>>(std::slice::from_raw_parts(data, len)) else { return TB_ERR_BAD_ARGUMENT; };
+    let known = tinybird_games::describe_addon_status(None).registered;
+    if ids.len() > known.len() || ids.iter().any(|id| !known.iter().any(|info| info.addon_id == id)) { return TB_ERR_BAD_ARGUMENT; }
+    let Some(emu) = emulator() else { return TB_ERR_NOT_INITIALISED; };
+    emu.disabled_builtins = ids;
+    TB_OK
+}
+
+/// Copy a bounded RAM/ROM range for the built-in memory finder. No IO reads.
+///
+/// # Safety
+/// `out` must point to an allocated writable buffer of at least `len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn tb_read_memory(address: u32, out: *mut u8, len: usize) -> i32 {
+    let end = u64::from(address) + len as u64;
+    let allowed = [(0x0200_0000u32, 0x0204_0000u64), (0x0300_0000, 0x0300_8000),
+        (0x0800_0000, 0x0a00_0000)].iter().any(|&(start, stop)| address >= start && end <= stop);
+    if out.is_null() || len == 0 || len > 0x40000 || !allowed {
+        return TB_ERR_BAD_ARGUMENT;
+    }
+    let Some(emu) = emulator() else { return TB_ERR_NOT_INITIALISED; };
+    let bytes = std::slice::from_raw_parts_mut(out, len);
+    for (offset, byte) in bytes.iter_mut().enumerate() {
+        *byte = emu.gba.read_u8(address + offset as u32);
+    }
+    TB_OK
+}
+
 /// Re-read the live addon snapshot. Invalidates [`tb_snapshot_ptr`].
 ///
 /// This is the same registry the desktop app uses, so the browser reports
@@ -601,10 +682,55 @@ pub extern "C" fn tb_refresh_snapshot() -> i32 {
         let Some(emu) = emulator() else {
             return TB_ERR_NOT_INITIALISED;
         };
-        let snapshot = capture_stream_snapshot(Some(emu.gba.as_ref()));
-        match snapshot_to_json(&snapshot) {
-            Ok(json) => {
-                emu.snapshot = json;
+        let mut snapshot = capture_stream_snapshot_excluding(Some(emu.gba.as_ref()), &emu.disabled_builtins);
+        let mut statuses = Vec::new();
+        if let Some(rom) = &snapshot.rom {
+            let memory = tinybird_games::GbaMemory(emu.gba.as_ref());
+            for manifest in &emu.manifests {
+                let matches = manifest.supports(rom);
+                let result = if matches {
+                    // Name tables are found by one pass over the cartridge,
+                    // which is far outside the per-update read budget. Done
+                    // here, on unbounded memory, and cached against the ROM.
+                    manifest.prepare(&memory, rom);
+                    manifest.evaluate(&memory)
+                } else {
+                    Ok(Vec::new())
+                };
+                let error = result.as_ref().err().copied();
+                let mut sections = result.unwrap_or_default();
+                let status = if error.is_some() {
+                    "error"
+                } else if !matches {
+                    "incompatible"
+                } else if sections.is_empty() {
+                    "idle"
+                } else {
+                    "active"
+                };
+                statuses.push(serde_json::json!({"addon_id": manifest.addon_id, "display_name": manifest.display_name, "status": status, "error": error}));
+                for section in &mut sections {
+                    section.section_id =
+                        format!("community:{}:{}", manifest.addon_id, section.section_id);
+                    section.title = format!("{} ? {}", manifest.display_name, section.title);
+                }
+                if !sections.is_empty() && snapshot.addon.is_none() {
+                    snapshot.addon = Some(tinybird_addons::AddonSnapshot {
+                        addon_id: "community", display_name: "Community readers", version: None,
+                        capabilities: Vec::new(), sections: Vec::new(), overlay_lines: Vec::new(),
+                        data: tinybird_games::AddonData::default(),
+                    });
+                }
+                if let Some(addon) = &mut snapshot.addon {
+                    addon.sections.extend(sections);
+                }
+            }
+        }
+        match serde_json::to_value(&snapshot) {
+            Ok(mut value) => {
+                value["community_addons"] = serde_json::json!(statuses);
+                value["builtin_addons"] = serde_json::json!(tinybird_games::describe_addon_status(None).registered);
+                emu.snapshot = value.to_string();
                 TB_OK
             }
             Err(_) => TB_ERR_FAILED,

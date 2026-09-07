@@ -1,0 +1,184 @@
+.addons-page main { display: grid; gap: 1.4rem; }
+.addons-page .addon-panel { padding: clamp(1rem, 3vw, 2rem); min-width: 0; }
+.addon-panel h2 { margin: 0 0 1rem; font-size: 1.2rem; }
+.addon-panel p { line-height: 1.6; }
+.addon-panel > pre { overflow-x: auto; background: #0c1723; padding: 16px; border-radius: 8px; }
+.addon-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,260px),1fr)); gap: 1rem; margin: 1rem 0; }
+.addon-card, .addon-detail { border: 1px solid #344052; padding: 1rem; border-radius: 10px; min-width: 0; overflow-wrap: anywhere; }
+.addon-card h3 { font-size: 1rem; margin: 0 0 .5rem; }
+.addon-actions { display: flex; flex-wrap: wrap; gap: .7rem; align-items: end; margin: 1rem 0; }
+.addons-page label { display: grid; gap: .45rem; }
+.addons-page input, .addons-page select, .addons-page textarea { background: #111923; color: #ecf1f7; border: 1px solid #44536a; border-radius: 6px; padding: .65rem; max-width: 100%; min-width: 0; font: inherit; }
+.addons-page input:focus-visible, .addons-page textarea:focus-visible, .addons-page select:focus-visible { outline: 2px solid #2ec4b6; outline-offset: 2px; }
+.addon-builder { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,200px),1fr)); gap: 1rem; align-items: end; }
+.addon-editor-label { margin-top: 1.2rem; }
+#manifest-editor { font: 13px/1.5 ui-monospace, monospace; width: 100%; resize: vertical; box-sizing: border-box; }
+.addon-publish { display: grid; gap: 1rem; margin-top: 1.5rem; }
+.addons-page button { cursor: pointer; }
+.addons-page button:disabled { cursor: default; opacity: .5; }
+#addon-message { position: sticky; top: 0; z-index: 2; margin: 0; background: #172536; border-radius: 6px; padding: .7rem; overflow-wrap: anywhere; }
+#addon-message:empty { display: none; }
+#addon-message[data-error="true"] { color: #ffb4b4; }
+.addon-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .8rem; }
+.memory-sheet-table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; margin: 14px 0; }
+.memory-sheet-table :is(th,td) { text-align: left; vertical-align: top; padding: 12px; border-bottom: 1px solid #344c60; overflow-wrap: anywhere; }
+.addons-page { max-width: 1920px; }
+.addons-page [data-addon-view][hidden] { display: none !important; }
+.addon-view-nav { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; background: #111c2a; border: 1px solid #344052; border-radius: 12px; }
+.addon-view-nav a { padding: 10px 18px; border-radius: 8px; color: #b8c7da; text-decoration: none; }
+.addon-view-nav a[aria-current] { background: #234151; color: #ddfff7; }
+.addons-title { margin: 0 0 12px; font-size: 22px; letter-spacing: -.01em; }
+.addons-lede { margin: 12px 0 24px; max-width: 110ch; color: #9fb0c4; font-size: 13px; line-height: 1.7; }
+.addons-lede #account-note { color: #7e91a6; }
+.workshop-intro { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin: 0 0 18px; }
+.workshop-intro h2 { margin: 0; font-size: 23px; letter-spacing: -.03em; }
+.workshop-intro p { margin: 0; color: #9bafc2; font-size: 13px; line-height: 1.6; }
+.addons-page:has(#workshop-view:not([hidden])) .addons-lede { display: none; }
+.workshop-layout { --workshop-height: clamp(640px, 80dvh, 960px); display: grid; grid-template-columns: minmax(220px, .75fr) minmax(320px, 1.1fr) minmax(410px, 1.3fr); grid-template-areas: "preview game tools"; gap: 16px; align-items: start; }
+.workshop-output, .workshop-game, #addon-workshop { height: var(--workshop-height); min-width: 0; box-sizing: border-box; border: 1px solid #304253; border-radius: 14px; background: #0c1621; }
+.workshop-output { grid-area: preview; overflow: auto; padding: 20px 16px; }
+.workshop-output > h3, .workshop-game > h3 { margin: 0; font-size: 15px; }
+.workshop-output > p, .workshop-game > p { color: #90a5b9; font-size: 12px; line-height: 1.5; }
+.workshop-output .workshop-readout { margin: 0; border: 0; padding: 0; background: transparent; }
+.workshop-output .workshop-readout-section + .workshop-readout-section { margin-top: 20px; }
+.workshop-output .workshop-readout-section > .panel__eyebrow { display: block; margin-bottom: 12px; }
+.workshop-game { grid-area: game; display: flex; flex-direction: column; overflow: hidden; }
+.workshop-game > h3 { margin: 20px 16px 0; }
+.workshop-game > p { margin: 6px 16px 10px; }
+#workshop-player { display: block; width: 100%; height: 0; min-height: 0; flex: 1; border: 0; }
+#addon-workshop { grid-area: tools; margin: 0; background: #111f2d; overflow: hidden; }
+#addon-workshop > summary { display: none; }
+#addon-workshop .workshop-body { display: flex; flex-direction: column; height: calc(var(--workshop-height) - 2px); padding: 0; }
+#addon-workshop .workshop-header { padding: 20px 20px 12px; border-bottom: 1px solid #304253; background: #142434; }
+#addon-workshop .workshop-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+#addon-workshop .workshop-eyebrow { color: #90cdbb; font: 10px/1.5 ui-monospace, monospace; letter-spacing: .09em; }
+#addon-workshop [data-storage] { color: #90a5b9; font-size: 10px; text-align: right; }
+#addon-workshop .workshop-name { margin: 12px 0; color: #91a7bb; font-size: 11px; }
+#addon-workshop .workshop-name input { font-size: 19px; font-weight: 600; background: #0f1d2a; }
+#addon-workshop .workshop-toolbar { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
+#addon-workshop .workshop-reader-menu { position: relative; padding: 0; margin: 0; border: 0; }
+#addon-workshop .workshop-reader-menu > summary { padding: 8px 0; color: #b9cada; }
+#addon-workshop .workshop-menu-body { position: absolute; top: 40px; left: 0; z-index: 5; width: min(320px, 70vw); max-height: 50vh; overflow: auto; box-sizing: border-box; padding: 16px; border: 1px solid #4b6378; border-radius: 10px; background: #182b3c; box-shadow: 0 12px 30px #0006; }
+#addon-workshop [data-game] { margin: 10px 0 0; color: #849caf; font: 10px/1.6 ui-monospace, monospace; overflow-wrap: anywhere; }
+#addon-workshop .workshop-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #40566b transparent; padding: 16px 20px 24px; }
+#addon-workshop .workshop-body section { margin: 0; border: 0; padding: 0; }
+#addon-workshop .workshop-body p { line-height: 1.6; }
+#addon-workshop :is(.workshop-body,.workshop-finish) button { background: #20384a; border-color: #466078; transition: background .12s; }
+#addon-workshop :is(.workshop-body,.workshop-finish) button:hover:not(:disabled) { background: #2d4c61; }
+#addon-workshop :is(.workshop-body,.workshop-finish) :is(input:not([type=checkbox]),select,textarea) { background: #0c1723; border-color: #3a5269; padding: 9px 10px; }
+#addon-workshop :is(.workshop-body,.workshop-finish) input[type=checkbox] { width: auto; }
+#addon-workshop :is(.workshop-body,.workshop-finish) :is([data-finish],[data-start-field],[data-new-field],[data-add],[data-scan],[data-save],[data-publish]) { background: #b9eed8; border-color: #b9eed8; color: #102d24; font-weight: 650; }
+#addon-workshop :is(.workshop-body,.workshop-finish) :is([data-finish],[data-start-field],[data-new-field],[data-add],[data-scan],[data-save],[data-publish]):hover:not(:disabled) { background: #d1f7e7; }
+#addon-workshop .workshop-body details { margin: 14px 0; border: 1px solid #314355; border-radius: 8px; padding: 10px 12px; }
+#addon-workshop .workshop-body summary { cursor: pointer; color: #b4c7da; }
+#addon-workshop .workshop-body .workshop-reader-menu { border: 0; margin: 0; padding: 0; }
+#addon-workshop .workshop-outline { margin-top: 0; }
+#addon-workshop .workshop-outline > summary { font-weight: 600; }
+#addon-workshop [data-field-count] { display: inline-block; margin-left: 6px; padding: 0 7px; border-radius: 12px; color: #9bdcc6; background: #203c3d; font: 11px/1.8 ui-monospace, monospace; }
+#addon-workshop .workshop-empty { padding: 16px 4px 22px; }
+#addon-workshop .workshop-empty h3 { margin: 10px 0; font-size: 22px; letter-spacing: -.025em; line-height: 1.25; }
+#addon-workshop .workshop-empty p { color: #9eb3c5; margin: 12px 0 18px; }
+#addon-workshop .workshop-muted { color: #8b9fb2; font-size: 11px; font-weight: 400; }
+#addon-workshop .workshop-editor-heading, #addon-workshop .workshop-finder-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+#addon-workshop .workshop-editor-heading h3 { margin: 3px 0 0; font-size: 19px; }
+#addon-workshop .workshop-editor-heading button, #addon-workshop .workshop-finder-heading button { font-size: 11px; padding: 5px 8px; background: transparent; }
+#addon-workshop :is([data-find-address],[data-find-max]) { padding: 5px 9px; font-size: 11px; margin: 0 0 8px; }
+#addon-workshop .workshop-body .workshop-finder { background: #0b1823; border: 1px solid #436477; border-radius: 10px; padding: 14px; margin: 12px 0; }
+#addon-workshop .workshop-finder-heading { margin: 0; }
+#addon-workshop .workshop-finder-heading h4 { margin: 0; font-size: 13px; }
+#addon-workshop [data-finder-help] { font-size: 12px; color: #92acbf; }
+#addon-workshop .workshop-search-options { padding: 8px 10px; font-size: 11px; }
+#addon-workshop .workshop-finder .workshop-actions { gap: 6px; }
+#addon-workshop .workshop-finder .workshop-actions button { font-size: 11px; padding: 7px 9px; }
+#addon-workshop .workshop-results { max-height: 170px; }
+#addon-workshop .workshop-results button { font-size: 11px; }
+#addon-workshop [data-count] { font-size: 11px; }
+#addon-workshop .workshop-field-live { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin: 14px 0; padding: 12px; border: 1px solid #33594f; border-radius: 8px; background: #102723; }
+#addon-workshop [data-field-live] { color: #caf5e0; font-size: 13px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+#addon-workshop .workshop-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 0 16px; }
+#addon-workshop .workshop-session { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 20px; border-top: 1px solid #304253; background: #142434; }
+#addon-workshop .workshop-session label { display: flex; align-items: center; gap: 7px; margin: 0; color: #94adbe; font-size: 11px; }
+#addon-workshop .workshop-session button { padding: 5px 9px; font-size: 11px; }
+#addon-workshop [data-message]:empty, #addon-workshop [role=alert]:empty, #addon-workshop [data-finish-message]:empty { display: none; }
+#addon-workshop [data-message]:not(:empty), #addon-workshop [data-finish-message]:not(:empty) { border-left: 3px solid #b9eed8; padding: 8px 12px; background: #172c32; margin: 0 0 16px; font-size: 12px; }
+#addon-workshop [role=alert] { color: #ffbab2; font-size: 12px; }
+#addon-workshop .workshop-category-editor { padding: 12px 0 0; border-top: 1px solid #314355; }
+#addon-workshop .workshop-advanced { font-size: 11px; }
+#addon-workshop .workshop-advanced > a { display: inline-block; margin: 12px; }
+#addon-workshop .workshop-preview { background: #0d1925; border-color: #3e6175; }
+#addon-workshop .workshop-finish { width: min(600px, calc(100vw - 32px)); max-height: 88dvh; padding: 24px; box-sizing: border-box; overflow: auto; background: #122232; color: #e5ece6; border: 1px solid #537484; border-radius: 16px; box-shadow: 0 25px 90px #0008; font-family: inherit; font-size: 13px; line-height: 1.6; }
+#addon-workshop .workshop-finish::backdrop { background: #030a12b8; backdrop-filter: blur(3px); }
+#addon-workshop .workshop-finish-heading { display: flex; justify-content: space-between; align-items: start; gap: 16px; }
+#addon-workshop .workshop-finish h3 { margin: 4px 0 0; font-size: 24px; overflow-wrap: anywhere; }
+#addon-workshop .workshop-finish h4 { margin: 0 0 4px; font-size: 16px; }
+#addon-workshop .workshop-finish p { color: #a8bdcd; }
+#addon-workshop .workshop-finish section { margin: 20px 0; padding: 18px 0 0; border-top: 1px solid #344e62; }
+#addon-workshop .workshop-finish [data-finish-status] { background: #1a3638; padding: 10px 12px; border-radius: 8px; color: #c4e9dd; }
+@media (max-width: 1200px) and (min-width: 781px) {
+  .workshop-layout { grid-template-columns: minmax(280px, 1fr) minmax(380px, 1.2fr); grid-template-areas: "game tools" "preview tools"; }
+  .workshop-game { height: calc(var(--workshop-height) * .6); }
+  .workshop-output { height: calc(var(--workshop-height) * .4 - 16px); }
+}
+@media (max-width: 780px) {
+  .workshop-intro { display: block; }
+  .workshop-intro p { margin-top: 8px; }
+  .workshop-layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: "game" "tools" "preview"; }
+  .workshop-game { height: 440px; }
+  .workshop-output { height: auto; max-height: 400px; }
+  #addon-workshop { height: auto; overflow: visible; }
+  #addon-workshop .workshop-body { height: auto; }
+  #addon-workshop .workshop-header { position: sticky; top: 0; z-index: 4; border-radius: 14px 14px 0 0; }
+  #addon-workshop .workshop-scroll { overflow: visible; }
+  #addon-workshop .workshop-finish { padding: 18px; }
+  #addon-workshop .workshop-finish-heading { flex-wrap: wrap; }
+}
+
+/* The structure tree ------------------------------------------------------
+
+   The builder used to show one flat list of every field in the reader, which
+   is most of why every reader looked like one flat list of every field.
+   Categories are a shape the manifest format always had — a `cards` section is
+   a party, a squad, an inventory — and this is the first time the builder
+   draws it. So the nesting has to read at a glance: a category is a box, a
+   field is a row inside it, and a row you can pick up says so with a grip
+   rather than with a pair of "move up" arrows.
+
+   These sit here rather than in workshop.css because the panel's own input and
+   button rules are written under `#addon-workshop`, and a tree row has to
+   out-specify them. Same id, one more class, no `!important`. */
+#addon-workshop .workshop-tree { display: grid; gap: 10px; margin: 14px 0; }
+#addon-workshop .workshop-tree > p { color: #8fa3b8; font-size: 13px; }
+
+#addon-workshop .workshop-cat { border: 1px solid #34485c; border-radius: 10px; background: #0d1825; overflow: hidden; }
+#addon-workshop .workshop-cat__head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: #142334; border-bottom: 1px solid #263a4d; cursor: grab; }
+#addon-workshop .workshop-cat__head[data-over] { box-shadow: inset 0 3px 0 #b9eed8; }
+#addon-workshop .workshop-body .workshop-cat .workshop-cat__title { flex: 1; min-width: 0; margin: 0; padding: 4px 6px; border-color: transparent; background: transparent; font-weight: 650; }
+#addon-workshop .workshop-body .workshop-cat .workshop-cat__title:hover { border-color: #3a5269; }
+#addon-workshop .workshop-cat__note { margin: 8px 10px 0; color: #8fa3b8; font-size: 12px; line-height: 1.5; }
+#addon-workshop .workshop-cat__card { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 10px; color: #9fd8c4; font-size: 11px; border-bottom: 1px dashed #263a4d; }
+#addon-workshop .workshop-cat > .workshop-tiny { margin: 8px 10px 10px; }
+#addon-workshop .workshop-chip { padding: 2px 7px; border-radius: 10px; background: #0a141f; color: #8fb3cd; font: 10px/1.6 ui-monospace, monospace; }
+
+#addon-workshop .workshop-fields { list-style: none; margin: 0; padding: 6px; display: grid; gap: 5px; min-height: 34px; }
+#addon-workshop .workshop-fields[data-over] { background: #16303a; }
+#addon-workshop .workshop-fields__empty { padding: 6px 8px; color: #6f8399; font-size: 12px; }
+
+#addon-workshop .workshop-field { display: flex; align-items: center; gap: 8px; margin: 0; padding: 7px 8px; border: 1px solid #2a3d51; border-radius: 7px; background: #152536; }
+#addon-workshop .workshop-field[data-over] { border-color: #b9eed8; box-shadow: inset 0 2px 0 #b9eed8; }
+#addon-workshop .workshop-field[data-dragging] { opacity: .4; }
+/* The headline stat of a repeating category: one row per entry that the
+   renderer draws larger than the rest, so it is marked out here too. */
+#addon-workshop .workshop-field[data-lead] { border-color: #4a7a68; background: #142b26; }
+#addon-workshop .workshop-grip { cursor: grab; color: #5f7791; font-size: 14px; line-height: 1; user-select: none; }
+#addon-workshop .workshop-grip--lead { cursor: default; color: #b9eed8; }
+#addon-workshop .workshop-field__words { flex: 1; min-width: 0; display: grid; gap: 1px; }
+#addon-workshop .workshop-field__label { font-weight: 600; overflow-wrap: anywhere; }
+#addon-workshop .workshop-field__read { color: #8fa3b8; font: 10px/1.5 ui-monospace, monospace; overflow-wrap: anywhere; }
+#addon-workshop .workshop-field__hint { color: #7d90a5; font-size: 11px; overflow-wrap: anywhere; }
+#addon-workshop .workshop-field__acts { display: flex; flex-shrink: 0; gap: 4px; }
+
+#addon-workshop .workshop-tiny { padding: 3px 8px; border-color: #34485c; background: #1b2b3c; color: #b4c7da; font-size: 11px; }
+#addon-workshop .workshop-tiny:hover { border-color: #6d8fa8; }
+
+#addon-workshop [data-type-help] { margin: 4px 0 12px; color: #8fa3b8; font-size: 12px; line-height: 1.5; }
+#addon-workshop [data-editor-title] { font-weight: 650; color: #dfe9f3; }

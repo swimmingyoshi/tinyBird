@@ -2343,10 +2343,20 @@ button.card__head:hover .card__title {
   color: var(--teal);
 }
 
+/* Blocks across, not rows down.
+
+   One save per full-width row is right in a 300px rail and wasteful anywhere
+   else: in the workshop's centre column it drew a 96px thumbnail, a name, and
+   then six hundred pixels of nothing. Auto-fit means the same list is one
+   column in the rail, and three or four across wherever there is the room —
+   without a media query that has to guess which container it is in. */
 .saves__list {
   list-style: none;
   margin: 0;
   padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 232px), 1fr));
+  gap: var(--unit);
 }
 
 /* A block, not a row: the picture is the thing that identifies a save, so it
@@ -2365,13 +2375,12 @@ button.card__head:hover .card__title {
     "acts acts";
   align-items: start;
   gap: 6px var(--unit);
-  padding: 10px 0;
-  border-top: 1px solid rgba(36, 48, 74, 0.6);
+  /* Each save is its own block now, so it carries a border on all four sides
+     rather than a rule separating it from the one above. */
+  padding: var(--unit);
+  border: 1px solid rgba(36, 48, 74, 0.9);
+  background: rgba(10, 15, 24, 0.4);
   font-size: 12px;
-}
-
-.saves__item:first-child {
-  border-top: 0;
 }
 
 /* The screenshot is what makes a slot recognisable; the timestamp alone tells
@@ -2481,9 +2490,14 @@ button.card__head:hover .card__title {
   border-color: var(--teal);
 }
 
-/* Four, across the full width of the row: load, then the three that change
-   or remove what is stored. Wrapping is the fallback for a larger text size,
-   not the normal case. */
+/* Four, across the full width of the block: load, then the three that change
+   or remove what is stored.
+
+   They wrap, and at the narrowest column the grid produces they do: four verbs
+   need about 215px and a 232px card has 216px inside it. That is the trade the
+   column width makes deliberately — three saves across a wide panel, with the
+   last verb on a second line, beats two across with everything on one. In the
+   300px rail, where a card is the full width, they stay on one row. */
 .saves__actions {
   grid-area: acts;
   display: flex;

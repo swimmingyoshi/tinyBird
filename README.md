@@ -158,6 +158,24 @@ trade-counter state before starting a new session.
 
 ## Browser play views
 
+Browser fast-forward retains audio and plays it at the accelerated rate, including
+the corresponding pitch increase. Unlimited mode estimates its audio rate from
+achieved emulation speed. Fast-forward and its speed selector are disabled while
+the lobby link cable is enabled; an active speed-up is cancelled immediately.
+Joining a lobby with the cable off still allows solo fast-forward.
+
+Under Sound and picture, Fast forward priority selects Smooth display (shorter
+work slices, no frame batching) or Faster (frame batching). Smooth display may
+achieve a lower speed on busy machines; a single emulated frame cannot be
+interrupted by its display budget. Batching skips intermediate image conversion,
+not GBA hardware timing or internal PPU rendering. Sound during fast forward can
+be switched off independently of normal game sound. Both preferences persist.
+
+Run `node tests/benchmark_fast_forward.mjs` after rebuilding release WASM to
+compare individual frames with audio-preserving batches. It also verifies that
+batching produces identical audio samples, framebuffer, and save state using the
+local FireRed trade-counter fixture.
+
 The `/play` Playroom puts playback and multiplayer controls under the game,
 with live details and saved items in balanced side rails on desktop. Save & load,
 Audio & video, and Cartridge tools expand on demand. The view picker offers
@@ -240,6 +258,10 @@ cargo run --example late_trace -- --bios gba_bios.bin roms/game.gba
 Both examples now auto-use `./gba_bios.bin` when present and the only ROM in `./roms/` when there is exactly one.
 
 ## Game Addons
+
+The browser community manager at `/addons` supports local creation and preview,
+JSON import/export, public releases, per-account installation, and moderation.
+See [Web add-ons](docs/WEB_ADDONS.md) for setup, limits, and the API.
 
 Addons read live state out of the running game and publish it through one shared
 schema, so the dashboard, the web overlay, and any external tool all see the same

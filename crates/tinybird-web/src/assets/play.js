@@ -2,6 +2,11 @@
 // vault. Everything that touches WebAssembly memory lives in tinybird.js.
 
 import { AudioSink, EmulatorError, TinyBird } from "/tinybird.js";
+if (window.parent !== window && new URLSearchParams(location.search).get('embed') === 'workshop') {
+  document.body.dataset.workshopPlayer = 'true';
+  const style = document.createElement('link'); style.rel = 'stylesheet'; style.href = '/workshop-player.css'; document.head.append(style);
+}
+import { api as addonApi, localAddons, enabledManifests, setAddonAccount, disabledBuiltins } from "/addon-client.js";
 import { mountAccount } from "/account.js";
 import { ACTIONS, Controls, keyLabel, padLabel } from "/controls.js";
 import {
@@ -51,6 +56,8 @@ const el = {
   fileRom: $("file-rom"),
   optAudio: $("opt-audio"),
   optSpeed: $("opt-speed"),
+  optFrameMode: $("opt-frame-mode"),
+  optFastAudio: $("opt-fast-audio"),
   optVolume: $("opt-volume"),
   optLcd: $("opt-lcd"),
   optScan: $("opt-scan"),
@@ -632,6 +639,20 @@ function paintDeckHint() {
  * resamples smoothly instead of dropping rows.
  */
 function fitScreen() {
+  if (document.querySelector('#rig').dataset.playView === 'cinema' && el.screen.dataset.mode === 'running') {
+    const column = el.screen.closest('.screen-col');
+    const screens = column.querySelector('.screens');
+    const transport = column.querySelector('.transport');
+    const rig = document.querySelector('#rig');
+    const gap = parseFloat(getComputedStyle(column).gap) || 0;
+    const bottom = parseFloat(getComputedStyle(rig).paddingBottom) || 0;
+    const shared = screens.dataset.view === 'shared';
+    const stacked = shared && getComputedStyle(screens).gridTemplateColumns.split(' ').length === 1;
+    const available = innerHeight - (screens.getBoundingClientRect().top + scrollY)
+      - transport.getBoundingClientRect().height - gap - bottom - (shared ? 32 : 0) - 2;
+    const width = Math.max(120, available / (stacked ? 2 : 1) * (shared && !stacked ? 3 : 1.5));
+    rig.style.setProperty('--cinema-width', `${Math.floor(width)}px`);
+  }
   // The content box, not `getBoundingClientRect` — the bezel is border-box
   // with a 1px edge, so its outer size is 2px more than the panel can have,
   // and a panel built to the outer size loses a pixel each side to `overflow:
@@ -676,6 +697,8 @@ function fitScreen() {
 
 const resizeObserver = new ResizeObserver(fitScreen);
 resizeObserver.observe(el.screen);
+resizeObserver.observe(document.querySelector('.transport'));
+resizeObserver.observe(document.querySelector('.play-toolbar'));
 window.addEventListener("resize", fitScreen);
 
 /**
@@ -708,9 +731,27 @@ document.addEventListener("fullscreenchange", () => {
 });
 
 function setFastForward(on) {
+  on = on && !speedUpBlocked();
   if (fastForward === on) return;
   fastForward = on;
+  frameClock = 0;
+  audio?.flush();
   el.ff.setAttribute("aria-pressed", String(on));
+}
+
+function speedUpBlocked() {
+  return Boolean(session || emu?.linkConnected || (el.link.checked && lobby?.connected));
+}
+
+function syncSpeedControls() {
+  const blocked = speedUpBlocked();
+  el.ff.disabled = blocked;
+  el.optSpeed.disabled = blocked;
+  el.ff.title = blocked ? "Fast forward is unavailable while the lobby link cable is on" : "Run the game faster while held or toggled";
+  if (blocked) {
+    ffLatched = false;
+    setFastForward(false);
+  }
 }
 
 el.ff.addEventListener("click", () => {
@@ -744,6 +785,8 @@ const UNLIMITED_MAX_FRAMES = 240;
 let frameClock = 0;
 /** What fast forward multiplies by; zero means as fast as it will go. */
 let fastForwardSpeed = 4;
+let fastFrameMode = "fast";
+let fastAudio = true;
 /** Emulated frames run since the last FPS report. */
 let framesRun = 0;
 
@@ -758,23 +801,31 @@ function present() {
 /**
  * Run the frames that are due, and no more.
  *
- * Audio is only handed over at normal speed. The samples carry no timing of
- * their own, so pushing them while running at four times the rate would queue
- * four seconds of audio for every second of play.
+ * Solo fast-forward batches retain audio, played at the same speed as the game.
  */
 function runPaced(now, speed) {
   const due = schedule(now, frameClock, speed);
   frameClock = due.clock;
 
   const before = emu.frameCount;
-  for (let i = 0; i < due.frames; i += 1) {
-    emu.runFrame();
-    if (speed === 1 && audio && audio.ready) audio.push(emu.takeAudio());
+  if (speed > 1 && due.frames > 0 && fastFrameMode === "fast") {
+    emu.runAudioFrames(due.frames);
+    if (fastAudio && audio?.ready) audio.push(emu.takeAudio(), speed);
+  } else {
+    const until = performance.now() + 6;
+    for (let i = 0; i < due.frames; i += 1) {
+      emu.runFrame();
+      if ((speed === 1 || fastAudio) && audio?.ready) audio.push(emu.takeAudio(), speed);
+      if (speed > 1 && performance.now() >= until) {
+        if (i + 1 < due.frames) frameClock = 0;
+        break;
+      }
+    }
   }
   // A frame can stop part-way through, at a link transfer, so what was asked
   // for and what was finished are not the same number.
   lastFinished = emu.frameCount - before;
-  return due.frames;
+  return lastFinished;
 }
 
 /** How many of the frames just asked for actually finished. */
@@ -785,19 +836,41 @@ function framesFinished(asked) {
 
 /** Run frames for a slice of wall time rather than to a schedule. */
 function runUnlimited() {
-  const until = performance.now() + UNLIMITED_BUDGET_MS;
+  const start = performance.now();
+  const until = start + (fastFrameMode === "smooth" ? 6 : UNLIMITED_BUDGET_MS);
+  const elapsed = unlimitedLast > 0 ? Math.max(1, start - unlimitedLast) : 1000 / 60;
+  unlimitedLast = start;
+  const chunks = [];
   let ran = 0;
   do {
-    emu.runFrame();
-    ran += 1;
+    const count = fastFrameMode === "smooth" ? 1 : Math.min(UNLIMITED_MAX_FRAMES - ran, Math.max(1, Math.min(8, Math.floor((until - performance.now()) / unlimitedFrameMs))));
+    const batchStart = performance.now();
+    if (fastFrameMode === "smooth") emu.runFrame();
+    else emu.runAudioFrames(count);
+    unlimitedFrameMs = Math.max(0.1, (performance.now() - batchStart) / count);
+    if (fastAudio && audio?.ready) {
+      const samples = emu.takeAudio();
+      if (samples) chunks.push(samples);
+    }
+    ran += count;
   } while (ran < UNLIMITED_MAX_FRAMES && performance.now() < until);
+  if (chunks.length) {
+    const samples = new Float32Array(chunks.reduce((n, chunk) => n + chunk.length, 0));
+    let offset = 0;
+    for (const chunk of chunks) { samples.set(chunk, offset); offset += chunk.length; }
+    audio.push(samples, Math.max(1, ran * 1000 / GBA_FRAME_HZ / elapsed));
+  }
   // The schedule means nothing while unlimited; start it afresh afterwards.
   frameClock = 0;
   return ran;
 }
+let unlimitedLast = 0;
+let unlimitedFrameMs = UNLIMITED_BUDGET_MS;
 
 function tick(now) {
   requestAnimationFrame(tick);
+  syncSpeedControls();
+  if (!fastForward || fastForwardSpeed !== 0 || !running) unlimitedLast = 0;
 
   // Room upkeep first, and outside the check below: watching a room-mate must
   // keep working while your own game is paused, and somebody who stopped
@@ -1010,7 +1083,7 @@ function toggleCard(key) {
   // the body: the next Tab restarted from the top of the page, and a card
   // opened near the bottom of a scrolled rail could open off screen. Put focus
   // back on the card and bring what just appeared into view.
-  const head = el.rig.querySelector(`[data-card-key="${CSS.escape(key)}"]`);
+  const head = el.rig.querySelector(`[data-card-key="${CSS.escape(key)}"]`) ?? workshopReadout?.querySelector(`[data-card-key="${CSS.escape(key)}"]`);
   if (!head) return;
   head.focus({ preventScroll: true });
   (opening ? (head.closest(".card") ?? head) : head).scrollIntoView({
@@ -1172,8 +1245,40 @@ function railItems(sections) {
  * position, so only the pane whose own signature moved is rebuilt.
  */
 const slotCache = new Map();
+let workshopReadout = null;
+let workshopDraftPreview = { status: 'idle', sections: [], error: 'Add a field in the reader builder to see your add-on here.' };
+let workshopPreviewSignature = '';
+
+function renderWorkshopReadout() {
+  if (!workshopReadout) {
+    workshopReadout = document.createElement('section');
+    workshopReadout.className = 'workshop-readout panel';
+    workshopReadout.innerHTML = '<div data-workshop-preview></div>';
+    document.querySelector('.transport').before(workshopReadout);
+    const vault = document.createElement('section'); vault.className = 'workshop-vault';
+    vault.append(span('panel__eyebrow', 'Saved in your vault'), el.savesPane);
+    document.getElementById('tool-saves').append(vault);
+    el.savesPane.hidden = false;
+  }
+  const signature = JSON.stringify([workshopDraftPreview, [...openCards]]);
+  if (signature === workshopPreviewSignature) return;
+  workshopPreviewSignature = signature;
+  const host = workshopReadout.querySelector('[data-workshop-preview]');
+  host.replaceChildren();
+  if (workshopDraftPreview.status !== 'active' || workshopDraftPreview.error) {
+    host.append(span('rail-note', workshopDraftPreview.error || (workshopDraftPreview.status === 'incompatible' ? 'This reader targets a different game or revision.' : 'Waiting for the reader to be ready.')));
+    return;
+  }
+  for (const section of workshopDraftPreview.sections ?? []) {
+    const block = document.createElement('section'); block.className = 'workshop-readout-section';
+    block.append(span('panel__eyebrow', section.title), renderContent(section)); host.append(block);
+  }
+}
 
 function renderRails(sections) {
+  if (document.body.dataset.workshopPlayer === 'true') {
+    lastSections = sections; renderWorkshopReadout(); return;
+  }
   const enemyAppeared =
     sections.some((section) => section.section_id === "enemies") &&
     !lastSections.some((section) => section.section_id === "enemies");
@@ -1411,6 +1516,7 @@ function railButton(label, title, onClick) {
 }
 
 function renderSnapshot(snapshot) {
+  paintAddonStatus(snapshot);
   lastSnapshot = snapshot;
 
   if (!snapshot || !snapshot.rom) {
@@ -1762,6 +1868,11 @@ function restorePreferences() {
     el.optSpeed.value = speed;
   }
   fastForwardSpeed = Number(el.optSpeed.value);
+
+  fastFrameMode = recall("frame-mode") === "smooth" ? "smooth" : "fast";
+  el.optFrameMode.value = fastFrameMode;
+  fastAudio = recall("fast-audio") !== "0";
+  el.optFastAudio.checked = fastAudio;
 
   // Explicitly against null: `Number(null)` is 0, not NaN, so treating a
   // missing preference as a number silently starts every visitor muted.
@@ -2295,6 +2406,7 @@ function reseatCable() {
  * which is no use to somebody in the middle of a trade.
  */
 function renderLinkNote() {
+  syncSpeedControls();
   if (!el.linkNote) return;
   paintLobbyBadge();
   $("btn-link-retry").hidden = sessionPhase !== "failed";
@@ -3557,6 +3669,16 @@ let accountKnown = false;
  * a real change means the vault on screen belongs to the wrong person.
  */
 function onAccountChange(user) {
+  addonUser = user;
+  setAddonAccount(user);
+  addonGeneration++;
+  activeManifests = [];
+  if (emu) {
+    applyBuiltinPreferences();
+    emu.installManifests([]);
+    renderSnapshot(emu.snapshot());
+    installManifests();
+  }
   offerClaim();
   if (!accountKnown) {
     accountKnown = true;
@@ -4511,6 +4633,23 @@ el.optSpeed.addEventListener("change", () => {
   fastForwardSpeed = Number(el.optSpeed.value);
   remember("speed", el.optSpeed.value);
   if (fastForward) frameClock = 0;
+  unlimitedLast = 0;
+  audio?.flush();
+});
+
+el.optFrameMode.addEventListener("change", () => {
+  fastFrameMode = el.optFrameMode.value === "smooth" ? "smooth" : "fast";
+  remember("frame-mode", fastFrameMode);
+  frameClock = 0;
+  unlimitedLast = 0;
+  unlimitedFrameMs = UNLIMITED_BUDGET_MS;
+  audio?.flush();
+});
+
+el.optFastAudio.addEventListener("change", () => {
+  fastAudio = el.optFastAudio.checked;
+  remember("fast-audio", fastAudio ? "1" : "0");
+  audio?.flush();
 });
 
 el.optVolume.addEventListener("input", () => {
@@ -4585,20 +4724,79 @@ window.addEventListener("drop", async (event) => {
  */
 /** How many manifest addons loaded at boot, for the devtools handle. */
 let manifestsInstalled = 0;
+let addonUser = null;
+let addonGeneration = 0;
+let activeManifests = [];
+let addonChannel;
+function previewWorkshop(manifest) {
+  if (!emu?.hasRom) throw new Error('Load a game to test your reader.');
+  try {
+    emu.installManifests([manifest]);
+    const snapshot = emu.snapshot();
+    return { status: snapshot.community_addons?.[0]?.status ?? 'idle',
+      error: snapshot.community_addons?.[0]?.error,
+      sections: snapshot.addon?.sections?.filter(section => section.section_id.startsWith(`community:${manifest.addon_id}:`)) ?? [] };
+  } finally { emu.installManifests(activeManifests); }
+}
+try {
+  addonChannel = new BroadcastChannel('tinybird:addons');
+  addonChannel.addEventListener('message', event => {
+    const request = event.data;
+    if (request?.type === 'changed') { installManifests(); return; }
+    if (request?.type !== 'preview' || request.owner !== (addonUser?.id ?? null) || !emu?.hasRom) return;
+    try {
+      const manifest = { ...request.manifest, addon_id: 'preview.reader' };
+      emu.installManifests([manifest]);
+      const snapshot = emu.snapshot();
+      addonChannel.postMessage({ type: 'preview-result', request: request.request,
+        status: snapshot.community_addons?.[0]?.status ?? 'idle', error: snapshot.community_addons?.[0]?.error,
+        sections: snapshot.addon?.sections?.filter(section => section.section_id.startsWith('community:preview.reader:')) ?? [] });
+    } catch (error) {
+      addonChannel.postMessage({ type: 'preview-result', request: request.request, error: error.message });
+    } finally { emu.installManifests(activeManifests); }
+  });
+} catch {}
+window.addEventListener('storage', event => { if (event.key?.startsWith('tinybird:local-addons:') && !event.key.endsWith(':draft')) installManifests(); });
+window.addEventListener('focus', async () => { await accounts?.refresh(); if (emu) installManifests(); });
+// Picks up moderation and account installation changes made on other devices.
+setInterval(() => { if (emu && !document.hidden) installManifests(); }, 30000);
 
 async function installManifests() {
+  if (!emu) return;
+  const generation = ++addonGeneration;
   try {
-    const response = await fetch("/api/addons");
-    if (!response.ok) return;
-    const manifests = await response.json();
+    applyBuiltinPreferences();
+    const result = addonUser ? await addonApi('/installed') : { installed: [] };
+    if (generation !== addonGeneration) return;
+    const manifests = enabledManifests(result.installed, localAddons(addonUser));
     const installed = emu.installManifests(manifests);
+    activeManifests = manifests;
     manifestsInstalled = installed;
-    if (installed > 0) {
-      say(`Loaded ${installed} addon manifest${installed === 1 ? "" : "s"}`);
+    const snapshot = emu.snapshot();
+    renderSnapshot(snapshot);
+    paintAddonStatus(snapshot);
+  } catch (error) {
+    if (generation === addonGeneration) {
+      if (error.status === 401 || error.status === 409) {
+        activeManifests = []; emu.installManifests([]); renderSnapshot(emu.snapshot());
+        accounts?.refresh();
+      }
+      $('addon-runtime-status').textContent = `Add-ons: ${error.message}`;
     }
-  } catch {
-    // No manifests, which is the ordinary case.
   }
+}
+
+function applyBuiltinPreferences() {
+  const known = new Set((emu.snapshot().builtin_addons ?? []).map(info => info.addon_id));
+  emu.setDisabledBuiltins(disabledBuiltins(addonUser).filter(id => known.has(id)));
+}
+
+function paintAddonStatus(snapshot) {
+  const statuses = snapshot?.community_addons ?? [];
+  const status = statuses.length
+    ? statuses.map(item => `${item.display_name}: ${item.error ?? item.status}`).join(' · ')
+    : manifestsInstalled ? 'Load a game to activate your add-ons.' : 'Add community readers to your game.';
+  if ($('addon-runtime-status').textContent !== status) $('addon-runtime-status').textContent = status;
 }
 
 async function boot() {
@@ -4610,6 +4808,19 @@ async function boot() {
     // objects, so a session can be inspected — or a register read out while a
     // link misbehaves — without instrumenting the page to find out.
     window.tinybird = {
+      previewAddon: previewWorkshop,
+      showAddonPreview(result) {
+        if (document.body.dataset.workshopPlayer !== 'true') return;
+        workshopDraftPreview = result; renderWorkshopReadout();
+      },
+      attachAddonPreview(host) {
+        if (document.body.dataset.workshopPlayer !== 'true') return;
+        renderWorkshopReadout();
+        if (workshopReadout.parentElement !== host) host.replaceChildren(workshopReadout);
+      },
+      refreshAddons: installManifests,
+      refreshAccount: () => accounts?.refresh(),
+      get addonOwner() { return addonUser?.id ?? null; },
       get emu() {
         return emu;
       },

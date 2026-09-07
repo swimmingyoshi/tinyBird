@@ -23,7 +23,7 @@
 
 use std::sync::RwLock;
 
-use tinybird_addons::{MemoryView, RomIdentity, ROM_BASE};
+use crate::{MemoryView, RomIdentity, ROM_BASE};
 
 /// Largest cartridge the GBA addresses.
 const MAX_ROM_BYTES: usize = 32 * 1024 * 1024;
@@ -317,6 +317,8 @@ fn encode(text: &str) -> Vec<u8> {
             '.' => 0xAD,
             '-' => 0xAE,
             '\'' => 0xB4,
+            '\u{2642}' => 0xB5,
+            '\u{2640}' => 0xB6,
             ',' => 0xB8,
             '/' => 0xB9,
             ':' => 0xBA,
@@ -346,6 +348,12 @@ fn decode(bytes: &[u8]) -> String {
             0xAD => text.push('.'),
             0xAE => text.push('-'),
             0xB4 => text.push('\''),
+            // Nidoran is two species that differ only by this character, and
+            // an unmapped byte makes `decode` abandon the whole name — so
+            // without these two the only species a cartridge could never name
+            // were exactly the pair that most need the distinction.
+            0xB5 => text.push('\u{2642}'),
+            0xB6 => text.push('\u{2640}'),
             0xB8 => text.push(','),
             0xB9 => text.push('/'),
             0xBA => text.push(':'),
@@ -361,7 +369,7 @@ fn decode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tinybird_addons::SparseMemory;
+    use crate::SparseMemory;
 
     fn rom_id(code: &str) -> RomIdentity {
         dump(code, 0)
@@ -393,7 +401,10 @@ mod tests {
 
     #[test]
     fn text_survives_a_round_trip() {
-        for original in ["POUND", "MASTER BALL", "POKé BALL", "X-SCISSOR", "DON'T"] {
+        for original in [
+            "POUND", "MASTER BALL", "POKé BALL", "X-SCISSOR", "DON'T",
+            "NIDORAN\u{2642}", "NIDORAN\u{2640}",
+        ] {
             assert_eq!(decode(&encode(original)), original, "{original}");
         }
     }

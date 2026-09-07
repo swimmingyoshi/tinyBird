@@ -135,6 +135,10 @@ await client.eval("document.activeElement.blur(); true");
 for (const view of ["focus", "cinema", "desk"]) {
   await key("Tab");
   assert.equal(await mode(), view);
+  if (view === "cinema") {
+    await sleep(200);
+    assert.ok(await client.eval('document.documentElement.scrollHeight <= innerHeight + 1'), 'Cinema must fit vertically');
+  }
   assert.ok(await client.eval(`(() => {
     const screen = document.querySelector('.screen').getBoundingClientRect();
     return Math.abs(screen.left + screen.width / 2 - document.documentElement.clientWidth / 2) < 2;

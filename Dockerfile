@@ -40,6 +40,7 @@ ENV TINYBIRD_WEB_HOST=0.0.0.0 \
     TINYBIRD_WEB_SNAPSHOT=/app/data/current-game.json \
     TINYBIRD_WEB_SPRITES=/app/data/sprites \
     TINYBIRD_ADDONS=/app/addons \
+    TINYBIRD_ADDON_DB=/app/data/community-addons.sqlite3 \
     TINYBIRD_LOCAL_ROMS=off \
     TINYBIRD_WEB_OVERLAY=off
 
