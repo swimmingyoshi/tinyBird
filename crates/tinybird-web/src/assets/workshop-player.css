@@ -1,0 +1,54 @@
+/* Only loaded inside the dedicated workshop's test frame. */
+body[data-workshop-player] { background: #0c131d; }
+body[data-workshop-player] .rig { padding: 12px; min-height: 0; }
+body[data-workshop-player] :is(.bar, .play-toolbar, .companion, #manage-addons, #btn-lobby, #btn-full, #deck-hint) { display: none !important; }
+body[data-workshop-player] .rig .deck { display: block; }
+body[data-workshop-player] .rig .screen-col { width: 100%; max-width: none; }
+body[data-workshop-player] .transport { flex-wrap: wrap; }
+body[data-workshop-player] .status { margin-bottom: 8px; }
+body[data-workshop-player] .rig .screen { max-width: 100%; }
+body[data-workshop-player] .workshop-readout { margin: 12px 0; padding: 12px; min-width: 0; }
+.workshop-readout-tabs { display: flex; gap: 8px; margin-bottom: 12px; }
+.workshop-readout-tabs .key[aria-pressed=true] { background: #b9eed8; color: #102d24; border-color: #b9eed8; }
+body[data-workshop-player] .screen__empty { min-height: 310px; padding: 20px; }
+body[data-workshop-player] .rig .screen[data-mode="empty"] { min-height: 360px; }
+body[data-workshop-player] .empty-cartridge { display: none; }
+.workshop-readout [data-workshop-preview], .workshop-readout [data-workshop-saves] { max-height: 280px; overflow: auto; }
+.workshop-readout-section + .workshop-readout-section { margin-top: 16px; }
+.workshop-readout-section > .panel__eyebrow { display: block; margin-bottom: 8px; }
+.workshop-readout [hidden] { display: none !important; }
+.workshop-vault { margin-top: 18px; padding-top: 16px; border-top: 1px solid #344052; }
+.workshop-vault > .panel__eyebrow { display: block; margin-bottom: 12px; }
+
+/* Opening a drawer must not push the game off the top of the frame.
+
+   The tools sit under the screen, so "Save & load" used to add several hundred
+   pixels between them and the top of the frame — and since the frame is a
+   fixed height, that meant scrolling the emulator away to reach the very
+   controls that act on it. You cannot pick a save state by its screenshot
+   while the game you are picking it for is off-screen.
+
+   Two halves to the fix. The screen sticks to the top of the frame, so it is
+   still there whatever is open below it; and an open drawer scrolls inside
+   itself rather than growing without limit, so the scroll it costs is bounded
+   by what the drawer holds rather than by how many saves are in the vault.
+
+   The transport is deliberately *not* pinned as well. Pinning a second strip
+   means knowing how tall the first one is, which is a measured offset and a
+   resize observer to keep it honest — and the thing that has to stay in view
+   while you pick a save state is the picture, not the pause button. */
+body[data-workshop-player] .screens {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: #0c131d;
+  padding-bottom: 8px;
+}
+
+body[data-workshop-player] .tool-body {
+  max-height: 46vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #40566b transparent;
+}

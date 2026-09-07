@@ -17,7 +17,7 @@ use tinybird_addons::schema::{
 };
 use tinybird_addons::{AddonInfo, GameAddon, MemoryView, RomIdentity};
 
-use crate::gen3_names;
+use tinybird_addons::gen3_names;
 use crate::{AddonData, AddonSnapshot};
 
 const ADDON_VERSION: &str = "0.2.0";
@@ -2915,7 +2915,7 @@ mod tests {
     fn the_dex_is_there_with_no_battle_and_no_area() {
         let sections = fire_red_sections(&snapshot_of(vec![member(1, 30, 30)]));
 
-        let ids: Vec<_> = sections.iter().map(|s| s.section_id).collect();
+        let ids: Vec<_> = sections.iter().map(|s| s.section_id.as_str()).collect();
         assert_eq!(ids, vec!["party", "dex"]);
 
         let dex = section(&sections, "dex");

@@ -12,6 +12,7 @@ use tinybird_addons::SNAPSHOT_SCHEMA_VERSION;
 use tokio::net::TcpListener;
 
 mod auth;
+mod community_addons;
 mod contact;
 mod dotenv;
 mod lobby;
@@ -137,6 +138,7 @@ const FFTA_JOB_PNGS: [&[u8]; 42] = [
 
 #[derive(Clone, Debug)]
 struct AppState {
+    community_addons: community_addons::Store,
     snapshot_path: PathBuf,
     sprite_dir: PathBuf,
     wasm_path: PathBuf,
@@ -186,6 +188,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bios_display = config.bios_path.display().to_string();
 
     let state = AppState {
+        community_addons: community_addons::Store::open(&PathBuf::from(
+            env::var("TINYBIRD_ADDON_DB")
+                .unwrap_or_else(|_| "stream-data/community-addons.sqlite3".into()),
+        ))?,
         snapshot_path: config.snapshot_path,
         sprite_dir: config.sprite_dir,
         overlay_enabled: config.overlay_enabled,
@@ -202,6 +208,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serve_local_roms: local_roms_enabled(),
     };
     let app = Router::new()
+        .route("/memory-sheets.js", get(|| async { static_text(include_str!("assets/memory-sheets.js"), "text/javascript; charset=utf-8") }))
+        .route("/reader-guide", get(|| async { Html(include_str!("assets/reader-guide.html")) }))
+        .route("/addon", get(|| async { Html(include_str!("assets/addons.html")) }))
+        .route("/workshop-player.css", get(|| async { static_text(include_str!("assets/workshop-player.css"), "text/css; charset=utf-8") }))
+        .route(
+            "/addons",
+            get(|| async { Html(include_str!("assets/addons.html")) }),
+        )
+        .route(
+            "/addons.js",
+            get(|| async {
+                static_text(include_str!("assets/addons.js"), "text/javascript; charset=utf-8")
+            }),
+        )
+        .route("/workshop.js", get(|| async { static_text(include_str!("assets/workshop.js"), "text/javascript; charset=utf-8") }))
+        .route("/workshop-model.js", get(|| async { static_text(include_str!("assets/workshop-model.js"), "text/javascript; charset=utf-8") }))
+        .route("/workshop.css", get(|| async { static_text(include_str!("assets/workshop.css"), "text/css; charset=utf-8") }))
+        .route(
+            "/addon-client.js",
+            get(|| async {
+                static_text(include_str!("assets/addon-client.js"), "text/javascript; charset=utf-8")
+            }),
+        )
+        .route(
+            "/addons.css",
+            get(|| async {
+                static_text(include_str!("assets/addons.css"), "text/css; charset=utf-8")
+            }),
+        )
+        .route(
+            "/api/community-addons",
+            get(community_addons::catalog)
+                .post(community_addons::publish)
+                .layer(DefaultBodyLimit::max(80 * 1024)),
+        )
+        .route(
+            "/api/community-addons/installed",
+            get(community_addons::installed),
+        )
+        .route(
+            "/api/community-addons/reports",
+            get(community_addons::reports),
+        )
+        .route(
+            "/api/community-addons/{id}",
+            get(community_addons::detail).delete(community_addons::withdraw),
+        )
+        .route(
+            "/api/community-addons/{id}/installation",
+            axum::routing::put(community_addons::install)
+                .delete(community_addons::uninstall)
+                .layer(DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/api/community-addons/{id}/reports",
+            axum::routing::post(community_addons::report).layer(DefaultBodyLimit::max(4096)),
+        )
         .route("/", get(index))
         .route("/overlay", get(overlay))
         .route("/overlay/{section}", get(overlay))
@@ -2247,10 +2310,9 @@ async fn ffta_job_png(Path(job): Path<String>) -> Response {
 fn static_text(body: &'static str, content_type: &'static str) -> Response {
     let mut response = text(StatusCode::OK, body.to_string(), content_type);
     // These stable asset URLs change when the server is rebuilt.
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-cache"),
-    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     response
 }
 

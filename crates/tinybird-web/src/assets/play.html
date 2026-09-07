@@ -26,6 +26,7 @@
           <a class="is-current" href="/play" aria-current="page">Play</a>
           <a href="/info">Info</a>
           <a href="/contact">Contact</a>
+        <a href="/addons">Add-ons</a>
         </nav>
         <p class="bar__state" id="link-state" data-state="idle">
           <span class="dot" aria-hidden="true"></span><span id="link-label">no cartridge</span>
@@ -43,7 +44,6 @@
            bottom of a tall page it was usually scrolled out of view. -->
       <div class="play-toolbar">
         <div class="play-toolbar__intro">
-          <span class="play-toolbar__eyebrow">THE PLAYROOM</span><h1 class="play-toolbar__title">A little time to play.</h1>
           <span id="view-description">Your game, with everything you need close by</span>
         </div>
         <div class="view-picker" role="group" aria-label="Play view">
@@ -76,7 +76,7 @@
                 <!-- Sized by script to a whole multiple of 240x160 so the picture
                      lands on exact pixel boundaries, the way the desktop scales. -->
                 <div class="screen__panel" id="screen-panel">
-                  <canvas id="canvas" width="240" height="160" aria-label="Game screen"></canvas>
+                  <canvas id="canvas" width="240" height="160" tabindex="0" aria-label="Game screen"></canvas>
                   <div class="screen__grid" aria-hidden="true"></div>
                   <div class="screen__boot" id="boot" aria-hidden="true"></div>
                 </div>
@@ -161,6 +161,7 @@
                 >
                   Lobby / Link cable<span class="key__badge" id="lobby-badge" hidden>in</span>
                 </button>
+              <a class="key" id="manage-addons" href="/addon#manage" target="_blank" rel="noopener">Manage add-ons</a>
               <button
                   class="key"
                   id="btn-controls"
@@ -251,11 +252,22 @@
                   </select>
                 </label>
                 <label class="dial">
+                  <span class="dial__label">Fast forward priority</span>
+                  <select id="opt-frame-mode" title="Smooth gives controls and display more time; Faster batches intermediate frames for more speed.">
+                    <option value="smooth">Smooth display</option>
+                    <option value="fast" selected>Faster (frame batching)</option>
+                  </select>
+                </label>
+                <label class="dial">
                   <span class="dial__label">Volume</span>
                   <input type="range" id="opt-volume" min="0" max="100" value="70" />
                 </label>
               </div>
               <div class="rack__toggles">
+                <label class="toggle" title="Play accelerated game audio during fast forward">
+                  <input type="checkbox" id="opt-fast-audio" checked />
+                  <span>Sound during fast forward</span>
+                </label>
                 <label class="toggle" title="Turn game audio on">
                   <input type="checkbox" id="opt-audio" />
                   <span>Sound</span>
@@ -314,8 +326,9 @@
              screen it describes, and spreading the sections over two rails is
              how you get to see two of them at once. -->
         <div class="companion">
-          <div class="companion__head"><span class="companion__dot" aria-hidden="true"></span><h2>Game companion</h2><span>DETAILS</span></div>
+          <div class="companion__head"><span class="companion__dot" aria-hidden="true"></span><h2>Game companion</h2></div>
         <aside class="readout readout--addons">
+          <p id="addon-runtime-status" role="status" hidden></p>
           <section class="panel deckpanel" id="live-panel" hidden>
             <p class="panel__eyebrow rail__head">
               <span id="live-title">Live</span

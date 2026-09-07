@@ -16,8 +16,11 @@
 
 pub mod cartridge;
 pub mod ffta;
-pub mod gen3_names;
 pub mod pokemon_frlg;
+
+/// Cartridge name tables, shared with manifest readers. Lives in
+/// `tinybird-addons` so a JSON manifest can name a species too.
+pub use tinybird_addons::gen3_names;
 
 use std::sync::OnceLock;
 
@@ -146,6 +149,11 @@ pub struct AddonStatus {
 
 /// Read the current game state through the registry.
 pub fn capture_stream_snapshot(gba: Option<&Gba>) -> StreamSnapshot {
+    capture_stream_snapshot_excluding(gba, &[])
+}
+
+/// Capture with host-selected readers disabled.
+pub fn capture_stream_snapshot_excluding(gba: Option<&Gba>, disabled: &[String]) -> StreamSnapshot {
     let Some(gba) = gba else {
         return StreamSnapshot::default();
     };
@@ -155,7 +163,7 @@ pub fn capture_stream_snapshot(gba: Option<&Gba>) -> StreamSnapshot {
         return StreamSnapshot::default();
     };
 
-    let detection = registry().detect(&memory, &rom);
+    let detection = registry().detect_excluding(&memory, &rom, disabled);
     StreamSnapshot {
         schema_version: SNAPSHOT_SCHEMA_VERSION,
         rom: Some(rom),

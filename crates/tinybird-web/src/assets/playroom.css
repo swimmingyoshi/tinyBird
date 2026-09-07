@@ -46,6 +46,7 @@
 .rig:where([data-play-view]) #btn-play { min-width: 100px; }
 .rig:where([data-play-view]) #btn-lobby { color: #c5ecd9; border-color: #3c6554; background: #1a3027; }
 .transport__secondary .key { min-width: auto; background: transparent; }
+.transport__secondary a.key { text-decoration: none; }
 .rig:where([data-play-view]) #btn-reset, .rig:where([data-play-view]) #btn-eject { color: #e4b8ac; border-color: #62443f; background: #2b2020; }
 .rig:where([data-play-view]) .deckplate.tools { padding: 0; border: var(--edge); border-radius: 14px; background: #101720; gap: 0; overflow: hidden; }
 .tools__nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; }
@@ -69,6 +70,8 @@
 .companion__head h2 { margin: 0; font-size: 14px; font-weight: 600; }
 .companion__head > span:last-child { margin-left: auto; font-size: 9px; letter-spacing: .12em; color: #a1b8b1; }
 .companion__dot { width: 6px; height: 6px; border-radius: 50%; background: #9dccb9; }
+.addon-manager-link { padding: 8px 2px; font-size: 12px; }
+#addon-runtime-status { overflow-wrap: anywhere; margin: 8px 0; }
 .rig:where([data-play-view]) .readout { position: static; max-height: none; overflow: visible; gap: 16px; }
 .rig:where([data-play-view]) .readout--addons > * { max-width: none; }
 .rig:where([data-play-view]) .panel { border-radius: 12px; overflow: hidden; background: #101923; border-color: #293746; }
@@ -169,6 +172,9 @@
 .rig:where([data-play-view]) .screen:fullscreen { border-radius: 0; }
 
 /* Equal side rails keep the game on the page centerline. */
+#rig[data-play-view="cinema"] .screen-col:has(.screen[data-mode="running"]) {
+  width: min(100%, var(--cinema-width, calc((100dvh - 260px) * 1.5)));
+}
 .rig:where([data-play-view]) .screen { margin-inline: auto; }
 .rig:where([data-play-view]) .screen-col { width: 100%; margin-inline: auto; }
 .rig:where([data-play-view]) .companion > .readout { min-width: 0; }

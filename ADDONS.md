@@ -182,7 +182,7 @@ envelope shape changes.
 
 ## Addons written as data
 
-**Proof of concept.** `crates/tinybird-addons/src/manifest.rs`, with a worked
+**Desktop adapter and browser manifest runtime.** `crates/tinybird-addons/src/manifest.rs`, with a worked
 example in `addons/example.firered-trainer.json`.
 
 A manifest is a JSON file saying *where to read* and *what to call it*:
@@ -212,13 +212,12 @@ Loading the files is the host's job, and both hosts do it:
 | Host | How |
 |---|---|
 | Desktop | `addon_manifests::install()` at startup reads `addons/*.json`. `TINYBIRD_ADDONS` moves the directory. |
-| Browser | The server serves the same directory as one array at `/api/addons`; the page fetches it and calls `tb_install_manifests`. There is no filesystem in a browser, so the bytes arrive the way everything else does. |
+| Browser | `/addons` manages local readers and account installations. `tb_install_manifests` atomically replaces the session-owned set; readers append sections alongside built-ins. See `docs/WEB_ADDONS.md`. |
 
-Either way it happens **once, before the first snapshot** — the registry is
-built the first time it is read and `install_manifests` refuses afterwards,
-because swapping addons underneath a running game is a worse answer than saying
-no. A file that will not parse is reported and skipped: one bad manifest should
-cost that manifest, not the emulator.
+Desktop installation happens once before its first snapshot. Browser installation
+can happen between frames, including replacement and removal. Its validation
+path uses owned metadata rather than the desktop's static registry. Invalid
+replacement preserves the previous installation.
 
 ### Why this shape
 
@@ -234,21 +233,43 @@ target, which is the point — it is the piece a language model could write, wit
 the probe still doing the part that needs a running game.
 
 A manifest naming a wrong address would otherwise produce confident nonsense,
-so `snapshot` reports nothing when every read came back zero: unmapped memory
-reads as zero, and a panel of zeroes is indistinguishable from a panel that is
-simply wrong.
+so match exact game codes/revisions and use an optional `when` readiness condition. Numeric zero is valid data; null pointers remain idle.
+
+### What a field can read
+
+| `read` | What it is |
+|---|---|
+| `{"u8"/"u16"/"u32": "0x…"}` | A little-endian number. The address may be a `{"at":…,"deref":[…]}` pointer chain. |
+| `{"text": {"at": "0x…", "len": 16}}` | ASCII, stopping at the first byte that is not. |
+| `{"literal": "Slot"}` | A fixed string, for a heading the game does not store. |
+| `{"index": null}` | Which repeat this is, counting from one. |
+| `{"gen3_text": {"at": "0x…", "len": 10}}` | Text in Generation 3's own alphabet. A nickname sits at `record + 8`. |
+| `{"gen3_species": "0x…"}` | The species of the record starting here — decrypted, un-permuted, and named from the cartridge's own table. Reads as `#21` when the tables were not found. |
+
+Adding `"max"` to a field, in the same shape, turns it into a gauge: the
+renderer draws a bar and colours it from the fraction, which is where `tone`
+comes from without anyone choosing one. A `cards` section may also carry
+`"image": {"gen3_species_sprite": "0x…"}`.
+
+The two `gen3_*` reads are in `crates/tinybird-addons/src/gen3.rs` and
+`gen3_names.rs`, deliberately in the shared crate rather than beside the
+FireRed reader, because a manifest is evaluated in `tinybird-addons` and could
+not otherwise reach them. Finding the cartridge's name tables is one pass over
+the whole ROM — far outside the per-update read budget — so the host calls
+`Manifest::prepare` once, and only for a manifest whose
+`needs_cartridge_names()` says it will use them.
 
 ### What it cannot do yet
 
 | Missing | Why it matters |
 |---|---|
-| Decryption | Gen 3 party slots are XOR-encrypted with a derived key and reordered by personality value. No declarative format expresses that; the plain fields — nickname, level, HP — are readable. |
-| Arithmetic | No totals, no percentages, no "species 16 is Pidgey". |
-| Conditions | A section cannot appear only during a battle, which is what the dex tab does. |
-| Tone and badge rules | Nothing can flag itself the way the IV check does. |
+| Decryption beyond species | `gen3_species` undoes the XOR and the personality permutation, but only for the species field. Moves, IVs and EVs are in the same encrypted block and have no read of their own. |
+| Arithmetic | No totals, no percentages, no derived stats. |
+| Per-section conditions | A root `when` readiness condition is supported; individual sections do not yet have separate conditions. |
+| Tone and badge rules | A gauge gets a tone from its fraction; nothing can flag itself the way the IV check does. |
 
-A manifest can express a **reader**, not an **interpreter**. Conditions and
-simple arithmetic are the two worth adding next, in that order.
+A manifest can express a **reader**, not an **interpreter**. Per-section conditions and
+simple arithmetic are useful next extensions.
 
 ---
 
@@ -269,7 +290,7 @@ Use `tinybird-probe` to find the addresses —
 
 ## Still to do
 
-- Manifests cannot express decryption, arithmetic, conditions, or tone rules.
+- Manifests cannot express decryption, arithmetic, per-section conditions, or custom tone rules.
   See "What it cannot do yet" below.
 - Per-addon enable/disable in settings.
 - FFTA: identify the two unlabelled `u16` stats in the unit record, level, JP,

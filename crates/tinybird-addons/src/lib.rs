@@ -1,6 +1,6 @@
 //! Shared addon contracts for tinyBird hosts, overlays, and external tools.
 //!
-//! This crate is the addon extension point. It has three parts:
+//! This crate is the addon extension point:
 //!
 //! - [`schema`] — the stable export envelope (`StreamSnapshot`,
 //!   `AddonSnapshot`, `AddonSection`) that overlays and tools consume.
@@ -10,12 +10,18 @@
 //!   of bytes via [`SparseMemory`].
 //! - [`registry`] — [`GameAddon`] and [`AddonRegistry`]: how a host discovers
 //!   which addon claims a ROM, and why it produced nothing when it did not.
+//! - [`gen3`] and [`gen3_names`] — the two decoders a JSON manifest cannot
+//!   express for itself: the Generation 3 character set and the encrypted
+//!   species field, and the cartridge's own name tables. They sit here rather
+//!   than beside the FireRed reader so that [`manifest`] can reach them.
 //!
 //! Adding support for a new game means implementing [`GameAddon`] and
 //! registering it. Nothing else in the workspace needs to change.
 //!
 //! See `ADDONS.md` for a worked example.
 
+pub mod gen3;
+pub mod gen3_names;
 pub mod manifest;
 pub mod memory;
 pub mod registry;

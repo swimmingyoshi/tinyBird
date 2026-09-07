@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>tinyBird · Memory sheets</title><link rel="stylesheet" href="/console.css"><link rel="stylesheet" href="/addons.css"></head>
+<body><main class="rig site-page addons-page"><section class="panel addon-panel">
+<a href="/addon#workshop">← Workshop</a><h1>From a memory address to a shared reader</h1>
+<p>A memory sheet is a runnable add-on with documented fields. Publish one from Share, or export its JSON. Community → Public memory sheets lets players search labels, addresses, and game codes, inspect definitions, and use a release as a starting point.</p>
+<h2>1. Direct values</h2><p>Unsigned numbers are little-endian. A field carries a label, a read definition, and optional discovery notes. For English FireRed revision 0, the compiled reader uses a party base of <code>0x02024284</code>. Each party record is 100 bytes; current HP is at byte 86 and maximum HP at byte 88.</p>
+<pre>{
+  "label": "First party member HP",
+  "read": { "u16": "0x020242DA" },
+  "max": { "u16": "0x020242DC" },
+  "hint": "Party base +86 / +88. Read after loading a save with a party."
+}</pre>
+<p>These offsets come from TinyBird's <code>pokemon_frlg.rs</code> party profiles and party-record decoder. The workshop example also supports English Emerald revision 0. ROM hacks may retain the original game code while changing the layout; test your own dump.</p>
+<h2>2. Pointer paths</h2><p>A direct address may move after loading another save. When a stable location contains a pointer to the object, use a pointer path. This illustrative path reads a 32-bit pointer from <code>0x03000000</code>, adds 4, and reads a 16-bit value there. It is a syntax example, not a verified game address.</p>
+<pre>{ "label": "Example stat", "read": { "u16": { "at": "0x03000000", "deref": [4] } } }</pre>
+<p>Each additional offset reads another pointer and then adds that offset. Test pointer paths across resets and save loads. Use the advanced JSON editor for paths and repeated cards.</p>
+<h2>3. Text and encoded data</h2><pre>{ "label": "ROM code", "read": { "text": { "at": "0x080000AC", "len": 4 } } }</pre>
+<p>Text reads and text searches use ASCII. Pokémon names use a custom alphabet; parts of Pokémon records are also encrypted and reordered. TinyBird's compiled reader handles those transformations. A plain address sheet cannot reproduce a custom decoder. Search raw bytes with patterns such as <code>0F ?? 2A 00</code> when you know part of the stored representation.</p>
+<h2>4. Document what you found</h2><p>Record the meaning, type, game version, when the value is valid, and how you tested it. Include whether a reset or save load changes the address. Unknown starting values, changed/unchanged scans, numeric ranges, and scanning every byte can help narrow candidates. A matching address is a candidate until you test it in different game situations.</p>
+<h2>5. Share the definitions</h2><p>Sheets use the existing manifest format and add <code>"$comment": {"kind":"memory_sheet","memory_sheet_version":1}</code>. Publishing creates an immutable community release with your description and license. It shares definitions and notes, not ROMs, saves, or memory snapshots. Copies retain their source release, author, and license metadata.</p>
+<p>Compatibility is currently game code plus revision. Shared sheets are author-contributed findings; they are not automatically verified for every ROM.</p>
+</section></main></body></html>

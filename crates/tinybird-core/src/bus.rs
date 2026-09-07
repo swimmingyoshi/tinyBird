@@ -2298,8 +2298,8 @@ mod tests {
         assert_eq!(bus.read_u16(REGION_ROM_START + 0xC8), 1);
         assert_eq!(
             bus.read_u16(REGION_ROM_START + 0xC4),
-            0,
-            "and now they are the chip, whose pins are all low"
+            2,
+            "and now they are the chip, whose idle SIO output is high"
         );
     }
 

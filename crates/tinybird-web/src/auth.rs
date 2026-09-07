@@ -139,6 +139,18 @@ pub struct Sessions {
 }
 
 impl Sessions {
+    #[cfg(test)]
+    pub(crate) fn add_test_user(&self, id: &str, user: User) {
+        self.insert(
+            id.into(),
+            Session {
+                access_token: "test-only".into(),
+                cookies: Vec::new(),
+                user,
+                access_expires_at: SystemTime::now() + Duration::from_secs(3600),
+            },
+        );
+    }
     pub fn new() -> Self {
         Self::default()
     }

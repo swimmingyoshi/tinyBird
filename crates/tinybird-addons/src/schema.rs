@@ -95,7 +95,7 @@ impl AddonTone {
         if max == 0 {
             return AddonTone::Neutral;
         }
-        match value.min(max) * 100 / max {
+        match u64::from(value.min(max)) * 100 / u64::from(max) {
             0 => AddonTone::Bad,
             1..=25 => AddonTone::Warn,
             _ => AddonTone::Good,
@@ -124,15 +124,15 @@ impl AddonMeter {
     /// A meter with no maximum reads as empty rather than as an error: an
     /// addon reporting 0/0 is saying the quantity does not apply right now.
     pub fn percent(&self) -> u32 {
-        (self.value.min(self.max) * 100)
-            .checked_div(self.max)
-            .unwrap_or(0)
+        (u64::from(self.value.min(self.max)) * 100)
+            .checked_div(u64::from(self.max))
+            .unwrap_or(0) as u32
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct AddonSection {
-    pub section_id: &'static str,
+    pub section_id: String,
     pub title: String,
     /// One line of context under the title: what this section is reading, or
     /// why it is thin. Optional, and consumers may drop it when space is tight.
@@ -155,12 +155,12 @@ pub struct AddonSection {
 
 impl AddonSection {
     pub fn new(
-        section_id: &'static str,
+        section_id: impl Into<String>,
         title: impl Into<String>,
         content: AddonSectionContent,
     ) -> Self {
         Self {
-            section_id,
+            section_id: section_id.into(),
             title: title.into(),
             note: None,
             badge: None,
@@ -169,23 +169,31 @@ impl AddonSection {
     }
 
     pub fn key_value(
-        section_id: &'static str,
+        section_id: impl Into<String>,
         title: impl Into<String>,
         fields: Vec<AddonField>,
     ) -> Self {
         Self::new(section_id, title, AddonSectionContent::KeyValue(fields))
     }
 
-    pub fn list(section_id: &'static str, title: impl Into<String>, items: Vec<String>) -> Self {
+    pub fn list(
+        section_id: impl Into<String>,
+        title: impl Into<String>,
+        items: Vec<String>,
+    ) -> Self {
         Self::new(section_id, title, AddonSectionContent::List(items))
     }
 
-    pub fn table(section_id: &'static str, title: impl Into<String>, table: AddonTable) -> Self {
+    pub fn table(
+        section_id: impl Into<String>,
+        title: impl Into<String>,
+        table: AddonTable,
+    ) -> Self {
         Self::new(section_id, title, AddonSectionContent::Table(table))
     }
 
     pub fn cards(
-        section_id: &'static str,
+        section_id: impl Into<String>,
         title: impl Into<String>,
         cards: Vec<AddonCard>,
     ) -> Self {

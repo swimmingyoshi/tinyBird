@@ -1,54 +1,17 @@
-//! Addons written as data rather than as Rust.
+//! Validated, read-only game readers expressed as JSON data.
 //!
-//! **Proof of concept.** Everything here works and is tested, but it covers a
-//! deliberately small slice of what a compiled [`GameAddon`](crate::GameAddon)
-//! can do. See the bottom of this file for what it cannot express yet.
-//!
-//! # Why
-//!
-//! Adding a game currently means writing a Rust module and rebuilding. That is
-//! fine for the games this ships with and hopeless for the long tail — someone
-//! who has found where their game keeps its gold has to become a contributor
-//! to see it on screen.
-//!
-//! A manifest is a JSON file describing *where to read* and *what to call it*:
-//!
-//! ```json
-//! {
-//!   "addon_id": "custom.firered_money",
-//!   "display_name": "Money",
-//!   "matches": { "game_code_prefix": ["BPR", "BPG"] },
-//!   "sections": [{
-//!     "id": "wallet", "title": "Wallet", "kind": "key_value",
-//!     "fields": [{ "label": "Money", "read": { "u32": "0x0300500C" } }]
-//!   }]
-//! }
-//! ```
-//!
-//! # What this is really for
-//!
-//! The two halves of writing an addon are not equally hard. Deciding that a
-//! number is worth a row, and what to call it, is easy and mechanical — it is
-//! exactly the part a language model does well, and this format is small
-//! enough to be a reliable generation target. Working out that `0x02024284` is
-//! the party block and not a buffer that happens to look like one is the hard
-//! part, and no amount of schema helps: it comes from `tinybird-probe`,
-//! diffing memory across two savestates and watching what changed when it
-//! should have.
-//!
-//! So the split this is built around is: **a human or a probe finds the
-//! addresses, and the manifest is the cheap part anyone — or anything — can
-//! write.** A manifest that names a wrong address produces confident nonsense,
-//! which is why [`ManifestAddon::snapshot`] refuses to report a section whose
-//! reads all came back zero: unmapped memory reads as zero, and a panel full
-//! of zeroes is indistinguishable from a panel that is simply wrong.
+//! Browser hosts keep `Manifest` values in their emulator session and request
+//! owned sections. `ManifestAddon` adapts the same format to the desktop's
+//! startup registry. Numeric zero is valid; use `when` for readiness checks.
+//! Memory reads, pointers, strings, repeats, and manifest size are bounded.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::memory::MemoryView;
 use crate::registry::{AddonInfo, GameAddon, RomIdentity};
 use crate::schema::{
-    AddonBadge, AddonCard, AddonField, AddonMeter, AddonSection, AddonSnapshot, AddonTone,
+    AddonBadge, AddonCard, AddonField, AddonImage, AddonMeter, AddonSection, AddonSnapshot,
+    AddonTone,
 };
 
 /// How many repeats a manifest may ask for.
@@ -59,8 +22,13 @@ const MAX_REPEAT: u32 = 64;
 /// Longest string a text read may pull out of memory.
 const MAX_TEXT_LEN: u32 = 64;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
+    #[serde(default, rename = "$comment", skip_serializing_if = "Option::is_none")]
+    pub comment: Option<serde_json::Value>,
+    #[serde(default = "manifest_version")]
+    pub manifest_version: u32,
     pub addon_id: String,
     pub display_name: String,
     #[serde(default)]
@@ -69,14 +37,324 @@ pub struct Manifest {
     pub matches: Matcher,
     #[serde(default)]
     pub sections: Vec<SectionSpec>,
+    /// Optional readiness check; numeric zero is valid data in version 2.
+    #[serde(default)]
+    pub when: Option<Condition>,
+}
+
+fn manifest_version() -> u32 {
+    1
+}
+
+pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+pub const MAX_INSTALLED_MANIFESTS: usize = 16;
+
+impl Manifest {
+    pub fn parse(json: &str) -> Result<Self, String> {
+        if json.len() > MAX_MANIFEST_BYTES {
+            return Err("Add-ons must be at most 64 KiB.".into());
+        }
+        let manifest: Self = serde_json::from_str(json).map_err(|err| err.to_string())?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let valid_id = |s: &str| {
+            !s.is_empty()
+                && s.len() <= 80
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        };
+        if !matches!(self.manifest_version, 1 | 2) {
+            return Err("Unsupported manifest_version; use 1 or 2.".into());
+        }
+        if !valid_id(&self.addon_id)
+            || self.display_name.trim().is_empty()
+            || self.display_name.len() > 120
+        {
+            return Err("Use a short add-on ID and a display name of at most 120 bytes.".into());
+        }
+        if self.sections.is_empty() || self.sections.len() > 8 {
+            return Err("Use between 1 and 8 sections.".into());
+        }
+        if self.matches.game_code_prefix.len()
+            + self.matches.game_code.len()
+            + self.matches.title.len()
+            > 32
+            || self.matches.revision.len() > 16
+        {
+            return Err("Too many compatibility rules.".into());
+        }
+        if self
+            .matches
+            .game_code_prefix
+            .iter()
+            .any(|s| s.len() != 3 || !s.is_ascii())
+            || self
+                .matches
+                .game_code
+                .iter()
+                .any(|s| s.len() != 4 || !s.is_ascii())
+            || self
+                .matches
+                .title
+                .iter()
+                .any(|s| s.is_empty() || s.len() > 12)
+        {
+            return Err("Game prefixes need 3 ASCII characters; full codes need 4; titles at most 12 bytes.".into());
+        }
+        if self.matches.game_code_prefix.is_empty()
+            && self.matches.game_code.is_empty()
+            && self.matches.title.is_empty()
+        {
+            return Err("Choose at least one compatible game.".into());
+        }
+        let mut ids = std::collections::HashSet::new();
+        let mut work = 0usize;
+        for section in &self.sections {
+            if !valid_id(&section.id) || !ids.insert(&section.id) {
+                return Err("Section IDs must be valid and unique.".into());
+            }
+            if section.title.is_empty()
+                || section.title.len() > 120
+                || section.note.as_ref().is_some_and(|s| s.len() > 512)
+            {
+                return Err("Section titles need 1–120 bytes; notes at most 512.".into());
+            }
+            match &section.body {
+                SectionBody::KeyValue { fields } => {
+                    if fields.is_empty() || fields.len() > 32 {
+                        return Err("Use 1–32 fields per section.".into());
+                    }
+                    work += fields.len() * 2;
+                    for field in fields {
+                        validate_field(field)?;
+                    }
+                }
+                SectionBody::Cards { repeat, card } => {
+                    if repeat.count == 0
+                        || repeat.count > MAX_REPEAT
+                        || card.fields.len() > 32
+                        || repeat.count.checked_mul(repeat.stride).is_none()
+                    {
+                        return Err("Invalid card count or stride.".into());
+                    }
+                    work += repeat.count as usize * (card.fields.len() * 2 + 4);
+                    validate_value(&card.title)?;
+                    if let Some(value) = &card.subtitle {
+                        validate_value(value)?;
+                    }
+                    if let Some(image) = &card.image {
+                        // A sprite is another whole-record decrypt per card,
+                        // so it costs what a species read costs.
+                        work += repeat.count as usize * 2;
+                        validate_value(&Value::Gen3Species(image.address().clone()))?;
+                    }
+                    for field in card.fields.iter().chain(card.lead.iter()) {
+                        validate_field(field)?;
+                    }
+                }
+            }
+        }
+        if work > 2048 {
+            return Err("This add-on requests too much work per update.".into());
+        }
+        if let Some(condition) = &self.when {
+            if !matches!(condition.read, Value::U8(_) | Value::U16(_) | Value::U32(_)) {
+                return Err("Readiness conditions must compare a numeric memory read.".into());
+            }
+            validate_value(&condition.read)?;
+        }
+        let json = serde_json::to_value(self).map_err(|err| err.to_string())?;
+        fn strings_bounded(value: &serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::String(s) => s.len() <= 2048,
+                serde_json::Value::Array(a) => a.iter().all(strings_bounded),
+                serde_json::Value::Object(o) => o.values().all(strings_bounded),
+                _ => true,
+            }
+        }
+        if !strings_bounded(&json) || json.to_string().len() > MAX_MANIFEST_BYTES {
+            return Err("Manifest text is too large.".into());
+        }
+        Ok(())
+    }
+
+    pub fn supports(&self, rom: &RomIdentity) -> bool {
+        self.matches.matches(rom)
+    }
+
+    /// Whether anything here needs the cartridge's own name tables.
+    ///
+    /// Finding those is one pass over the whole ROM, which is far outside the
+    /// per-update read budget [`evaluate`](Self::evaluate) enforces. So the
+    /// host does it once, before evaluating, and only when a manifest actually
+    /// asks for a name — see [`prepare`](Self::prepare).
+    pub fn needs_cartridge_names(&self) -> bool {
+        self.sections.iter().any(|section| match &section.body {
+            SectionBody::KeyValue { fields } => fields
+                .iter()
+                .any(|field| matches!(field.read, Value::Gen3Species(_))),
+            SectionBody::Cards { card, .. } => {
+                card.image.is_some()
+                    || matches!(card.title, Value::Gen3Species(_))
+                    || matches!(card.subtitle, Some(Value::Gen3Species(_)))
+                    || card
+                        .fields
+                        .iter()
+                        .chain(card.lead.iter())
+                        .any(|field| matches!(field.read, Value::Gen3Species(_)))
+            }
+        })
+    }
+
+    /// Read whatever this manifest needs from the cartridge before evaluating.
+    ///
+    /// Cheap after the first call for a given ROM, and a no-op for the manifest
+    /// that never asks for a species. Give it *unbounded* memory: the read
+    /// budget exists to stop a manifest scanning RAM every frame, and this is
+    /// the one read that is allowed to be large because it happens once.
+    pub fn prepare(&self, memory: &dyn MemoryView, rom: &RomIdentity) {
+        if self.needs_cartridge_names() {
+            crate::gen3_names::ensure(memory, rom);
+        }
+    }
+
+    /// Owned sections for reloadable browser add-ons. No leaked metadata.
+    pub fn sections(&self, memory: &dyn MemoryView) -> Vec<AddonSection> {
+        self.evaluate(memory).unwrap_or_default()
+    }
+
+    pub fn evaluate(&self, memory: &dyn MemoryView) -> Result<Vec<AddonSection>, &'static str> {
+        let memory = BoundedMemory {
+            inner: memory,
+            remaining: std::cell::Cell::new(16384),
+        };
+        if self.when.as_ref().is_some_and(|condition| {
+            condition.read.read(&memory, 0, 0).number != Some(condition.equals)
+        }) {
+            return Ok(Vec::new());
+        }
+        let sections: Vec<_> = self
+            .sections
+            .iter()
+            .filter_map(|spec| build_section(spec, &memory))
+            .collect();
+        if memory.remaining.get() == 0 {
+            return Err("Memory-read budget exhausted.");
+        }
+        if serde_json::to_vec(&sections).map_or(true, |bytes| bytes.len() > 32768) {
+            return Err("Output exceeds 32 KiB. Reduce fields or repeated cards.");
+        }
+        Ok(sections)
+    }
+}
+
+fn readable(addr: u32, len: u32) -> bool {
+    [
+        (0x02000000u32, 0x02040000u32),
+        (0x03000000, 0x03008000),
+        (0x08000000, 0x0e000000),
+    ]
+    .iter()
+    .any(|&(start, end)| addr >= start && addr.checked_add(len).is_some_and(|last| last <= end))
+}
+
+struct BoundedMemory<'a> {
+    inner: &'a dyn MemoryView,
+    remaining: std::cell::Cell<usize>,
+}
+impl MemoryView for BoundedMemory<'_> {
+    fn read_u8(&self, addr: u32) -> u8 {
+        let left = self.remaining.get();
+        if left == 0 || !readable(addr, 1) {
+            return 0;
+        }
+        self.remaining.set(left - 1);
+        self.inner.read_u8(addr)
+    }
+}
+
+fn validate_field(field: &FieldSpec) -> Result<(), String> {
+    if field.label.is_empty()
+        || field.label.len() > 120
+        || field.hint.as_ref().is_some_and(|s| s.len() > 256)
+    {
+        return Err("Field labels need 1–120 bytes; hints at most 256.".into());
+    }
+    validate_value(&field.read)?;
+    if let Some(max) = &field.max {
+        validate_value(max)?;
+    }
+    Ok(())
+}
+
+fn validate_value(value: &Value) -> Result<(), String> {
+    let address = match value {
+        Value::U8(at) | Value::U16(at) | Value::U32(at) => at,
+        Value::Text { at, len } | Value::Gen3Text { at, len } => {
+            if *len == 0 || *len > MAX_TEXT_LEN {
+                return Err("Text reads need 1–64 bytes.".into());
+            }
+            at
+        }
+        Value::Gen3Species(at) => at,
+        Value::Literal(text) => {
+            return if text.len() <= 256 {
+                Ok(())
+            } else {
+                Err("Literal values need at most 256 bytes.".into())
+            }
+        }
+        Value::Index => return Ok(()),
+    };
+    let at = match address {
+        Address::Direct(at) => at,
+        Address::Chain { at, deref } => {
+            if deref.is_empty()
+                || deref.len() > 4
+                || deref.iter().any(|n| !(-33554432..=33554432).contains(n))
+            {
+                return Err("Pointer chains need 1–4 bounded offsets.".into());
+            }
+            at
+        }
+    };
+    let width = if matches!(address, Address::Chain { .. }) { 4 } else {
+        match value {
+            Value::U8(_) => 1,
+            Value::U16(_) => 2,
+            Value::Text { len, .. } | Value::Gen3Text { len, .. } => *len,
+            // Decrypting a record means reading all of the boxed part of it.
+            Value::Gen3Species(_) => crate::gen3::BOXED_BYTES,
+            _ => 4,
+        }
+    };
+    if !parse_address(at).is_some_and(|addr| readable(addr, width)) {
+        return Err("Read addresses must be in GBA RAM or cartridge ROM.".into());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Condition {
+    pub read: Value,
+    pub equals: u32,
 }
 
 /// Which ROMs this manifest claims.
 ///
 /// Empty matches nothing rather than everything. A manifest that forgot to say
 /// what it is for should be inert, not attached to every game someone loads.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Matcher {
+    #[serde(default)]
+    pub game_code: Vec<String>,
+    #[serde(default)]
+    pub revision: Vec<u8>,
     #[serde(default)]
     pub game_code_prefix: Vec<String>,
     #[serde(default)]
@@ -85,17 +363,23 @@ pub struct Matcher {
 
 impl Matcher {
     fn matches(&self, rom: &RomIdentity) -> bool {
-        self.game_code_prefix
+        (self
+            .game_code
             .iter()
-            .any(|prefix| rom.code_prefix().eq_ignore_ascii_case(prefix))
+            .any(|code| rom.game_code.eq_ignore_ascii_case(code))
+            || self
+                .game_code_prefix
+                .iter()
+                .any(|prefix| rom.code_prefix().eq_ignore_ascii_case(prefix))
             || self
                 .title
                 .iter()
-                .any(|title| rom.title.eq_ignore_ascii_case(title))
+                .any(|title| rom.title.eq_ignore_ascii_case(title)))
+            && (self.revision.is_empty() || self.revision.contains(&rom.revision))
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SectionSpec {
     pub id: String,
     pub title: String,
@@ -105,7 +389,7 @@ pub struct SectionSpec {
     pub body: SectionBody,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SectionBody {
     KeyValue {
@@ -119,25 +403,32 @@ pub enum SectionBody {
 }
 
 /// A base address stepped `count` times, `stride` bytes apart.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Repeat {
     pub count: u32,
     pub stride: u32,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CardSpec {
     /// The heading. Usually a text read; a literal works for numbered slots.
     pub title: Value,
     #[serde(default)]
     pub subtitle: Option<Value>,
+    /// A picture of whatever this card is about. Optional in the strong sense:
+    /// a card that cannot resolve one keeps its title, badges and numbers.
+    #[serde(default)]
+    pub image: Option<ImageSpec>,
     #[serde(default)]
     pub lead: Option<FieldSpec>,
     #[serde(default)]
     pub fields: Vec<FieldSpec>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FieldSpec {
     pub label: String,
     pub read: Value,
@@ -149,7 +440,7 @@ pub struct FieldSpec {
 }
 
 /// Something to read out of memory, or a constant.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Value {
     U8(Address),
@@ -163,6 +454,33 @@ pub enum Value {
     Literal(String),
     /// Which repeat this is, counting from one. Cards need slot numbers.
     Index,
+    /// Text in the Generation 3 character set rather than in ASCII.
+    ///
+    /// Nicknames and trainer names are stored in an alphabet of the game's
+    /// own, so `text` on one of them produces punctuation soup. This is the
+    /// same read with the right table applied.
+    Gen3Text {
+        at: Address,
+        len: u32,
+    },
+    /// The species of the Pokémon whose record starts here.
+    ///
+    /// Reads as the species *name* when the cartridge's name table has been
+    /// found, and as `#21` when it has not — a manifest gets the number either
+    /// way, so a `max`-less gauge or a card title still works on a ROM hack
+    /// that moved its tables. `at` is the start of the 100-byte record, not
+    /// the species field: the species is encrypted and permuted, and undoing
+    /// that needs the whole record.
+    Gen3Species(Address),
+}
+
+/// A picture for a card. One variant today; a tagged enum so adding the next
+/// kind of picture does not change what an existing manifest means.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSpec {
+    /// The sprite of the species whose record starts here.
+    Gen3SpeciesSprite(Address),
 }
 
 /// Where to read.
@@ -170,7 +488,7 @@ pub enum Value {
 /// A bare number is an absolute address. A `deref` chain follows pointers,
 /// which most games need — Generation 3 keeps its save blocks behind one, and
 /// their addresses move every time the game reloads them.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Address {
     Direct(String),
@@ -186,10 +504,15 @@ impl Address {
     /// pointer in the chain was null.
     fn resolve(&self, memory: &dyn MemoryView, step: u32) -> Option<u32> {
         match self {
-            Address::Direct(text) => parse_address(text).map(|base| base.wrapping_add(step)),
+            Address::Direct(text) => parse_address(text)
+                .and_then(|base| base.checked_add(step))
+                .filter(|addr| readable(*addr, 1)),
             Address::Chain { at, deref } => {
                 let mut cursor = parse_address(at)?;
                 for (index, offset) in deref.iter().enumerate() {
+                    if !readable(cursor, 4) {
+                        return None;
+                    }
                     let pointer = memory.read_u32(cursor);
                     // A null pointer means the game has not built that
                     // structure yet, which is a normal state and not an error.
@@ -200,10 +523,10 @@ impl Address {
                     // The step belongs on the final address, not on every
                     // pointer along the way.
                     if index + 1 == deref.len() {
-                        cursor = cursor.wrapping_add(step);
+                        cursor = cursor.checked_add(step)?;
                     }
                 }
-                Some(cursor)
+                readable(cursor, 1).then_some(cursor)
             }
         }
     }
@@ -230,8 +553,7 @@ fn parse_address(text: &str) -> Option<u32> {
 struct Read {
     text: String,
     number: Option<u32>,
-    /// False when every byte behind it was zero. Unmapped memory reads as
-    /// zero, so this is how a wrong address is told from an empty one.
+    /// Whether a read resolved; numeric zero remains a valid reading.
     live: bool,
 }
 
@@ -252,6 +574,14 @@ impl Value {
                 let Some(address) = at.resolve(memory, step) else {
                     return Read::dead();
                 };
+                let width = match self {
+                    Value::U8(_) => 1,
+                    Value::U16(_) => 2,
+                    _ => 4,
+                };
+                if !readable(address, width) {
+                    return Read::dead();
+                }
                 let number = match self {
                     Value::U8(_) => u32::from(memory.read_u8(address)),
                     Value::U16(_) => u32::from(memory.read_u16(address)),
@@ -260,13 +590,16 @@ impl Value {
                 Read {
                     text: number.to_string(),
                     number: Some(number),
-                    live: number != 0,
+                    live: true,
                 }
             }
             Value::Text { at, len } => {
                 let Some(address) = at.resolve(memory, step) else {
                     return Read::dead();
                 };
+                if !readable(address, *len) {
+                    return Read::dead();
+                }
                 let text =
                     crate::memory::read_ascii(memory, address, (*len).min(MAX_TEXT_LEN) as usize);
                 let live = !text.trim().is_empty();
@@ -276,6 +609,73 @@ impl Value {
                     live,
                 }
             }
+            Value::Gen3Text { at, len } => {
+                let Some(address) = at.resolve(memory, step) else {
+                    return Read::dead();
+                };
+                if !readable(address, *len) {
+                    return Read::dead();
+                }
+                let text = crate::gen3::decode_text(
+                    &memory.read_bytes(address, (*len).min(MAX_TEXT_LEN) as usize),
+                );
+                let live = !text.is_empty();
+                Read {
+                    text,
+                    number: None,
+                    live,
+                }
+            }
+            Value::Gen3Species(at) => {
+                let Some(address) = at.resolve(memory, step) else {
+                    return Read::dead();
+                };
+                if !readable(address, crate::gen3::BOXED_BYTES) {
+                    return Read::dead();
+                }
+                // An empty party slot is the normal state of slots two to six,
+                // so it reads as dead and the card for it is simply not drawn.
+                let Some(species) = crate::gen3::party_species(memory, address) else {
+                    return Read::dead();
+                };
+                Read {
+                    // The number is always available; the name only once the
+                    // cartridge's table has been found. `#21` is honest about
+                    // which of those happened, and still identifies the row.
+                    text: crate::gen3_names::species(species)
+                        .unwrap_or_else(|| format!("#{species}")),
+                    number: Some(u32::from(species)),
+                    live: true,
+                }
+            }
+        }
+    }
+}
+
+impl ImageSpec {
+    /// Where a consumer can find this picture, or `None` when there is not one
+    /// to name — an empty slot, or a species with no National Dex number.
+    fn resolve(&self, memory: &dyn MemoryView, step: u32) -> Option<AddonImage> {
+        match self {
+            ImageSpec::Gen3SpeciesSprite(at) => {
+                let address = at.resolve(memory, step)?;
+                if !readable(address, crate::gen3::BOXED_BYTES) {
+                    return None;
+                }
+                let species = crate::gen3::party_species(memory, address)?;
+                let dex = crate::gen3::national_dex_number(species)?;
+                let image = AddonImage::new(format!("/sprites/{dex}"));
+                Some(match crate::gen3_names::species(species) {
+                    Some(name) => image.with_alt(name),
+                    None => image,
+                })
+            }
+        }
+    }
+
+    fn address(&self) -> &Address {
+        match self {
+            ImageSpec::Gen3SpeciesSprite(at) => at,
         }
     }
 }
@@ -314,6 +714,7 @@ impl ManifestAddon {
     }
 
     pub fn new(manifest: Manifest) -> Result<Self, String> {
+        manifest.validate()?;
         if manifest.addon_id.trim().is_empty() {
             return Err("a manifest needs an addon_id".to_string());
         }
@@ -351,11 +752,17 @@ impl ManifestAddon {
 
 fn describe_matcher(matcher: &Matcher) -> String {
     let mut parts = Vec::new();
+    if !matcher.game_code.is_empty() {
+        parts.push(matcher.game_code.join(", "));
+    }
     if !matcher.game_code_prefix.is_empty() {
         parts.push(matcher.game_code_prefix.join(", "));
     }
     if !matcher.title.is_empty() {
         parts.push(matcher.title.join(", "));
+    }
+    if !matcher.revision.is_empty() {
+        parts.push(format!("revisions {:?}", matcher.revision));
     }
     if parts.is_empty() {
         "nothing (no matcher)".to_string()
@@ -373,18 +780,11 @@ impl<T: Default> GameAddon<T> for ManifestAddon {
         self.manifest.matches.matches(rom)
     }
 
-    fn snapshot(&self, memory: &dyn MemoryView, _rom: &RomIdentity) -> Option<AddonSnapshot<T>> {
-        let sections: Vec<AddonSection> = self
-            .manifest
-            .sections
-            .iter()
-            .filter_map(|spec| build_section(spec, memory))
-            .collect();
+    fn snapshot(&self, memory: &dyn MemoryView, rom: &RomIdentity) -> Option<AddonSnapshot<T>> {
+        self.manifest.prepare(memory, rom);
+        let sections = self.manifest.sections(memory);
 
-        // Every section read nothing but zeroes. The manifest is either
-        // pointed at the wrong addresses or the game has not built those
-        // structures yet, and reporting a panel of zeroes would make the two
-        // look identical.
+        // A false readiness condition or unresolved pointer leaves the reader idle.
         if sections.is_empty() {
             return None;
         }
@@ -409,7 +809,7 @@ impl<T: Default> GameAddon<T> for ManifestAddon {
 }
 
 fn build_section(spec: &SectionSpec, memory: &dyn MemoryView) -> Option<AddonSection> {
-    let id: &'static str = Box::leak(spec.id.clone().into_boxed_str());
+    let id = spec.id.clone();
 
     let section = match &spec.body {
         SectionBody::KeyValue { fields } => {
@@ -453,6 +853,9 @@ fn build_card(
     }
 
     let mut card = AddonCard::new(title.text);
+    if let Some(image) = &spec.image {
+        card = card.with_optional_image(image.resolve(memory, step));
+    }
     if let Some(subtitle) = &spec.subtitle {
         let read = subtitle.read(memory, step, index);
         if read.live {
@@ -560,6 +963,154 @@ mod tests {
       }]
     }"#;
 
+    /// A Generation 3 party record, built the way the game writes one, so the
+    /// manifest is tested against the real encryption rather than a stub.
+    fn party_record(personality: u32, ot_id: u32, species: u16, nickname: &[u8]) -> Vec<u8> {
+        let mut raw = vec![0u8; 100];
+        raw[0..4].copy_from_slice(&personality.to_le_bytes());
+        raw[4..8].copy_from_slice(&ot_id.to_le_bytes());
+        raw[8..8 + nickname.len()].copy_from_slice(nickname);
+
+        let mut plain = [0u8; 48];
+        // Growth is the first substructure in the order personality picks.
+        let growth = crate::gen3::growth_offset(personality);
+        plain[growth..growth + 2].copy_from_slice(&species.to_le_bytes());
+        let checksum = plain
+            .chunks_exact(2)
+            .map(|pair| u32::from(u16::from_le_bytes([pair[0], pair[1]])))
+            .sum::<u32>() as u16;
+        raw[28..30].copy_from_slice(&checksum.to_le_bytes());
+
+        let key = personality ^ ot_id;
+        for (block, chunk) in plain.chunks_exact(4).enumerate() {
+            let word = u32::from_le_bytes(chunk.try_into().unwrap()) ^ key;
+            raw[32 + block * 4..36 + block * 4].copy_from_slice(&word.to_le_bytes());
+        }
+        // Level and HP live in the unencrypted tail, which is the part a
+        // manifest could always read.
+        raw[84] = 10;
+        raw[86..88].copy_from_slice(&53u16.to_le_bytes());
+        raw[88..90].copy_from_slice(&53u16.to_le_bytes());
+        raw
+    }
+
+    /// The whole point of the Generation 3 reads: a party card that says
+    /// *whose* HP it is showing, which no combination of `u8`, `u16` and
+    /// `text` could express.
+    #[test]
+    fn a_party_card_names_the_pokemon_whose_stats_it_shows() {
+        const BASE: u32 = 0x0202_4284;
+        let mut memory = SparseMemory::new();
+        // Two live slots and a third that was never filled.
+        memory = memory.with(
+            BASE,
+            party_record(7, 0x1234_5678, 21, &[0xCD, 0xCA, 0xBF, 0xBB, 0xCC, 0xC9, 0xD1, 0xFF]),
+        );
+        memory = memory.with(BASE + 100, party_record(19, 0x1234_5678, 25, &[0xFF]));
+        memory = memory.with(BASE + 200, vec![0u8; 100]);
+
+        let reader = addon(
+            r#"{
+              "manifest_version": 2,
+              "addon_id": "custom.party",
+              "display_name": "Party",
+              "matches": { "game_code": ["BPRE"], "revision": [0] },
+              "sections": [{
+                "id": "party",
+                "title": "Party",
+                "kind": "cards",
+                "repeat": { "count": 6, "stride": 100 },
+                "card": {
+                  "title": { "gen3_species": "0x02024284" },
+                  "subtitle": { "gen3_text": { "at": "0x0202428C", "len": 10 } },
+                  "image": { "gen3_species_sprite": "0x02024284" },
+                  "lead": {
+                    "label": "HP",
+                    "read": { "u16": "0x020242DA" },
+                    "max": { "u16": "0x020242DC" }
+                  },
+                  "fields": [{ "label": "Level", "read": { "u8": "0x020242D8" } }]
+                }
+              }]
+            }"#,
+        );
+
+        let snapshot = read_of(&reader, &memory).expect("party should report");
+        let AddonSectionContent::Cards(cards) = &snapshot.sections[0].content else {
+            panic!("expected cards");
+        };
+
+        // The empty slot is absent rather than drawn as a blank card.
+        assert_eq!(cards.len(), 2);
+        // Without a cartridge name table the species is still identified.
+        assert_eq!(cards[0].title, "#21");
+        assert_eq!(cards[0].subtitle.as_deref(), Some("SPEAROW"));
+        assert_eq!(
+            cards[0].image.as_ref().map(|image| image.src.as_str()),
+            Some("/sprites/21")
+        );
+        // The gauge on the unencrypted tail, beside the name from the
+        // encrypted part: the pairing is the feature.
+        assert_eq!(cards[0].lead.as_ref().unwrap().value, "53/53");
+        assert!(cards[0].lead.as_ref().unwrap().meter.is_some());
+        assert_eq!(cards[0].fields[0].value, "10");
+        // A record with no nickname keeps its species and drops the subtitle.
+        assert_eq!(cards[1].title, "#25");
+        assert_eq!(cards[1].subtitle, None);
+    }
+
+    #[test]
+    fn generation_three_reads_are_bounded_like_every_other_read() {
+        let species = |at: &str| {
+            format!(
+                r#"{{"addon_id":"g","display_name":"g","matches":{{"game_code":["BPRE"]}},
+                  "sections":[{{"id":"s","title":"S","kind":"key_value",
+                  "fields":[{{"label":"Species","read":{{"gen3_species":"{at}"}}}}]}}]}}"#
+            )
+        };
+        // A record needs 80 readable bytes, so one that would run off the end
+        // of EWRAM is refused at validation rather than read short.
+        assert!(Manifest::parse(&species("0x0203FFF0")).is_err());
+        assert!(Manifest::parse(&species("0x04000000")).is_err());
+        assert!(Manifest::parse(&species("0x02024284")).is_ok());
+
+        // Only a manifest that asks for a name pays for finding the tables.
+        let plain = Manifest::parse(WALLET).unwrap();
+        assert!(!plain.needs_cartridge_names());
+        assert!(Manifest::parse(&species("0x02024284"))
+            .unwrap()
+            .needs_cartridge_names());
+    }
+
+    #[test]
+    fn strict_validation_and_pointer_bounds_protect_the_host() {
+        let mut value: serde_json::Value = serde_json::from_str(WALLET).unwrap();
+        value["matches"] = serde_json::json!({"game_code":["BPRE"],"revision":[0]});
+        let manifest = Manifest::parse(&value.to_string()).unwrap();
+        assert!(manifest.supports(&rom("BPRE")));
+        assert!(!manifest.supports(&rom("BPRJ")));
+        let mut revision = rom("BPRE"); revision.revision = 1;
+        assert!(!manifest.supports(&revision));
+        value["sections"][0]["fields"][0]["read"] = serde_json::json!({"u32":{"at":"0x03000000","deref":[0]}});
+        value["sections"][0]["fields"].as_array_mut().unwrap().truncate(1);
+        let manifest = Manifest::parse(&value.to_string()).unwrap();
+        let memory = SparseMemory::new().with(0x03000000, 0x04000000u32.to_le_bytes().to_vec());
+        assert!(manifest.sections(&memory).is_empty(), "an indirect pointer cannot expose IO registers");
+        value["sections"][0]["fields"][0]["read"] = serde_json::json!({"u8":"0x03007fff"});
+        assert!(Manifest::parse(&value.to_string()).is_ok(), "the last RAM byte is valid for u8");
+        value["sections"][0]["fields"][0]["read"] = serde_json::json!({"u32":"0x03007fff"});
+        assert!(Manifest::parse(&value.to_string()).is_err(), "wide reads must stay in bounds");
+        value["sections"][0]["fields"][0]["read"] = serde_json::json!({"u8":"0x02000000"});
+        value["matches"]["revisions"] = serde_json::json!([0]);
+        assert!(Manifest::parse(&value.to_string()).is_err(), "misspelled compatibility rules must not be ignored");
+    }
+
+    #[test]
+    fn full_width_meters_do_not_overflow() {
+        assert_eq!(AddonMeter::new(u32::MAX, u32::MAX).percent(), 100);
+        assert_eq!(AddonTone::from_fraction(u32::MAX, u32::MAX), AddonTone::Good);
+    }
+
     #[test]
     fn a_manifest_claims_only_the_games_it_names() {
         let addon = addon(WALLET);
@@ -572,8 +1123,8 @@ mod tests {
     /// everything — would attach a half-written file to every game someone
     /// loads, which is the worst possible default for a format people hand-edit.
     #[test]
-    fn a_manifest_with_no_matcher_claims_nothing() {
-        let addon = addon(
+    fn a_manifest_with_no_matcher_is_rejected() {
+        let result = Manifest::parse(
             r#"{
               "addon_id": "custom.empty",
               "display_name": "Empty",
@@ -581,7 +1132,7 @@ mod tests {
                 "fields": [{ "label": "X", "read": { "u8": "0x02000000" } }] }]
             }"#,
         );
-        assert!(!GameAddon::<NoData>::supports(&addon, &rom("BPRE")));
+        assert!(result.is_err());
     }
 
     #[test]
@@ -612,8 +1163,12 @@ mod tests {
     /// manifest pointed at the wrong address produces a panel of zeroes that
     /// looks exactly like a panel that is merely idle.
     #[test]
-    fn a_manifest_pointed_at_nothing_reports_nothing() {
-        assert!(read_of(&addon(WALLET), &SparseMemory::new()).is_none());
+    fn zero_is_valid_numeric_data() {
+        let snapshot = read_of(&addon(WALLET), &SparseMemory::new()).expect("zero is valid");
+        match &snapshot.sections[0].content {
+            AddonSectionContent::KeyValue(fields) => assert_eq!(fields[0].value, "0"),
+            _ => panic!("expected fields"),
+        }
     }
 
     #[test]
@@ -732,7 +1287,7 @@ mod tests {
             Err(err) => err,
             Ok(_) => panic!("a manifest with no sections should be refused"),
         };
-        assert!(err.contains("no sections"), "{err}");
+        assert!(err.contains("sections"), "{err}");
 
         assert!(ManifestAddon::parse("not json").is_err());
     }
@@ -740,7 +1295,7 @@ mod tests {
     /// A manifest is hand-edited data and a stride of one with a count of a
     /// million is a plausible typo. It has to be a bounded mistake.
     #[test]
-    fn an_absurd_repeat_is_capped_rather_than_run() {
+    fn an_absurd_repeat_is_rejected() {
         let json = r#"{
           "addon_id": "custom.huge", "display_name": "Huge",
           "matches": { "game_code_prefix": ["BPR"] },
@@ -749,11 +1304,7 @@ mod tests {
             "card": { "title": { "literal": "row" } } }]
         }"#;
 
-        let snapshot = read_of(&addon(json), &SparseMemory::new()).expect("literals are live");
-        match &snapshot.sections[0].content {
-            AddonSectionContent::Cards(cards) => assert_eq!(cards.len() as u32, MAX_REPEAT),
-            other => panic!("expected cards, got {other:?}"),
-        }
+        assert!(Manifest::parse(json).is_err());
     }
 
     /// The example that ships in `addons/` is documentation, and documentation

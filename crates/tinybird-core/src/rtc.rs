@@ -91,6 +91,8 @@ pub struct Rtc {
     index: usize,
     /// The chip's own status byte. Bit 6 is 24-hour mode.
     status: u8,
+    /// Response bit latched on falling SCK, held through the rising edge.
+    output_bit: bool,
 }
 
 impl Default for Rtc {
@@ -108,6 +110,7 @@ impl Default for Rtc {
             buffer: Vec::new(),
             index: 0,
             status: STATUS_24_HOUR,
+            output_bit: true,
         }
     }
 }
@@ -164,11 +167,8 @@ impl Rtc {
     /// is answering is the next bit of the answer.
     fn pin_levels(&self) -> u8 {
         let mut level = self.data & self.direction;
-        if self.direction & PIN_SIO == 0 && self.sending() {
-            let byte = self.buffer.get(self.index).copied().unwrap_or(0);
-            if byte >> self.bits & 1 != 0 {
-                level |= PIN_SIO;
-            }
+        if self.direction & PIN_SIO == 0 && self.output_bit {
+            level |= PIN_SIO;
         }
         level
     }
@@ -200,6 +200,7 @@ impl Rtc {
             self.phase = Phase::Idle;
             self.shift = 0;
             self.bits = 0;
+            self.output_bit = true;
             return;
         }
 
@@ -213,7 +214,17 @@ impl Rtc {
             return;
         }
 
-        // Everything else happens on a rising SCK edge.
+        // Read data is driven on falling SCK and remains stable while the
+        // console samples it with SCK high (including the final bit).
+        if self.sending() {
+            if was & PIN_SCK != 0 && value & PIN_SCK == 0 {
+                self.output_bit = self.buffer[self.index] >> self.bits & 1 != 0;
+                self.clock_data_bit(false);
+            }
+            return;
+        }
+
+        // Commands and write data are sampled on rising SCK.
         if was & PIN_SCK != 0 || value & PIN_SCK == 0 {
             return;
         }
@@ -240,6 +251,11 @@ impl Rtc {
         } else {
             self.shift.reverse_bits()
         };
+
+        if command & 0xF0 != COMMAND_TAG {
+            self.phase = Phase::Idle;
+            return;
+        }
 
         self.command = command;
         self.bits = 0;
@@ -419,16 +435,29 @@ mod tests {
             let mut byte = 0u8;
             for bit in 0..8 {
                 rtc.write(GPIO_DATA, u16::from(PIN_CS));
+                let low = rtc.read(GPIO_DATA) & u16::from(PIN_SIO);
+                rtc.write(GPIO_DATA, u16::from(PIN_CS | PIN_SCK));
+                assert_eq!(rtc.read(GPIO_DATA) & u16::from(PIN_SIO), low,
+                    "RTC response must stay stable across rising SCK");
                 if rtc.read(GPIO_DATA) as u8 & PIN_SIO != 0 {
                     byte |= 1 << bit;
                 }
-                rtc.write(GPIO_DATA, u16::from(PIN_CS | PIN_SCK));
             }
             out.push(byte);
         }
 
         rtc.write(GPIO_DATA, 0);
         out
+    }
+
+    #[test]
+    fn healthy_battery_status_and_offline_elapsed_time_are_readable() {
+        let mut rtc = Rtc::new();
+        assert_eq!(transfer(&mut rtc, 0x63, 1), vec![0x40]);
+        rtc.set_wall_clock(1_787_929_445);
+        assert_eq!(transfer(&mut rtc, 0x65, 7)[2], 0x28);
+        rtc.set_wall_clock(1_787_929_445 + 86_400 * 2);
+        assert_eq!(transfer(&mut rtc, 0x65, 7)[2], 0x30);
     }
 
     #[test]

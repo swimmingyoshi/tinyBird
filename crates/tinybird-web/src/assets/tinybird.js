@@ -47,6 +47,24 @@ export class TinyBird {
     return this.#memory.buffer.byteLength;
   }
 
+  setDisabledBuiltins(ids) {
+    return this.#withBytes(new TextEncoder().encode(JSON.stringify(ids)), (ptr, len) => {
+      this.#check(this.#exports.tb_set_disabled_builtins(ptr, len), 'Cannot change built-in readers');
+    });
+  }
+
+  /** Copy game memory for the built-in workshop. Never exposes writable RAM. */
+  readMemory(address, length) {
+    if (!Number.isInteger(address) || address < 0 || address > 0xffffffff ||
+        !Number.isInteger(length) || length < 1 || length > 0x40000) {
+      throw new EmulatorError('Choose a valid memory range (at most 256 KiB).');
+    }
+    return this.#withBytes(new Uint8Array(length), ptr => {
+      this.#check(this.#exports.tb_read_memory(address, ptr, length), 'Cannot read that memory range');
+      return this.#bytes(ptr, length).slice();
+    });
+  }
+
   /** Fetch, compile, and initialise the emulator module. */
   static async load(url = "/tinybird.wasm") {
     const response = await fetch(url);
@@ -106,15 +124,13 @@ export class TinyBird {
   /**
    * Install addon manifests, as an array of parsed JSON objects.
    *
-   * Must happen before the first snapshot: the registry is built the first
-   * time it is read and cannot be changed afterwards. Returns how many were
-   * installed, or 0 if the module was built without the entry point.
+   * Atomically replace the active manifests between frames. An empty list removes all.
    */
   installManifests(manifests) {
-    if (!Array.isArray(manifests) || manifests.length === 0) return 0;
+    if (!Array.isArray(manifests)) throw new Error("Expected an array of add-on manifests.");
     // An older module without this export is not an error; it just has no
     // manifests, which is what it had before the feature existed.
-    if (typeof this.#exports.tb_install_manifests !== "function") return 0;
+    if (typeof this.#exports.tb_install_manifests !== "function") throw new Error("Rebuild the emulator to enable add-ons.");
 
     const json = new TextEncoder().encode(JSON.stringify(manifests));
     const result = this.#withBytes(json, (ptr, len) =>
@@ -122,7 +138,12 @@ export class TinyBird {
     );
     // Negative is an error code. A manifest that will not load is not worth
     // stopping the page for, so it is reported and the game still runs.
-    return result < 0 ? 0 : result;
+    if (result < 0) {
+      const length = this.#exports.tb_manifest_error_len?.() ?? 0;
+      const message = length ? new TextDecoder().decode(this.#bytes(this.#exports.tb_manifest_error_ptr(), length)) : "Invalid add-on manifest. Rebuild the emulator if it predates reloadable add-ons.";
+      throw new EmulatorError(message, result);
+    }
+    return result;
   }
 
   // --- loading ----------------------------------------------------------
@@ -162,6 +183,11 @@ export class TinyBird {
   /** Run `count` frames, presenting only the last. Used for fast-forward. */
   runFrames(count) {
     this.#exports.tb_run_frames(count);
+  }
+
+  /** Solo fast-forward: retain every audio sample, present the final image. */
+  runAudioFrames(count) {
+    this.#check(this.#exports.tb_run_audio_frames(count), "The frame batch failed.");
   }
 
   reset() {
@@ -442,6 +468,7 @@ export class TinyBird {
  * further behind the picture.
  */
 export class AudioSink {
+  #sources = new Set();
   #context = null;
   #gain = null;
   #nextStart = 0;
@@ -483,7 +510,7 @@ export class AudioSink {
   }
 
   /** Queue one frame of interleaved stereo samples. */
-  push(samples) {
+  push(samples, speed = 1) {
     if (!this.ready || !samples || samples.length === 0) return;
 
     const frames = samples.length >> 1;
@@ -499,6 +526,8 @@ export class AudioSink {
 
     const source = this.#context.createBufferSource();
     source.buffer = buffer;
+    const rate = Number.isFinite(speed) ? Math.max(0.25, Math.min(64, speed)) : 1;
+    source.playbackRate.value = rate;
     source.connect(this.#gain);
 
     const now = this.#context.currentTime;
@@ -506,13 +535,30 @@ export class AudioSink {
     if (this.#nextStart < now + 0.02) this.#nextStart = now + 0.05;
     // If we have drifted more than a quarter second ahead the picture is behind
     // the sound; resync rather than accumulate latency.
-    if (this.#nextStart > now + 0.25) this.#nextStart = now + 0.05;
+    if (this.#nextStart > now + 0.25) {
+      this.flush();
+      this.#nextStart = now + 0.05;
+    }
 
+    this.#sources.add(source);
+    source.onended = () => { this.#sources.delete(source); source.disconnect(); };
     source.start(this.#nextStart);
-    this.#nextStart += frames / this.#sampleRate;
+    this.#nextStart += frames / this.#sampleRate / rate;
+  }
+
+  /** Discard queued sound when playback speed or session changes. */
+  flush() {
+    for (const source of this.#sources) {
+      source.onended = null;
+      source.stop();
+      source.disconnect();
+    }
+    this.#sources.clear();
+    this.#nextStart = 0;
   }
 
   close() {
+    this.flush();
     if (this.#context) this.#context.close();
     this.#context = null;
     this.#gain = null;

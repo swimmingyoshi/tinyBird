@@ -794,7 +794,7 @@ mod tests {
         let ids: Vec<_> = snapshot
             .sections
             .iter()
-            .map(|section| section.section_id)
+            .map(|section| section.section_id.as_str())
             .collect();
         assert_eq!(ids, vec!["units", "enemies"]);
 

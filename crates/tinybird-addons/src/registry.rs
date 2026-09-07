@@ -272,9 +272,15 @@ impl<T> AddonRegistry<T> {
     /// addon that claims the ROM but returns `None` does not block a later one,
     /// so a broad fallback addon can be registered behind a specific one.
     pub fn detect(&self, memory: &dyn MemoryView, rom: &RomIdentity) -> Detection<T> {
+        self.detect_excluding(memory, rom, &[])
+    }
+
+    /// Disabled readers are skipped before either matching or reading memory.
+    pub fn detect_excluding(&self, memory: &dyn MemoryView, rom: &RomIdentity, disabled: &[String]) -> Detection<T> {
         let mut first_claim = None;
 
         for addon in &self.addons {
+            if disabled.iter().any(|id| id == addon.info().addon_id) { continue; }
             if !addon.supports(rom) {
                 continue;
             }
