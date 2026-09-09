@@ -34,7 +34,8 @@ COPY --from=build /tmp/tinybird-web /usr/local/bin/tinybird-web
 COPY --from=build /tmp/tinybird_wasm.wasm /app/tinybird_wasm.wasm
 COPY --chown=tinybird:tinybird addons /app/addons
 
-ENV TINYBIRD_WEB_HOST=0.0.0.0 \
+ENV TINYBIRD_MODE=production \
+    TINYBIRD_WEB_HOST=0.0.0.0 \
     TINYBIRD_WEB_PORT=8877 \
     TINYBIRD_WEB_WASM=/app/tinybird_wasm.wasm \
     TINYBIRD_WEB_SNAPSHOT=/app/data/current-game.json \

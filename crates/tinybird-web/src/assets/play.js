@@ -2,6 +2,8 @@
 // vault. Everything that touches WebAssembly memory lives in tinybird.js.
 
 import { AudioSink, EmulatorError, TinyBird } from "/tinybird.js";
+import { mountDeployment } from '/deployment.js';
+mountDeployment();
 import { RECOVERY_INTERVAL, recoveryOwner, observationKey, fingerprint, readRecovery, writeRecovery, validateRecovery } from '/recovery.js';
 import { validateObservationConfig, matchObservationGame } from '/workshop-observations.js';
 if (window.parent !== window && new URLSearchParams(location.search).get('embed') === 'workshop') {
@@ -5153,6 +5155,11 @@ el.optOverlayRow.addEventListener("change", () => {
  */
 async function loadBios() {
   try {
+    const stored = recall('bios');
+    if (stored) {
+      const bytes = Uint8Array.from(atob(stored), char => char.charCodeAt(0));
+      emu.loadBios(bytes); biosBytes = bytes; return true;
+    }
     const response = await fetch("/bios");
     if (!response.ok) return false;
     // Kept, because a lockstep session builds a second console in this browser
@@ -5165,6 +5172,21 @@ async function loadBios() {
     return false;
   }
 }
+
+$('file-bios').addEventListener('change', async event => {
+  const file = event.target.files[0]; event.target.value = '';
+  if (!file) return;
+  try {
+    if (!emu || emu.hasRom) throw new Error('Eject the game before choosing a BIOS.');
+    if (file.size !== 16384) throw new Error('Choose a 16 KiB GBA BIOS image.');
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (emu.hasRom) throw new Error('The game changed. Eject it and choose the BIOS again.');
+    emu.loadBios(bytes); biosBytes = bytes;
+    let saved = true;
+    try { localStorage.setItem('tinybird:bios', btoa(String.fromCharCode(...bytes))); } catch { saved = false; }
+    say(saved ? 'BIOS ready and saved in this browser.' : 'BIOS ready for this session; browser storage was unavailable.', 'good');
+  } catch (error) { say(error.message, 'bad'); }
+});
 
 // --- vault --------------------------------------------------------------
 
@@ -5268,6 +5290,12 @@ el.store.addEventListener("click", async () => {
   );
   if (!blob) {
     say("The screen could not be captured.", "bad");
+    return;
+  }
+
+  if (document.documentElement.dataset.deployment === 'local') {
+    download(new Uint8Array(await blob.arrayBuffer()), `${baseName(romName)}.png`);
+    say('Screenshot downloaded.', 'good');
     return;
   }
 

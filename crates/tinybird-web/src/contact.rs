@@ -90,6 +90,7 @@ pub struct ContactConfig {
 }
 
 impl ContactConfig {
+    pub fn without_credentials(mut self) -> Self { self.key = None; self }
     /// Build from the environment.
     ///
     /// | variable | meaning | default |
