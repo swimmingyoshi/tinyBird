@@ -1,10 +1,11 @@
 """Dependency-free synchronous client for tinybird-headless (Python 3.9+)."""
 import json
 import subprocess
+from pathlib import Path
 
 
 class TinyBird:
-    def __init__(self, rom, executable="tinybird-headless", bios=None, state=None):
+    def __init__(self, rom, executable="tinybird-headless", bios=None, state=None, observations=None):
         args = [str(executable), str(rom)]
         for flag, path in (("--bios", bios), ("--state", state)):
             if path is not None:
@@ -13,6 +14,12 @@ class TinyBird:
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             text=True, encoding="utf-8", bufsize=1,
         )
+        if observations is not None:
+            try:
+                self.configure_observations(observations)
+            except Exception:
+                self.close()
+                raise
 
     def call(self, op, **arguments):
         if self.process.poll() is not None:
@@ -44,6 +51,13 @@ class TinyBird:
 
     def set_observations(self, fields):
         return self.call("set_observations", fields=fields)
+
+    def configure_observations(self, config):
+        """Apply a Workshop JSON file or dict after runtime compatibility checks."""
+        if isinstance(config, (str, Path)):
+            with open(config, encoding="utf-8") as source:
+                config = json.load(source)
+        return self.call("configure_observations", config=config)
 
     def save_state(self, slot=0):
         return self.call("save_state", slot=slot)

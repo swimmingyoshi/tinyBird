@@ -113,9 +113,21 @@ await click('[data-play-view-button="desk"]');
 await screenshot("empty-desktop");
 await choose(client, "#file-rom", ROM);
 await waitFor(client, "tinybird.emu.running", "ROM did not load");
+// Save & load is an anchored bubble; the game behind it never resizes.
 await click('[data-tool="saves"]');
-assert.equal(await client.eval('document.querySelector("#tool-saves").hidden'), false);
+assert.equal(await client.eval('document.querySelector("#sheet-saves").matches(":popover-open")'), true);
+const screenWithPopup = await client.eval('Math.round(document.querySelector(".screens").getBoundingClientRect().height)');
+await key("Escape");
+assert.equal(await client.eval('document.querySelector("#sheet-saves").matches(":popover-open")'), false, "Escape must close the popup");
+assert.equal(
+  await client.eval('Math.round(document.querySelector(".screens").getBoundingClientRect().height)'),
+  screenWithPopup,
+  "opening a popup must not resize the game",
+);
+await click('[data-tool="saves"]');
 await choose(client, "#file-state", STATES[0]);
+// Loading a state dismisses the popup so the game remains visible.
+assert.equal(await client.eval('document.querySelector("#sheet-saves").matches(":popover-open")'), false, "loading a state must close the popup");
 await sleep(500);
 await click("#btn-play");
 assert.equal(await client.eval("tinybird.emu.running"), false);
@@ -125,12 +137,14 @@ assert.equal(await client.eval("tinybird.emu.running"), true, "Space must activa
 assert.equal(await client.eval("tinybird.buttons"), 0, "UI keyboard activation must not press game buttons");
 await key("Enter");
 assert.equal(await client.eval("tinybird.emu.running"), false);
+// Audio & video opens without a modal backdrop or resizing the game.
+await click("#btn-game-menu");
 await click('[data-tool="settings"]');
-assert.equal(await client.eval('document.querySelector("#tool-saves").hidden'), true);
-assert.equal(await client.eval('document.querySelector("#tool-settings").hidden'), false);
+assert.equal(await client.eval('document.querySelector("#sheet-saves").matches(":popover-open")'), false);
+assert.equal(await client.eval('document.querySelector("#tool-settings").matches(":popover-open")'), true);
 await screenshot("settings-desktop");
-assert.ok(await client.eval('document.querySelector("#tool-settings").getBoundingClientRect().bottom <= innerHeight + 1'), "Opened tools must scroll into view");
-await click('[data-tool="settings"]');
+assert.ok(await client.eval('document.querySelector("#tool-settings").getBoundingClientRect().bottom <= innerHeight + 1'), "Popup must stay inside the viewport");
+await key("Escape");
 await client.eval("document.activeElement.blur(); true");
 for (const view of ["focus", "cinema", "desk"]) {
   await key("Tab");
@@ -159,15 +173,17 @@ await client.eval('document.querySelector("[data-play-view-button=focus]").focus
 await key("Tab");
 assert.equal(await mode(), "desk", "Tab on a control must retain native navigation");
 await click('[data-play-view-button="focus"]');
+await click("#btn-game-menu");
 await click("#btn-controls");
 assert.equal(await client.eval('document.querySelector("#controls-sheet").open'), true);
 await screenshot("controls-dialog");
 await key("Escape");
 assert.equal(await client.eval('document.querySelector("#controls-sheet").open'), false);
 assert.equal(await mode(), "focus", "Closing a dialog must not also leave Focus");
+await click("#btn-game-menu");
 await click("#btn-lobby");
-assert.equal(await client.eval('document.querySelector("#lobby-sheet").open'), true);
-await screenshot("multiplayer-dialog");
+assert.equal(await client.eval('document.querySelector("#lobby-sheet").matches(":popover-open")'), true);
+await screenshot("multiplayer-popup");
 await key("Escape");
 await key("Escape");
 assert.equal(await mode(), "desk");

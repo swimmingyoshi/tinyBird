@@ -26,3 +26,14 @@
 .workshop [data-message] { color: #d9edb4; }
 @media (max-width: 560px) { .workshop-grid { grid-template-columns: 1fr; } }
 
+/* Named observations stay separate from the reader manifest. */
+.workshop-observations { margin: 16px 0; padding: 14px; border: 1px solid #365145; border-radius: 10px; background: #11251e; }
+.workshop-observations > summary { cursor: pointer; font-weight: 600; }
+.workshop-observations p { font-size: 12px; line-height: 1.6; color: #abc5b8; }
+.workshop-observations form { display: grid; gap: 10px; }
+.workshop-observations ul { padding: 0; list-style: none; }
+.workshop-observations li { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 0; border-top: 1px solid #365145; }
+.workshop-observations li > span { display: grid; flex: 1 1 140px; gap: 3px; overflow-wrap: anywhere; }
+.workshop-observations li small { color: #abc5b8; }
+.workshop-observations output { font: 13px monospace; color: #d0f5db; }
+.workshop-observations .observation-import { max-width: 100%; font-size: 12px; }

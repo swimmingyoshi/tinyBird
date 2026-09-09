@@ -20,7 +20,7 @@ code, pre, kbd { font-family: var(--mono); }
 .key { min-height: 44px; padding: 11px 16px; border-radius: 8px; background: #1a2532; font: 500 13px var(--body); letter-spacing: 0; }
 .key:hover:not(:disabled) { background: #263646; border-color: #6b9b91; }
 .key--lead, .key--lead:hover { background: var(--primary); color: #102b23; border-color: var(--primary); }
-.panel { border-radius: var(--radius); background: var(--shell); }
+.panel { border-radius: var(--radius); background: color-mix(in srgb, var(--shell) var(--panel-alpha), transparent); }
 .panel__eyebrow { font: 600 12px var(--body); letter-spacing: .04em; }
 .panel__lead, .panel__foot { font-size: 14px; line-height: 1.8; color: var(--dim); }
 .panel__note { overflow-wrap: anywhere; }
