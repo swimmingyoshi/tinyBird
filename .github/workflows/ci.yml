@@ -8,6 +8,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Tests
@@ -26,10 +29,19 @@ jobs:
       # the web server do not, so CI builds what it can check rather than
       # pulling in a display server to compile a binary it never runs.
       - name: Build
-        run: cargo build -p tinybird-core -p tinybird-addons -p tinybird-games -p tinybird-web
+        run: cargo build --locked -p tinybird-core -p tinybird-addons -p tinybird-games -p tinybird-web -p tinybird-runtime
 
       - name: Unit tests
-        run: cargo test -p tinybird-core -p tinybird-addons -p tinybird-games -p tinybird-web
+        run: cargo test --locked -p tinybird-core -p tinybird-addons -p tinybird-games -p tinybird-web -p tinybird-runtime
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Release hygiene and deployment boundaries
+        run: |
+          python scripts/check-release.py
+          python tests/deployment_smoke.py target/debug/tinybird-web
+          python examples/python/test_tinybird.py
 
       # Reporting only. The core carries a lint backlog that predates this
       # workflow, and because the crates share a workspace its warnings surface

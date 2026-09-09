@@ -5,6 +5,14 @@
 # Python automation client artifacts
 __pycache__/
 *.pyc
+node_modules/
+*.sqlite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.pem
+*.key
 
 # ROM files and BIOS (copyrighted)
 *.gba

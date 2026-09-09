@@ -1,5 +1,10 @@
 # tinyBird
 
+For local downloads, contributor setup, public hosting and release checkpoints,
+see [Deployment modes](docs/deployment-modes.md). The web server now defaults to
+local mode; cloud-enabled development explicitly uses `--mode development` and
+`.env.development`. Production uses injected environment variables.
+
 A programmable Game Boy Advance runtime written in Rust, with browser and desktop play, a plugin workshop, memory research tools, multiplayer, and headless automation.
 
 For Python control, repeatable frame actions, and named memory observations, see
@@ -351,7 +356,7 @@ your asset vault. `/play?rom=<url>&name=<label>` boots straight into one.
 Optional. Backed by the [0xstash media API](https://media.0xstash.dev/docs).
 
 ```bash
-cp .env.example .env    # then set TINYBIRD_MEDIA_KEY
+cp .env.example .env.development    # set a test TINYBIRD_MEDIA_KEY; run with --mode development
 ```
 
 Reads are public and go straight from the browser to the CDN; the API key stays
@@ -367,7 +372,7 @@ rather not publish.
 Optional. Backed by the [0xstash contact API](https://contact.0xstash.dev/api/help).
 
 ```bash
-cp .env.example .env    # then set TINYBIRD_CONTACT_KEY
+cp .env.example .env.development    # set a test TINYBIRD_CONTACT_KEY; run with --mode development
 ```
 
 Adds a "get in touch" panel to the home page. Without a key the panel stays
