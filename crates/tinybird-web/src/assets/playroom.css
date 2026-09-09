@@ -2,10 +2,10 @@
 
 .rig:where([data-play-view]) {
   --body: "Inter", system-ui, sans-serif;
-  --dim: #9ba9bc;
-  --ink: #edf2f8;
-  --shell: #111923;
-  --rule: #26313e;
+  --dim: var(--play-dim);
+  --ink: var(--play-ink);
+  --shell: var(--play-shell);
+  --rule: var(--play-rule);
   --gutter: 24px;
   max-width: 1600px;
   padding: 24px 36px;
@@ -13,42 +13,104 @@
   font-family: var(--body);
   font-size: 14px;
 }
-.rig:where([data-play-view]) .bar { padding: 0 0 20px; border-bottom-color: #1f2935; }
+.rig:where([data-play-view]) .bar { padding: 0 0 20px; border-bottom-color: var(--play-rule); }
 .rig:where([data-play-view]) .bar__nav { gap: 26px; font-size: 13px; }
 .rig:where([data-play-view]) .bar__state { font-size: 10px; max-width: 250px; overflow: hidden; }
 .rig:where([data-play-view]) .bar__mark { font-size: 14px; }
-.play-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 4px 0; }
-.play-toolbar__intro { display: grid; gap: 6px; margin-right: auto; }
-.play-toolbar__eyebrow, .section-kicker { color: #8eaaab; font-size: 10px; font-weight: 600; letter-spacing: .18em; }
-.play-toolbar__title { margin: 0; font-size: clamp(24px, 2.4vw, 34px); font-weight: 600; line-height: 1.2; letter-spacing: -.045em; }
-#view-description { color: var(--dim); font-size: 12px; }
-.view-picker { display: flex; padding: 4px; gap: 3px; background: #101821; border: var(--edge); border-radius: 12px; }
+.section-kicker { color: #8eaaab; font-size: 10px; font-weight: 600; letter-spacing: .18em; }
+.view-picker { display: flex; padding: 4px; gap: 3px; background: color-mix(in srgb, var(--play-shell) var(--panel-alpha), transparent); border: var(--edge); border-radius: 12px; }
 .view-picker button { padding: 10px 18px; min-height: 40px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--dim); font: 500 12px var(--body); cursor: pointer; }
-.view-picker button:hover { color: var(--ink); background: #1c2935; }
-.view-picker button[aria-pressed="true"] { color: #d1faec; background: #203b35; border-color: #335a50; }
-.play-toolbar__shortcut { color: var(--dim); font-size: 11px; }
-.play-toolbar__shortcut kbd { padding: 3px 5px; border: var(--edge); border-radius: 4px; font: inherit; }
+.view-picker button:hover { color: var(--ink); background: var(--play-raise); }
+.view-picker button[aria-pressed="true"] { color: #d1faec; background: color-mix(in srgb, var(--play-accent) 22%, var(--play-shell)); border-color: #335a50; }
 .rig:where([data-play-view]) .status { gap: 16px; margin: -4px 0; padding: 0 2px; min-height: 22px; font-size: 11px; }
 .rig:where([data-play-view]) .status__perf { font-family: "IBM Plex Mono", monospace; font-size: 10px; }
 .rig:where([data-play-view]) .status__msg { font-size: 11px; }
 .rig:where([data-play-view]) .deck { grid-template-columns: minmax(0, 1fr) 330px; grid-template-areas: "screen companion"; gap: 28px; }
 .rig:where([data-play-view]) .screen-col { gap: 14px; }
-.rig:where([data-play-view]) .screen { border-radius: 12px; border: 1px solid #35414e; box-shadow: 0 16px 60px #0004; }
+.rig:where([data-play-view]) .screen { border-radius: 12px; border: 1px solid var(--play-line); box-shadow: 0 16px 60px #0004; }
+.screen-quick { position: absolute; z-index: 5; display: flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid #ffffff26; border-radius: 9px; background: #0a101bd9; box-shadow: 0 2px 10px #0004; opacity: 0; pointer-events: none; transition: opacity .15s ease; }
+.screen-quick--audio { top: 10px; left: 10px; }
+.screen-quick--capture { top: 10px; right: 10px; }
+.screen-quick--fullscreen { bottom: 10px; right: 10px; }
+.screen:hover .screen-quick, .screen:has(.screen-quick :focus-visible) .screen-quick { opacity: 1; pointer-events: auto; }
+/* A pointer parked on the picture is not a pointer asking for these. Script
+   marks the screen idle once it stops moving; the fade out is slow on purpose,
+   so it reads as the controls retiring rather than as a flicker. Coming back
+   keeps the quick .15s from the rule above. Hover-capable pointers only:
+   without one there is nothing to go still, and the media query below is what
+   keeps the controls up for good. */
+@media (hover: hover) {
+  .screen[data-quick="idle"] .screen-quick { opacity: 0; pointer-events: none; transition: opacity .5s ease .1s; }
+}
+.screen[data-mode="empty"] .screen-quick { display: none; }
+.screen-quick button { display: grid; place-items: center; width: 36px; height: 36px; padding: 8px; border: 0; border-radius: 6px; background: transparent; color: #fff; cursor: pointer; }
+.screen-quick button:hover { background: #ffffff24; }
+.screen-quick button:disabled { opacity: .45; cursor: default; }
+.screen-quick :is(button, input):focus-visible { outline: 2px solid var(--play-accent); outline-offset: 1px; }
+.screen-quick svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.rig:where([data-play-view]) .screen-quick input[type="range"] { width: clamp(64px, 10vw, 100px); height: 28px; padding: 0; margin: 0 8px 0 2px; accent-color: var(--play-accent); cursor: pointer; }
+#quick-mute[aria-pressed="true"] .quick-sound-on, #quick-mute[aria-pressed="false"] .quick-sound-off { display: none; }
+@media (hover: none) { .screen-quick { opacity: 1; pointer-events: auto; } }
 .rig:where([data-play-view]) .screens { gap: 16px; }
-.rig:where([data-play-view]) .lobby__screen { border-radius: 12px; border-color: #35414e; }
-.rig:where([data-play-view]) .lobby__caption { padding-top: 8px; color: #aab8c8; font-size: 11px; }
-.transport { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; padding: 12px; border: var(--edge); border-radius: 14px; background: #101720; }
-.transport__primary, .transport__secondary { display: flex; gap: 8px; flex-wrap: wrap; }
+.rig:where([data-play-view]) .lobby__screen { border-radius: 12px; border-color: var(--play-line); }
+.rig:where([data-play-view]) .lobby__caption { padding-top: 8px; color: var(--play-dim); font-size: 11px; }
+.transport { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; padding: 12px; border: var(--edge); border-radius: 14px; background: color-mix(in srgb, var(--play-shell) var(--panel-alpha), transparent); }
+.transport__primary, .transport__actions { display: flex; gap: 8px; align-items: center; }
+.transport__view { justify-self: center; }
+.transport__actions { justify-self: end; }
+.transport .key { white-space: nowrap; }
+.rig:where([data-play-view]) .deckplate.tools:not(:has(.tool-body:not([hidden]))) { display: none; }
+.game-menu {
+  position: fixed; inset: auto; margin: 0; padding: 8px;
+  width: min(280px, calc(100vw - 24px)); max-height: calc(100dvh - 24px);
+  overflow-y: auto; border: 1px solid #3a4b5b; border-radius: 12px;
+  background: #15202c; color: var(--play-ink); box-shadow: 0 12px 48px #0009;
+}
+.game-menu__group + .game-menu__group { border-top: 1px solid var(--play-rule); margin-top: 6px; padding-top: 6px; }
+.game-menu__label { margin: 6px 10px; color: var(--play-dim); font: 600 10px var(--body); letter-spacing: .08em; text-transform: uppercase; }
+.game-menu--settings { width: min(340px, calc(100vw - 24px)); }
+.game-menu--addons, .game-menu--lobby { width: min(360px, calc(100vw - 24px)); }
+.popup-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 8px 8px; font: 600 13px var(--body); }
+.popup-close { display: grid; place-items: center; flex: 0 0 32px; height: 32px; border: 0; border-radius: 6px; color: var(--play-dim); background: transparent; font: 22px var(--body); cursor: pointer; }
+.popup-close:hover { color: var(--play-ink); background: var(--play-raise); }
+.popup-note { padding: 0 8px; margin: 0 0 10px; color: var(--play-dim); font: 11px/1.6 var(--body); }
+.popup-note:empty { display: none; }
+.popup-actions { display: grid; gap: 2px; }
+.rig:where([data-play-view]) .game-menu .key { white-space: normal; }
+.game-menu :is(button, a, input, select, label[tabindex]):focus-visible { outline: 2px solid var(--play-accent); outline-offset: -2px; }
+.settings-group { padding: 8px 0; }
+.rig:where([data-play-view]) .settings-group :is(.dial, .toggle) { display: flex; flex-direction: row; justify-content: space-between; align-items: center; width: 100%; gap: 12px; min-height: 40px; padding: 5px 8px; margin: 0; }
+.rig:where([data-play-view]) .settings-group .toggle input { order: 1; }
+.rig:where([data-play-view]) .settings-group .dial__label { flex: 1; font-size: 12px; }
+.rig:where([data-play-view]) .settings-group select { width: 150px; min-width: 0; font-size: 11px; padding: 6px; }
+.rig:where([data-play-view]) .settings-group input[type="range"] { width: 130px; min-width: 0; }
+.addon-switch { display: flex; align-items: center; gap: 14px; justify-content: space-between; padding: 12px 8px; border-top: 1px solid var(--play-rule); cursor: pointer; }
+.addon-switch > span { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.addon-switch strong { font: 500 12px var(--body); }
+.addon-switch small { color: var(--play-dim); font: 11px var(--body); }
+.rig:where([data-play-view]) :is(.settings-group, .addon-switch) input[type="checkbox"] { appearance: none; position: relative; flex: 0 0 32px; width: 32px; height: 18px; margin: 0; border: 1px solid #536476; border-radius: 20px; background: #263443; cursor: pointer; }
+.rig:where([data-play-view]) :is(.settings-group, .addon-switch) input[type="checkbox"]::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #c4ced9; }
+.rig:where([data-play-view]) :is(.settings-group, .addon-switch) input[type="checkbox"]:checked { background: var(--play-accent); border-color: var(--play-accent); }
+.rig:where([data-play-view]) :is(.settings-group, .addon-switch) input[type="checkbox"]:checked::after { left: 16px; background: #16392c; }
+.addon-switch input:disabled { opacity: .45; cursor: wait; }
+.game-menu--lobby .sheet__body { padding: 0 8px 8px; }
+.game-menu--lobby .lobby__hint { font-size: 11px; line-height: 1.6; margin-top: 12px; }
+.game-menu--lobby .lobby-divider { margin: 14px 0; }
+.game-menu--lobby .lobby__row .key { width: auto; flex: 0 0 auto; }
+.rig:where([data-play-view]) .game-menu .key { display: flex; align-items: center; justify-content: space-between; width: 100%; text-align: left; border: 0; background: transparent; color: var(--play-ink); text-decoration: none; }
+.rig:where([data-play-view]) .game-menu #btn-lobby { background: transparent; color: var(--play-accent); }
+.transport .key:focus-visible { outline: 2px solid var(--play-accent); outline-offset: 2px; }
+.rig:where([data-play-view]) #btn-game-menu[aria-expanded="true"] { background: #284138; border-color: color-mix(in srgb, var(--play-accent) 45%, var(--play-shell)); }
 .rig:where([data-play-view]) .key { min-height: 42px; padding: 10px 15px; border-radius: 8px; background: #1a2532; border-color: #303d4b; font: 500 12px var(--body); letter-spacing: 0; }
-.rig:where([data-play-view]) .key:hover:not(:disabled):not([data-disabled="true"]) { background: #263646; border-color: #6b9b91; }
+.rig:where([data-play-view]) .key:hover:not(:disabled):not([data-disabled="true"]) { background: var(--play-raise); border-color: color-mix(in srgb, var(--play-accent) 45%, var(--play-shell)); }
 .rig:where([data-play-view]) .key:disabled, .rig:where([data-play-view]) .key[data-disabled="true"] { color: #758294; background: #131c26; border-color: #24303c; }
-.rig:where([data-play-view]) #btn-play:not(:disabled), .rig:where([data-play-view]) #btn-host { color: #102b23; background: #b9eed4; border-color: #b9eed4; font-weight: 700; }
+.rig:where([data-play-view]) #btn-play:not(:disabled), .rig:where([data-play-view]) #btn-host { color: #102b23; background: var(--play-accent); border-color: var(--play-accent); font-weight: 700; }
 .rig:where([data-play-view]) #btn-play { min-width: 100px; }
-.rig:where([data-play-view]) #btn-lobby { color: #c5ecd9; border-color: #3c6554; background: #1a3027; }
+.rig:where([data-play-view]) #btn-lobby { color: var(--play-accent); border-color: #3c6554; background: #1a3027; }
 .transport__secondary .key { min-width: auto; background: transparent; }
 .transport__secondary a.key { text-decoration: none; }
 .rig:where([data-play-view]) #btn-reset, .rig:where([data-play-view]) #btn-eject { color: #e4b8ac; border-color: #62443f; background: #2b2020; }
-.rig:where([data-play-view]) .deckplate.tools { padding: 0; border: var(--edge); border-radius: 14px; background: #101720; gap: 0; overflow: hidden; }
+.rig:where([data-play-view]) .deckplate.tools { padding: 0; border: var(--edge); border-radius: 14px; background: color-mix(in srgb, var(--play-shell) var(--panel-alpha), transparent); gap: 0; overflow: hidden; }
 .tools__nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; }
 .tool-tab { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-height: 52px; padding: 14px 18px; border: 0; border-right: var(--edge); background: transparent; color: #acb9ca; font: 500 12px var(--body); text-align: left; cursor: pointer; }
 .tool-tab:last-child { border-right: 0; }
@@ -63,9 +125,9 @@
 .rig:where([data-play-view]) .dial { gap: 10px; }
 .rig:where([data-play-view]) .dial__label { font-size: 12px; }
 .rig:where([data-play-view]) select, .rig:where([data-play-view]) input[type="text"] { border-radius: 7px; min-height: 36px; padding: 8px 10px; background: #0a121b; border-color: #344352; color: var(--ink); font-family: var(--body); }
-.rig:where([data-play-view]) input[type="checkbox"], .rig:where([data-play-view]) input[type="range"] { accent-color: #b9eed4; }
+.rig:where([data-play-view]) input[type="checkbox"], .rig:where([data-play-view]) input[type="range"] { accent-color: var(--play-accent); }
 .rig:where([data-play-view]) .hint { color: #8293a8; line-height: 1.9; font-size: 11px; margin-top: 2px; text-align: center; }
-.companion { grid-area: companion; display: flex; flex-direction: column; gap: 20px; position: sticky; top: 24px; max-height: calc(100dvh - 48px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #334556 transparent; min-width: 0; }
+.companion { grid-area: companion; display: flex; flex-direction: column; gap: 20px; position: sticky; top: 24px; max-height: calc(100dvh - 48px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--play-rule) transparent; min-width: 0; }
 .companion__head { display: flex; align-items: center; gap: 9px; padding: 4px 2px; }
 .companion__head h2 { margin: 0; font-size: 14px; font-weight: 600; }
 .companion__head > span:last-child { margin-left: auto; font-size: 9px; letter-spacing: .12em; color: #a1b8b1; }
@@ -74,28 +136,33 @@
 #addon-runtime-status { overflow-wrap: anywhere; margin: 8px 0; }
 .rig:where([data-play-view]) .readout { position: static; max-height: none; overflow: visible; gap: 16px; }
 .rig:where([data-play-view]) .readout--addons > * { max-width: none; }
-.rig:where([data-play-view]) .panel { border-radius: 12px; overflow: hidden; background: #101923; border-color: #293746; }
+.rig:where([data-play-view]) .panel { border-radius: 12px; overflow: hidden; background: color-mix(in srgb, var(--play-shell) var(--panel-alpha), transparent); border-color: #293746; }
 .rig:where([data-play-view]) .panel__eyebrow { font: 600 11px var(--body); letter-spacing: .05em; }
 .rig:where([data-play-view]) .tabs__tab { font-family: var(--body); font-size: 11px; padding-block: 14px; }
 .rig:where([data-play-view]) .tabs__name { font-family: var(--body); letter-spacing: .02em; }
 .rig:where([data-play-view]) .rail-note { padding: 18px; margin: 0; border: 1px dashed #354451; border-radius: 10px; font-size: 12px; line-height: 1.8; color: #a6b5c7; }
-.rig:where([data-play-view]) .cartstrip { border-left: 0; padding: 12px 14px; border-radius: 8px; background: #131f2a; }
-.rig:where([data-play-view]) .screen[data-mode="empty"] { min-height: 490px; background: #0e1821; aspect-ratio: auto; }
-.rig:where([data-play-view]) .screen__empty { background: #0e1821; gap: 14px; justify-items: center; padding: 32px; }
+.rig:where([data-play-view]) .cartstrip { border-left: 0; padding: 12px 14px; border-radius: 8px; background: color-mix(in srgb, var(--play-shell) var(--panel-alpha), transparent); }
+.rig:where([data-play-view]) .screen[data-mode="empty"] { min-height: 490px; background: var(--play-sunk); aspect-ratio: auto; }
+.rig:where([data-play-view]) .screen__empty { background: var(--play-sunk); gap: 14px; justify-items: center; padding: 32px; }
 .rig:where([data-play-view]) .screen__empty-title { color: #e4efee; font: 600 clamp(22px, 2.3vw, 30px) var(--body); letter-spacing: -.035em; }
 .rig:where([data-play-view]) .screen__empty-body { max-width: 45ch; font-size: 13px; line-height: 1.8; }
 .rig:where([data-play-view]) .screen__empty .vault__list { width: min(420px, 100%); margin: 0; max-height: 130px; overflow-y: auto; }
-.rig:where([data-play-view]) #vault-load { background: #b9eed4; border-color: #b9eed4; color: #112b22; padding: 13px 22px; min-height: 46px; font-weight: 600; }
+.rig:where([data-play-view]) #vault-load { background: var(--play-accent); border-color: var(--play-accent); color: #112b22; padding: 13px 22px; min-height: 46px; font-weight: 600; }
 .rig:where([data-play-view]) #vault-load .panel__note { color: #355c4b; }
 .empty-help { max-width: 45ch; margin: 0; color: #849aae; font-size: 11px; line-height: 1.8; }
 .empty-cartridge { width: 76px; height: 86px; border: 2px solid #547268; border-radius: 10px 10px 5px 5px; padding: 12px 8px; background: #1b302c; transform: rotate(-8deg); margin: 0 0 10px; }
 .empty-cartridge span { display: block; border: 1px solid #567567; background: #283f35; padding: 12px 0; font: 8px var(--display); color: #bee6cc; }
-.empty-cartridge i { display: block; margin: 7px auto; width: 35px; height: 5px; border-top: 2px solid #658578; border-bottom: 2px solid #658578; }
+.empty-cartridge i { display: block; margin: 7px auto; width: 35px; height: 5px; border-top: 2px solid color-mix(in srgb, var(--play-accent) 45%, var(--play-shell)); border-bottom: 2px solid color-mix(in srgb, var(--play-accent) 45%, var(--play-shell)); }
 .rig:where([data-play-view]) .sheet { border-radius: 18px; border-color: #344454; background: #111b26; width: min(620px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); box-shadow: 0 30px 120px #0009; }
 .rig:where([data-play-view]) .sheet::backdrop { background: #040a12ba; backdrop-filter: blur(6px); }
 .rig:where([data-play-view]) .sheet__head { padding: 18px 22px; background: #15212e; }
 .rig:where([data-play-view]) .sheet__head .panel__eyebrow { font-size: 16px; letter-spacing: -.02em; }
 .rig:where([data-play-view]) .sheet__body { padding: 22px; }
+/* A tool sheet is wider than a dialog of prose: the save list is a grid of
+   thumbnails, and squeezing it to 620px puts it back to one column. */
+.rig:where([data-play-view]) .sheet--tool { width: min(880px, calc(100vw - 32px)); }
+.rig:where([data-play-view]) .sheet--tool .sheet__body { max-height: calc(100dvh - 150px); overflow-y: auto; }
+.rig:where([data-play-view]) .sheet--tool .rack { border: 0; padding: 0; }
 .rig:where([data-play-view]) .sheet__lead, .rig:where([data-play-view]) .sheet__foot { padding: 18px 22px; }
 .lobby-intro { padding: 4px 0 24px; }
 .lobby-intro h2 { margin: 10px 0; font-size: 27px; font-weight: 600; letter-spacing: -.035em; }
@@ -107,10 +174,8 @@
 .rig:where([data-play-view]) .lobby__row { gap: 10px; }
 .rig:where([data-play-view]) .lobby__row input { min-width: 0; min-height: 44px; }
 .rig:where([data-play-view]) .lobby__hint { font-size: 12px; line-height: 1.8; margin-top: 18px; }
-.rig:where([data-play-view]) .lobby__code { padding: 16px; border: var(--edge); background: #0b131d; border-radius: 10px; }
+.rig:where([data-play-view]) .lobby__code { padding: 16px; border: var(--edge); background: var(--play-sunk); border-radius: 10px; }
 .rig[data-play-view="focus"] .deck { grid-template-columns: minmax(0, 1fr) 310px; grid-template-areas: "screen companion"; }
-.rig[data-focus="on"] .play-toolbar__eyebrow { display: none; }
-.rig[data-focus="on"] .play-toolbar__title { font-size: 20px; }
 .rig[data-play-view="cinema"] { max-width: none; }
 .rig[data-play-view="cinema"] .companion { display: none; }
 .rig[data-play-view="cinema"] .deck { grid-template-columns: minmax(0, 1fr); grid-template-areas: "screen"; align-items: center; }
@@ -120,9 +185,6 @@
 @media (max-width: 1180px) {
   .rig:where([data-play-view]) { padding: 20px; }
   .rig:where([data-play-view]) .deck, .rig[data-play-view="focus"] .deck { grid-template-columns: minmax(0, 1fr) 290px; gap: 20px; }
-  .transport__primary, .transport__secondary { flex: 1; }
-  .transport .key { flex: 1; }
-  .play-toolbar__shortcut { display: none; }
 }
 @media (max-width: 900px) {
   .rig:where([data-play-view]) .deck, .rig[data-play-view="focus"] .deck { grid-template-columns: minmax(0, 1fr); grid-template-areas: "screen" "companion"; }
@@ -136,12 +198,11 @@
   .rig:where([data-play-view]) .bar { padding-bottom: 14px; gap: 12px; }
   .rig:where([data-play-view]) .bar__nav { order: 0; width: auto; margin-left: auto; gap: 16px; }
   .rig:where([data-play-view]) .bar__nav a:not(.is-current) { display: none; }
-  .play-toolbar { gap: 16px; }
-  .play-toolbar__intro { width: 100%; }
   .view-picker { width: 100%; }
   .view-picker button { flex: 1; }
-  .transport { gap: 10px; padding: 10px; }
-  .transport__primary, .transport__secondary { flex: 1 1 100%; }
+  .transport { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 10px; }
+  .transport__view, .transport__actions { justify-self: stretch; }
+  .transport__primary > .key, .transport__actions > .key { flex: 1; }
   .transport .key { min-width: 0; padding: 10px 8px; font-size: 11px; }
   .tool-tab { padding: 14px 10px; font-size: 11px; }
   .tool-tab span { display: none; }
@@ -161,14 +222,98 @@
 
 /* One scrollbar for the companion, rather than a scroll area inside each card. */
 .rig:where([data-play-view]) .companion .slot__body { max-height: none; overflow: visible; }
+/* ...and nothing else in the rail may clip its own overflow either.
+   `.panel` carries `overflow: hidden` so the 12px radius cuts the tab strip's
+   square corners. A clipped box also reports no overflow to its ancestors, so
+   the rail's `overflow-y: auto` decided there was nothing to scroll while the
+   panel quietly dropped everything past its own height — a party reader with
+   its cards expanded lost two thirds of itself with no scrollbar to say so.
+   Clip sideways, which is all the corners need, and let height reach the rail
+   that knows how to scroll it. */
+.rig:where([data-play-view]) .companion .panel {
+  overflow-x: clip;
+  overflow-y: visible;
+}
 .library-notice { font-size: 11px; line-height: 1.7; color: #dcb998; max-width: 44ch; }
 .library-notice:empty { display: none; }
+/* How tall the picture may be before the transport and the hint below it are
+   pushed off the bottom. --deck-cap is measured by fitScreen from where the
+   picture actually starts and what is actually under it; the calc() is the
+   fallback for the frame or two before the first measurement lands, and is
+   what this rule used on its own before. A constant could only ever be right
+   at one window height, and it was leaving a band of dead space under the
+   hint on a tall one. */
 @media (min-width: 901px) {
-  .rig[data-play-view="desk"] .screen[data-mode="running"] { max-height: max(260px, calc(100dvh - 400px)); }
-  .rig[data-play-view="focus"] .screen[data-mode="running"] { max-height: max(260px, calc(100dvh - 250px)); }
+  .rig[data-play-view="desk"] .screen[data-mode="running"] { max-height: max(260px, var(--deck-cap, calc(100dvh - 400px))); }
+  .rig[data-play-view="focus"] .screen[data-mode="running"] { max-height: max(260px, var(--deck-cap, calc(100dvh - 250px))); }
 }
 
 .rig:where([data-play-view]) #info-panel:has(#right-pane:empty) { display: none; }
+.rig:where([data-play-view]) .deckpanel { border-radius: 12px; border-color: #2d3d4b; background: color-mix(in srgb, var(--play-shell) var(--panel-alpha), transparent); }
+.rig:where([data-play-view]) .deckpanel .tabs { display: flex; gap: 4px; padding: 6px; overflow-x: auto; scrollbar-width: thin; border-bottom: 1px solid #2a3948; background: color-mix(in srgb, var(--play-sunk) var(--panel-alpha), transparent); }
+.rig:where([data-play-view]) .deckpanel .tabs__tab { flex: 0 0 auto; min-width: 64px; padding: 9px 12px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--play-dim); font-family: var(--body); }
+.rig:where([data-play-view]) .deckpanel .tabs__tab[aria-selected="true"] { background: #254038; border-color: #3a6052; color: #c9f4df; }
+.rig:where([data-play-view]) .deckpanel .tabs__name { font: 600 12px var(--body); text-transform: none; letter-spacing: 0; }
+.rig:where([data-play-view]) .pane__head { min-height: 40px; padding: 4px 10px; border: 0; gap: 8px; }
+.rig:where([data-play-view]) .pane__note { font: 11px/1.5 var(--body); color: var(--play-dim); }
+.pane-arrange { flex: 0 0 30px; height: 30px; margin-left: auto; border: 1px solid transparent; border-radius: 6px; color: var(--play-dim); background: transparent; font: 22px/1 var(--body); cursor: pointer; }
+.pane-arrange:hover, .pane-arrange[aria-expanded="true"] { color: #d1f5e4; background: #263a45; border-color: #3e5665; }
+.rig:where([data-play-view]) .pane__pick { width: auto; flex: 1; min-width: 0; border-color: transparent; background: #152330; font: 500 12px var(--body); }
+.slot:has(.pane__pick) .pane__note { display: none; }
+.rig:where([data-play-view]) .tabs__pane[data-split="true"] { display: grid; grid-template-rows: minmax(0, var(--pane-ratio, 50fr)) 12px minmax(0, var(--pane-rest, 50fr)); height: clamp(360px, 65dvh, 680px); }
+.rig:where([data-play-view]) .tabs__pane[data-split="true"] > .slot { display: flex; flex-direction: column; min-height: 0; overflow: hidden; margin: 0; border: 0; }
+.rig:where([data-play-view]) .tabs__pane[data-split="true"] .slot__body { flex: 1; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; }
+.tabs__pane[data-split="true"] :is(.tabs, .pane__head) { flex-shrink: 0; }
+.rail-divider { display: grid; place-items: center; cursor: row-resize; touch-action: none; background: var(--play-sunk); border-block: 1px solid #293a49; }
+.rail-divider::after { content: ""; width: 36px; height: 3px; border-radius: 3px; background: #5b7487; }
+.rail-divider:hover::after, .rail-divider:focus-visible::after { background: var(--play-accent); }
+:is(.pane-arrange, .rail-divider):focus-visible { outline: 2px solid var(--play-accent); outline-offset: -2px; }
+.vault-card { border-radius: 12px; background: var(--play-shell); }
+.vault-card__head { display: flex; align-items: center; justify-content: space-between; padding: 16px 16px 6px; gap: 10px; }
+.vault-card__head h2 { margin: 0; font: 600 14px var(--body); color: #d5e9e0; }
+#vault-saves-count { color: #94acbd; font-size: 11px; }
+.vault-card__intro { margin: 0; padding: 0 16px 12px; color: var(--play-dim); font: 11px/1.6 var(--body); }
+.vault-card #pane-saves { padding: 0 12px 12px; max-height: 46dvh; overflow-y: auto; scrollbar-width: thin; }
+.vault-card .rail-note { padding: 12px 4px; }
+.rig:where([data-play-view]) .screenshot-gallery { width: min(1040px, calc(100vw - 32px)); padding: 0; background: #0d1722; border: 1px solid #354958; border-radius: 16px; max-height: calc(100dvh - 32px); overflow-y: auto; }
+.screenshot-gallery .sheet__head h2 { margin: 0; font: 600 18px var(--body); text-transform: none; }
+#shot-when { margin: 6px 0 0; color: #98afbe; font: 11px var(--body); }
+.gallery-stage { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; gap: 12px; align-items: center; padding: 20px; background: #070d14; }
+.gallery-stage[hidden] { display: none; }
+.gallery-stage .shot__full { display: block; width: 100%; height: min(52dvh, 560px); object-fit: contain; image-rendering: pixelated; }
+.gallery-arrow { width: 40px; height: 48px; border: 1px solid #385064; border-radius: 10px; color: #d7f6e6; background: #182a38; font-size: 20px; cursor: pointer; }
+.gallery-arrow:hover:not(:disabled) { background: #2a493f; }
+.gallery-arrow:disabled { opacity: .3; cursor: default; }
+.gallery-footer { display: flex; justify-content: space-between; gap: 12px; padding: 14px 22px; color: #a2b7c8; font-size: 12px; }
+.gallery-footer a { color: var(--play-accent); }
+/* The thumbnails were a filmstrip: a single row scrolled sideways. That read
+   well as the floor of a wide dialog and badly everywhere else — in a sidebar
+   a couple of hundred pixels across it meant scrolling right through every
+   shot to reach any of them. A grid that fills whatever width it is handed
+   wraps instead, so the same list is two columns in the rail and as many as
+   fit in the modal, without either needing a rule of its own.
+
+   No padding here: the rail pane and the modal panel each bring their own,
+   and the strip used to carry the dialog's. */
+/* The default lives in the var() fallback, not as a declaration here: a custom
+   property set on the element itself beats one inherited from an ancestor, so
+   declaring it would stop the room it is in from ever having a say. */
+.gallery-thumbnails { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--thumb-min, 90px), 1fr)); gap: var(--thumb-gap, 8px); padding: 0; margin: 0; list-style: none; }
+.gallery-thumbnails[hidden] { display: none; }
+.gallery-thumbnails .shots__item { width: 100%; padding: 3px; border: 2px solid transparent; border-radius: 8px; background: var(--play-sunk); transition: border-color .12s ease, background .12s ease; }
+.gallery-thumbnails .shots__item:hover { background: var(--play-raise); border-color: color-mix(in srgb, var(--play-accent) 45%, var(--play-shell)); }
+.gallery-thumbnails .shots__item:focus-visible { outline: 2px solid var(--play-accent); outline-offset: 2px; }
+.gallery-thumbnails .shots__item[aria-current="true"] { border-color: var(--play-accent); background: color-mix(in srgb, var(--play-accent) 14%, var(--play-shell)); }
+.gallery-thumbnails .shots__thumb { border-radius: 5px; }
+/* The date sat on one line and was clipped to an ellipsis in a narrow column,
+   which turned every caption into the same three dots. */
+.gallery-thumbnails .shots__when { display: block; padding: 5px 4px 3px; color: var(--play-dim); font-size: 10px; line-height: 1.35; white-space: normal; text-align: center; }
+.gallery-empty { padding: 48px 24px; text-align: center; color: #9eafbe; font-size: 13px; }
+@media (max-width: 560px) {
+  .gallery-stage { grid-template-columns: 30px minmax(0, 1fr) 30px; padding: 10px; gap: 4px; }
+  .gallery-arrow { width: 30px; height: 40px; font-size: 15px; }
+  .gallery-stage .shot__full { height: min(40dvh, 320px); }
+}
 .rig:where([data-play-view]) .screen:fullscreen { border-radius: 0; }
 
 /* Equal side rails keep the game on the page centerline. */
@@ -191,14 +336,73 @@
   .rig:where([data-play-view]) .companion__head { display: none; }
   .rig:where([data-play-view]) .readout--addons { grid-area: addons; }
   .rig:where([data-play-view]) .readout--info { grid-area: info; }
-  .rig:where([data-play-view]) .companion > .readout {
-    position: sticky;
-    top: 20px;
-    max-height: calc(100dvh - 40px);
-    overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: #334556 transparent;
+  /* The page itself does not scroll; its columns do.
+
+     The rails used to be sticky with a viewport-sized max-height, which is
+     nearly right and wrong in one specific way: a rail whose top sits 200px
+     down the page and whose max-height is the whole viewport reaches 200px
+     past the bottom, so the *page* grew a scrollbar and the game slid out of
+     view as you read. Pinning the deck to what is left of the viewport and
+     giving each column its own scroll keeps the game where it is and puts the
+     scrollbar on the thing that is actually too long. */
+  .rig:where([data-play-view]) {
+    height: 100dvh;
+    overflow: hidden;
   }
+  .rig:where([data-play-view]) .deck,
+  .rig[data-play-view="focus"] .deck {
+    min-height: 0;
+  }
+  .rig:where([data-play-view]) .companion > .readout,
+  .rig:where([data-play-view]) .screen-col {
+    /* `align-items: start` on the deck sizes a column to its content, so the
+       cap has to be the row's height rather than a percentage of it. */
+    max-height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--play-rule) transparent;
+  }
+
+  /* A rail stops at the underside of the button bar, never past it.
+     The 100% above is the grid row, and with `align-items: start` the row is
+     as tall as its tallest column — so a rail long enough to be that tallest
+     column was measuring itself against itself and never capped at all. That
+     is how a full species list came to run off the bottom of the window, and
+     in Focus it dragged the centred deck down with it. --rail-cap is the span
+     from the top of the deck to the underside of the transport, measured in
+     fitScreen; the rails cannot affect that measurement, so it settles instead
+     of chasing itself. Must stay after the rule above: same specificity, so
+     the later declaration is the one that wins. */
+  .rig:where([data-play-view]) .companion > .readout {
+    max-height: var(--rail-cap, 100%);
+  }
+
+  /* A rail is a flex column, so a ceiling that actually binds makes its cards
+     give up height rather than overflow — the party squeezed into a sliver and
+     nothing scrolled. Same answer the centre column already uses: the parts
+     keep their own height and the rail gets the scrollbar. */
+  .rig:where([data-play-view]) .companion > .readout > * {
+    flex-shrink: 0;
+  }
+  /* The centre column scrolls only if the machine is taller than the room;
+     normally it fits and shows no bar at all. Its parts keep their own height
+     rather than sharing out a shortfall — a flex column with a ceiling will
+     otherwise squeeze the tool strip until its labels vanish, which is a
+     worse answer than a scrollbar. The screen is the one part allowed to
+     shrink, and it already has a max-height of its own. */
+  .rig:where([data-play-view]) .screen-col > * { flex-shrink: 0; }
+  /* The screen is the one part allowed to give up height — but it has a fixed
+     aspect ratio, so shrinking its *container* alone just made it overflow and
+     paint across the transport and the tool drawer below it. It has to be told
+     to scale, and the container has to be able to contain it. */
+  .rig:where([data-play-view]) .screen-col > .screens {
+    flex-shrink: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .rig:where([data-play-view]) .screens > .screen { max-height: 100%; }
   .rig[data-play-view="cinema"] .companion { display: none; }
   .rig[data-play-view="cinema"] .deck { grid-template-columns: minmax(0, 1fr); grid-template-areas: "screen"; }
   .rig[data-play-view="cinema"] .screen-col { width: min(100%, calc((100dvh - 240px) * 1.5)); }
@@ -215,3 +419,87 @@
 @media (max-width: 560px) {
   .rig:where([data-play-view]) .companion { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Appearance panel ------------------------------------------------------- */
+.swatches { display: flex; gap: 6px; margin-top: 2px; }
+.swatches span { width: 22px; height: 22px; border: 1px solid var(--play-line); border-radius: 5px; }
+.bg-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.bg-actions .key { flex: 1; min-width: 0; }
+.bg-note { margin: 2px 0 0; color: var(--play-dim); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.bg-note[data-tone="bad"] { color: var(--bad); }
+/* The two sliders mean nothing without a picture behind them. */
+#tool-appearance:not([data-has-bg="yes"]) :is(#opt-bg-dim, #opt-bg-blur) { opacity: .4; pointer-events: none; }
+
+/* Screen opacity ---------------------------------------------------------
+ *
+ * The bezel fill and the picture fade together, so the ground shows through
+ * the game rather than through a black rectangle. The quick controls are
+ * siblings of the panel rather than inside it, which is what keeps the camera
+ * and the volume readable at any setting.
+ *
+ * Full screen opts out: there is no page behind it to show through, and a
+ * translucent picture on a black display just looks broken. */
+.rig:where([data-play-view]) .screen { background: color-mix(in srgb, #000 var(--screen-alpha), transparent); }
+.rig:where([data-play-view]) .screen__panel { opacity: var(--screen-alpha); }
+.rig:where([data-play-view]) .screen:fullscreen { background: #000; }
+.rig:where([data-play-view]) .screen:fullscreen .screen__panel { opacity: 1; }
+
+/* Read-outs off ----------------------------------------------------------
+ *
+ * The frame counter and the sign-in line above the deck, and the key hints
+ * below it. Useful while setting things up, clutter once you are playing.
+ * Both are counted by the deck cap, so the picture grows into the space they
+ * give back rather than leaving a gap where they were. */
+:root[data-readouts="hidden"] .rig:where([data-play-view]) :is(.status, .hint) { display: none; }
+
+/* Focus: share the spare height ------------------------------------------
+ *
+ * Focus drops the header, and with the read-outs off there is more height
+ * going spare than the picture can spend — it is already as wide as its column
+ * allows, and the aspect ratio decides the rest. The deck stretches to fill the
+ * rig and starts its columns at the top, so all of that surplus collects in one
+ * lump under the transport.
+ *
+ * Centre the deck itself rather than the middle column. Centring just the
+ * column moved the picture down and left the two rails behind on the old top
+ * edge, out of line with it by whatever was spare; moving the deck moves all
+ * three columns together, so the rails stay level with the picture and the
+ * surplus is shared above and below the lot.
+ *
+ * Auto margins rather than `justify-content`, because they collapse to zero
+ * when there is no surplus: a window too short for the machine keeps it at the
+ * top instead of pushing its head out of reach. */
+.rig[data-play-view="focus"] .deck {
+  flex: none;
+  margin-block: auto;
+}
+
+/* Vault modal ------------------------------------------------------------ */
+.vault-tabs { display: flex; gap: 6px; padding: 0 22px; border-bottom: 1px solid var(--play-rule); }
+.vault-tab { padding: 12px 18px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--play-dim); font: 500 12px var(--body); cursor: pointer; }
+.vault-tab:hover { color: var(--play-ink); }
+.vault-tab[aria-selected="true"] { color: var(--play-accent); border-bottom-color: var(--play-accent); }
+.vault-tab:focus-visible { outline: 2px solid var(--play-accent); outline-offset: -2px; }
+.vault-panel { padding: 18px 22px; min-height: 0; overflow-y: auto; }
+
+/* The Screenshots pane: thumbnails first, and room to breathe around them. */
+.rig:where([data-play-view]) #pane-shots { padding: 12px; display: grid; gap: 10px; }
+.rig:where([data-play-view]) #pane-saves { padding: 12px; }
+#vault-panel-shots #pane-shots { padding: 0; }
+#vault-panel-saves #pane-saves { padding: 0; }
+/* In the modal the picture is the point, so the stage gets the room and the
+   strip underneath stays a strip. */
+/* One rule for the strip, and the room it is in says how big a thumbnail
+   should be: two legible columns in a narrow rail, and something worth
+   clicking in a thousand-pixel dialog rather than ten stamps in a row. */
+/* A sidebar wants small tiles so two fit across; a modal a thousand pixels
+   wide wants fewer, larger ones rather than ten postage stamps. */
+#vault-panel-shots { display: grid; gap: 14px; align-content: start; --thumb-min: 150px; --thumb-gap: 12px; }
+.recovery-card { display: flex; align-items: center; gap: 16px; width: min(420px, 100%); box-sizing: border-box; padding: 14px; border: 1px solid #45645b; border-radius: 12px; background: #14231f; text-align: left; }
+.recovery-card[hidden] { display: none; }
+.recovery-card img { flex: 0 0 96px; border-radius: 6px; image-rendering: pixelated; }
+.recovery-card > div { display: grid; gap: 7px; min-width: 0; }
+.recovery-card strong { overflow-wrap: anywhere; color: #e4efee; font-size: 14px; }
+.recovery-card small, .recovery-status { font-size: 11px; color: #a1b8af; }
+.recovery-status:empty { display: none; }
+.screen__empty:has(.recovery-card:not([hidden])) .empty-cartridge { display: none; }

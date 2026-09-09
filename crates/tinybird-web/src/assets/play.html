@@ -21,12 +21,12 @@
           <span class="bar__glyph" aria-hidden="true"></span>
           tinyBird
         </a>
-        <nav class="bar__nav">
+        <nav class="bar__nav" aria-label="Main navigation">
           <a href="/">Home</a>
-          <a class="is-current" href="/play" aria-current="page">Play</a>
+          <a class="is-current" aria-current="page" href="/play">Play</a>
+          <a href="/addons">Add-ons</a>
           <a href="/info">Info</a>
           <a href="/contact">Contact</a>
-        <a href="/addons">Add-ons</a>
         </nav>
         <p class="bar__state" id="link-state" data-state="idle">
           <span class="dot" aria-hidden="true"></span><span id="link-label">no cartridge</span>
@@ -42,18 +42,6 @@
       <!-- Frame rate and the last thing that happened. Above the deck rather
            than under it: this is the line you check while playing, and at the
            bottom of a tall page it was usually scrolled out of view. -->
-      <div class="play-toolbar">
-        <div class="play-toolbar__intro">
-          <span id="view-description">Your game, with everything you need close by</span>
-        </div>
-        <div class="view-picker" role="group" aria-label="Play view">
-          <button type="button" data-play-view-button="desk" aria-pressed="true">Desk</button>
-          <button type="button" data-play-view-button="focus" aria-pressed="false">Focus</button>
-          <button type="button" data-play-view-button="cinema" aria-pressed="false">Cinema</button>
-        </div>
-        <span class="play-toolbar__shortcut"><kbd>Tab</kbd> switch view</span>
-      </div>
-
       <div class="status">
         <span class="status__perf" id="foot-perf">—</span>
         <span class="status__msg" id="foot-msg" role="status" aria-live="polite"></span>
@@ -80,6 +68,22 @@
                   <div class="screen__grid" aria-hidden="true"></div>
                   <div class="screen__boot" id="boot" aria-hidden="true"></div>
                 </div>
+                <div class="screen-quick screen-quick--audio" role="group" aria-label="Quick audio controls">
+                  <button id="quick-mute" type="button" aria-label="Mute" aria-pressed="true" title="Unmute">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/><path class="quick-sound-on" d="M15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/><path class="quick-sound-off" d="m16 9 6 6m0-6-6 6"/></svg>
+                  </button>
+                  <input id="quick-volume" type="range" min="0" max="100" value="70" aria-label="Volume" title="Volume" />
+                </div>
+                <div class="screen-quick screen-quick--capture">
+                  <button id="quick-screenshot" type="button" aria-label="Save screenshot" title="Save screenshot" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h4l2-3h6l2 3h4v14H3z"/><circle cx="12" cy="12" r="4"/></svg>
+                  </button>
+                </div>
+                <div class="screen-quick screen-quick--fullscreen">
+                  <button id="quick-fullscreen" type="button" aria-label="Full screen" aria-pressed="false" title="Full screen">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 3H3v6m12-6h6v6M3 15v6h6m12-6v6h-6"/></svg>
+                  </button>
+                </div>
 
                 <!-- The library lives here rather than in the rail.
 
@@ -91,6 +95,13 @@
                 <div class="screen__empty" id="empty-state">
                   <div class="empty-cartridge" aria-hidden="true"><span>tinyBird</span><i></i></div>
                   <p class="screen__empty-title">Choose your next adventure.</p>
+                  <div class="recovery-card" id="recovery-card" hidden role="region" aria-label="Automatic recovery">
+                    <img id="recovery-image" alt="Last played game" width="96" height="64" />
+                    <div><strong id="recovery-name"></strong><small id="recovery-time"></small>
+                      <button class="key key--slim" id="continue-playing" type="button">Continue playing</button>
+                    </div>
+                  </div>
+                  <p class="recovery-status" id="recovery-status" role="status"></p>
                   <p class="screen__empty-body">
                     Open a Game Boy Advance ROM, or drag a <code>.gba</code> file onto this page.
                   </p>
@@ -122,17 +133,10 @@
             </figure>
           </div>
 
-          <!-- The control deck.
-
-               Grouped and labelled rather than run together in rows. The old
-               deck put "Save state", "Save to vault" and "Screenshot to vault"
-               next to each other with nothing saying that the first is a
-               photograph of the machine kept in this browser and the second is
-               the same thing pushed to an account. Each group now says what it
-               is for, and every key carries the shortcut that also does it, so
-               the deck teaches the keyboard instead of competing with it. -->
+          <!-- Playback stays visible; secondary tools open from the game menu. -->
           <div class="transport" role="group" aria-label="Game controls">
-            <div class="transport__primary"><button
+            <div class="transport__primary">
+              <button
                   class="key"
                   id="btn-play"
                   type="button"
@@ -153,16 +157,40 @@
                   Fast forward<kbd class="key__hint" data-shortcut="FAST_FORWARD"></kbd>
                 </button>
             </div>
-            <div class="transport__secondary"><button
+            <!-- Which view, in the middle of the same bar as the rest of the
+                 controls: it is a playback control like the others, and it was
+                 the only one living above the screen. -->
+            <div class="transport__view">
+              <div class="view-picker" role="group" aria-label="Play view">
+                <button type="button" data-play-view-button="desk" aria-pressed="true">Desk</button>
+                <button type="button" data-play-view-button="focus" aria-pressed="false">Focus</button>
+                <button type="button" data-play-view-button="cinema" aria-pressed="false">Cinema</button>
+              </div>
+            </div>
+            <div class="transport__actions">
+              <button type="button" class="key" aria-expanded="false" aria-controls="sheet-saves" data-tool="saves" data-popup="sheet-saves">Save &amp; load</button>
+              <button type="button" class="key" id="btn-vault" aria-haspopup="dialog" title="Vault saves and screenshots for this game">Vault</button>
+              <button class="key" id="btn-game-menu" type="button" popovertarget="game-menu" aria-controls="game-menu" aria-expanded="false"><span aria-hidden="true">&#9776;</span> Menu</button>
+            </div>
+            <div id="game-menu" class="game-menu" popover="auto" aria-label="Game menu">
+              <div class="game-menu__group" role="group" aria-label="Game">
+                <p class="game-menu__label">Game</p>
+                <button class="key" id="btn-gallery" type="button" aria-haspopup="dialog">Screenshots</button>
+                <button type="button" class="key" aria-expanded="false" aria-controls="sheet-cartridge" data-tool="cartridge" data-popup="sheet-cartridge">Cartridge</button>
+                <button
                   class="key"
-                  id="btn-lobby"
+                  id="btn-lobby" data-popup="lobby-sheet" aria-controls="lobby-sheet" aria-expanded="false"
                   type="button"
                   title="Host or join a room and play alongside other people"
                 >
-                  Lobby / Link cable<span class="key__badge" id="lobby-badge" hidden>in</span>
+                  Multiplayer / Link cable<span class="key__badge" id="lobby-badge" hidden>in</span>
                 </button>
-              <a class="key" id="manage-addons" href="/addon#manage" target="_blank" rel="noopener">Manage add-ons</a>
-              <button
+              </div>
+              <div class="game-menu__group" role="group" aria-label="Preferences">
+                <p class="game-menu__label">Preferences</p>
+                <button type="button" class="key" aria-expanded="false" aria-controls="tool-settings" data-tool="settings" data-popup="tool-settings">Audio &amp; video</button>
+                <button type="button" class="key" aria-expanded="false" aria-controls="tool-appearance" data-tool="appearance" data-popup="tool-appearance">Appearance</button>
+                <button
                   class="key"
                   id="btn-controls"
                   type="button"
@@ -170,7 +198,7 @@
                 >
                   Controls<span class="key__badge" id="pad-badge" hidden>pad</span>
                 </button>
-              <button
+                <button
                   class="key"
                   id="btn-full"
                   type="button"
@@ -179,140 +207,14 @@
                 >
                   Full screen
                 </button>
+              </div>
+              <div class="game-menu__group" role="group" aria-label="Workshop">
+                <p class="game-menu__label">Workshop</p>
+                <button class="key" id="manage-addons" type="button" data-popup="addon-menu" aria-controls="addon-menu" aria-expanded="false">Manage add-ons</button>
+              </div>
             </div>
           </div>
-          <div class="deckplate tools">
-            <div class="tools__nav" role="group" aria-label="Game tools">
-              <button type="button" class="tool-tab" aria-expanded="false" aria-controls="tool-saves" data-tool="saves">Save &amp; load <span>01</span></button>
-              <button type="button" class="tool-tab" aria-expanded="false" aria-controls="tool-settings" data-tool="settings">Audio &amp; video <span>02</span></button>
-              <button type="button" class="tool-tab" aria-expanded="false" aria-controls="tool-cartridge" data-tool="cartridge">Cartridge <span>03</span></button>
-            </div>
-            <div class="tool-body" id="tool-saves" hidden>
-              <section class="rack">
-              <p class="rack__label">
-                Save states<span class="rack__note">Resume from this exact moment</span>
-              </p>
-              <p class="tool-description">Save states capture this moment. Use the game's own Save option to keep normal progress on the cartridge.</p><div class="rack__keys">
-                <button
-                  class="key"
-                  id="btn-save"
-                  type="button"
-                  disabled
-                  title="Download a save state to this computer"
-                >
-                  Save to file
-                </button>
-                <!-- Starts disabled, like the buttons around it: a save
-                     state is a picture of a machine *around* a cartridge and
-                     does not carry one, so there is nothing to restore into
-                     until a ROM is in. A label cannot be `:disabled`, so the
-                     input inside it is what stops the click and the attribute
-                     is what makes it look stopped. -->
-                <label
-                  class="key key--file"
-                  id="load-state"
-                  data-disabled="true"
-                  title="Load a game first — a save state does not carry one"
-                >
-                  Load from file
-                  <input type="file" id="file-state" accept=".state,.bin" hidden disabled />
-                </label>
-                <button
-                  class="key"
-                  id="btn-cloud"
-                  type="button"
-                  disabled
-                  title="Keep a save state in your account, reachable from any browser"
-                >
-                  Save to vault
-                </button>
-                <button
-                  class="key"
-                  id="btn-store"
-                  type="button"
-                  disabled
-                  title="Keep a picture of the screen in your account"
-                >
-                  Screenshot
-                </button>
-              </div>
-            </section>
-            </div>
-            <div class="tool-body" id="tool-settings" hidden>
-              <section class="rack">
-              <p class="rack__label">Sound and picture</p>
-              <div class="rack__keys rack__keys--dials">
-                <label class="dial">
-                  <span class="dial__label">Fast forward speed</span>
-                  <select id="opt-speed">
-                    <option value="2">2&times;</option>
-                    <option value="4" selected>4&times;</option>
-                    <option value="8">8&times;</option>
-                    <option value="0">Unlimited</option>
-                  </select>
-                </label>
-                <label class="dial">
-                  <span class="dial__label">Fast forward priority</span>
-                  <select id="opt-frame-mode" title="Smooth gives controls and display more time; Faster batches intermediate frames for more speed.">
-                    <option value="smooth">Smooth display</option>
-                    <option value="fast" selected>Faster (frame batching)</option>
-                  </select>
-                </label>
-                <label class="dial">
-                  <span class="dial__label">Volume</span>
-                  <input type="range" id="opt-volume" min="0" max="100" value="70" />
-                </label>
-              </div>
-              <div class="rack__toggles">
-                <label class="toggle" title="Play accelerated game audio during fast forward">
-                  <input type="checkbox" id="opt-fast-audio" checked />
-                  <span>Sound during fast forward</span>
-                </label>
-                <label class="toggle" title="Turn game audio on">
-                  <input type="checkbox" id="opt-audio" />
-                  <span>Sound</span>
-                </label>
-                <label class="toggle" title="Warm the palette the way a real GBA screen did">
-                  <input type="checkbox" id="opt-lcd" />
-                  <span>LCD colour</span>
-                </label>
-                <label class="toggle" title="Draw the gaps between rows of pixels">
-                  <input type="checkbox" id="opt-scan" />
-                  <span>Scanlines</span>
-                </label>
-              </div>
-            </section>
-            </div>
-            <div class="tool-body" id="tool-cartridge" hidden>
-              <section class="rack">
-              <p class="rack__label">Cartridge</p>
-              <p class="tool-description">Restart this game or remove the cartridge to choose another one.</p><div class="rack__keys">
-
-                <button
-                  class="key"
-                  id="btn-reset"
-                  type="button"
-                  disabled
-                  title="Restart the cartridge from its boot screen"
-                >
-                  Reset
-                </button>
-                <button
-                  class="key"
-                  id="btn-eject"
-                  type="button"
-                  disabled
-                  title="Take the cartridge out and clear the machine"
-                >
-                  Eject
-                </button>
-
-
-              </div>
-            </section>
-            </div>
-            <div hidden><input type="checkbox" id="opt-overlay" /></div>
-          </div>
+          <div hidden><input type="checkbox" id="opt-overlay" /></div>
 
           <!-- Filled in from the live bindings, so it cannot contradict them. -->
           <p class="hint" id="deck-hint"></p>
@@ -367,64 +269,114 @@
             <span class="cartstrip__addon" id="cart-addon">—</span>
           </div>
 
-          <!-- The right rail is the same thing as the left one, plus saves.
-
-               Saves is placeable like any addon section: it is a tab here by
-               default because that is where it is useful, but "move" sends it
-               across like everything else. The lobby left this column entirely
-               — it is a thing you set up once and then forget, which is what a
-               dialog is for, not a permanent third of a rail. -->
+          <!-- Bodies for the two built-in panes, Saves and Screenshots.
+               They start here and are moved into a rail slot, or lent to the
+               Vault modal, as needed — this holder is only ever where they
+               begin, never anything the player sees. Keeping one copy of each
+               is what lets the same list appear in the sidebar and the modal
+               without a second set of ids or a second render path. -->
+          <div id="rail-parts" hidden>
+            <div id="pane-saves">
+              <div id="saves-panel" hidden><ul class="saves__list" id="saves-list"></ul></div>
+              <p class="rail-note" id="saves-off">Load a cartridge to see its vault saves.</p>
+            </div>
+            <div id="pane-shots">
+              <ul class="shots gallery-thumbnails" id="shots-list" aria-label="Screenshot thumbnails" hidden></ul>
+              <p class="rail-note" id="shots-off">Take a screenshot using the camera on the game screen.</p>
+            </div>
+          </div>
           <section class="panel deckpanel" id="info-panel">
             <div class="tabs__pane" id="right-pane"></div>
-
-            <!-- Screenshots. A pane like saves, so it can be moved to the
-                 other column or shown under something else. -->
-            <div class="tabs__pane" id="pane-shots" hidden>
-              <ul class="shots" id="shots-list"></ul>
-              <p class="rail-note" id="shots-off">
-                Press <b>Screenshot</b> under the game and the pictures appear
-                here.
-              </p>
-            </div>
-
-            <div class="tabs__pane" id="pane-saves" hidden>
-              <div id="saves-panel" hidden>
-                <ul class="saves__list" id="saves-list"></ul>
-              </div>
-              <p class="rail-note" id="saves-off">
-                Load a cartridge and the save states kept for it appear here.
-              </p>
-            </div>
           </section>
-
-          <!-- Where the saves pane waits while a rail is showing something
-               else. It is one node moved between the two columns rather than
-               two copies kept in step, so it needs somewhere to be that is
-               still in the document: a detached node is invisible to anything
-               that looks the page up by id, including us. -->
-          <div id="pane-park" hidden></div>
         </aside>
         </div>
       </main>
 
-      <!-- Lobby.
+      <!-- Command popups stay anchored to the control bar without a backdrop. -->
+      <div class="game-menu game-menu--actions" id="sheet-saves" popover="auto" aria-label="Save &amp; load">
+<div class="popup-heading"><strong>Save &amp; load</strong><button type="button" class="popup-close" data-close-popup aria-label="Close">&#215;</button></div>
+        <p class="popup-note">Resume from this exact moment.</p>
+        <div class="popup-actions">
+                <button
+                  class="key"
+                  id="btn-save"
+                  type="button"
+                  disabled
+                  title="Download a save state to this computer"
+                >
+                  Save to file
+                </button>
+                <!-- Starts disabled, like the buttons around it: a save
+                     state is a picture of a machine *around* a cartridge and
+                     does not carry one, so there is nothing to restore into
+                     until a ROM is in. A label cannot be `:disabled`, so the
+                     input inside it is what stops the click and the attribute
+                     is what makes it look stopped. -->
+                <label
+                  class="key key--file"
+                  id="load-state"
+                  data-disabled="true"
+                  title="Load a game first — a save state does not carry one"
+                >
+                  Load from file
+                  <input type="file" id="file-state" accept=".state,.bin" hidden disabled />
+                </label>
+                <button
+                  class="key"
+                  id="btn-cloud"
+                  type="button"
+                  disabled
+                  title="Keep a save state in your account, reachable from any browser"
+                >
+                  Save to vault
+                </button>
+                <button class="key" id="btn-vault-saves" type="button">Browse vault saves</button>
+                <button
+                  class="key"
+                  id="btn-store"
+                  type="button"
+                  disabled
+                  title="Keep a picture of the screen in your account"
+                >
+                  Screenshot
+                </button>
+              </div>
+      </div>
 
-           Out of the rail and into a dialog. Hosting or joining is a thing you
-           do once at the start of a session; watching someone else's screen is
-           the part that stays, and it does not need the room code, the join
-           field and the member list sitting under it for the rest of the
-           evening. -->
-      <dialog class="sheet" id="lobby-sheet" aria-label="Lobby and link cable">
-        <form method="dialog" class="sheet__head">
-          <p class="panel__eyebrow">
-            Lobby &amp; link cable<span class="panel__note" id="lobby-note"></span>
-          </p>
-          <button class="key key--slim" type="submit">Close</button>
-        </form>
+      <div class="game-menu game-menu--actions" id="sheet-cartridge" popover="auto" aria-label="Cartridge">
+<div class="popup-heading"><strong>Cartridge</strong><button type="button" class="popup-close" data-close-popup aria-label="Close">&#215;</button></div>
+        <p class="popup-note">Restart or change the current game.</p>
+        <div class="popup-actions">
+
+                <button
+                  class="key"
+                  id="btn-reset"
+                  type="button"
+                  disabled
+                  title="Restart the cartridge from its boot screen"
+                >
+                  Reset
+                </button>
+                <button
+                  class="key"
+                  id="btn-eject"
+                  type="button"
+                  disabled
+                  title="Take the cartridge out and clear the machine"
+                >
+                  Eject
+                </button>
+
+
+              </div>
+      </div>
+
+      <div class="game-menu game-menu--lobby" popover="auto" id="lobby-sheet" aria-label="Lobby and link cable">
+        <div class="popup-heading"><strong>Multiplayer <span id="lobby-note"></span></strong><button type="button" class="popup-close" data-close-popup aria-label="Close multiplayer">&#215;</button></div>
 
         <div class="sheet__body">
           <div id="lobby-out">
-            <div class="lobby-intro"><span class="section-kicker">TWO PLAYERS. ONE CONNECTION.</span><h2>Better with a friend.</h2><p>Start a room and share the code, or join a friend who is already playing.</p></div>
+            <p class="popup-note">Start a room or join a friend.</p>
             <p class="lobby-step">Join with a room code</p>
             <div class="lobby__row">
               <input
@@ -478,27 +430,138 @@
             <ul class="lobby__list" id="lobby-members"></ul>
           </div>
         </div>
-      </dialog>
+      </div>
 
-      <!-- A screenshot, full size.
+      <!-- Appearance. The theme and the background are stored on the device
+           and applied by theme.js on every page, so this one panel dresses the
+           whole site, not just the playroom. -->
+      <div class="game-menu game-menu--settings" id="tool-appearance" popover="auto" aria-label="Appearance">
+        <div class="popup-heading"><strong>Appearance</strong><button type="button" class="popup-close" data-close-popup aria-label="Close appearance">&#215;</button></div>
+        <section class="game-menu__group settings-group">
+          <h3 class="game-menu__label">Theme</h3>
+          <label class="dial">
+            <span class="dial__label">Palette</span>
+            <select id="opt-theme"></select>
+          </label>
+          <!-- Drawn from the theme being previewed, so the names are never the
+               only thing telling you what you are about to pick. -->
+          <div class="swatches" id="theme-swatches" aria-hidden="true"></div>
+        </section>
+        <section class="game-menu__group settings-group">
+          <h3 class="game-menu__label">Background</h3>
+          <div class="bg-actions">
+            <button type="button" class="key" id="bg-choose">Choose image&hellip;</button>
+            <button type="button" class="key" id="bg-clear" disabled>Remove</button>
+          </div>
+          <input type="file" id="bg-file" accept="image/png,image/jpeg,image/webp,image/gif,image/avif" hidden />
+          <p class="bg-note" id="bg-note">No background set.</p>
+          <label class="dial">
+            <span class="dial__label">Dim</span>
+            <input type="range" id="opt-bg-dim" min="0" max="90" value="45" />
+          </label>
+          <label class="dial">
+            <span class="dial__label">Blur</span>
+            <input type="range" id="opt-bg-blur" min="0" max="24" value="0" />
+          </label>
+        </section>
+        <!-- Two dials rather than one: panels hold text and stop being
+             readable long before the picture stops being watchable. -->
+        <section class="game-menu__group settings-group">
+          <h3 class="game-menu__label">Opacity</h3>
+          <label class="dial" title="The side rails, the tool drawer and the bar under the game">
+            <span class="dial__label">Panels</span>
+            <input type="range" id="opt-panel-alpha" min="20" max="100" step="5" value="100" />
+          </label>
+          <label class="dial" title="The game picture itself. Left alone unless you move it">
+            <span class="dial__label">Game screen</span>
+            <input type="range" id="opt-screen-alpha" min="20" max="100" step="5" value="100" />
+          </label>
+        </section>
+        <section class="game-menu__group settings-group">
+          <h3 class="game-menu__label">Read-outs</h3>
+          <label class="toggle" title="The frame rate and sign-in line above the game, and the key hints below it">
+            <input type="checkbox" id="opt-hide-readouts" />
+            <span>Hide fps and hints</span>
+          </label>
+        </section>
+      </div>
 
-           The rail can only ever show a thumbnail, and a 240x160 picture shown
-           at 60px is a reminder that a screenshot exists rather than a way to
-           look at one. -->
-      <dialog class="sheet sheet--shot" id="shot-viewer" aria-label="Screenshot">
+      <div class="game-menu game-menu--settings" id="tool-settings" popover="auto" aria-label="Audio and video">
+        <div class="popup-heading"><strong>Audio &amp; video</strong><button type="button" class="popup-close" data-close-popup aria-label="Close audio and video">&#215;</button></div>
+        <section class="game-menu__group settings-group">
+          <h3 class="game-menu__label">Sound</h3>
+          <label class="toggle" title="Turn game audio on">
+                  <input type="checkbox" id="opt-audio" />
+                  <span>Sound</span>
+                </label>
+          <label class="dial">
+                  <span class="dial__label">Volume</span>
+                  <input type="range" id="opt-volume" min="0" max="100" value="70" />
+                </label>
+        </section>
+        <section class="game-menu__group settings-group">
+          <h3 class="game-menu__label">Picture</h3>
+          <label class="toggle" title="Warm the palette the way a real GBA screen did">
+                  <input type="checkbox" id="opt-lcd" />
+                  <span>LCD colour</span>
+                </label>
+          <label class="toggle" title="Draw the gaps between rows of pixels">
+                  <input type="checkbox" id="opt-scan" />
+                  <span>Scanlines</span>
+                </label>
+        </section>
+        <section class="game-menu__group settings-group">
+          <h3 class="game-menu__label">Fast forward</h3>
+          <label class="dial">
+                  <span class="dial__label">Speed</span>
+                  <select id="opt-speed">
+                    <option value="2">2&times;</option>
+                    <option value="4" selected>4&times;</option>
+                    <option value="8">8&times;</option>
+                    <option value="0">Unlimited</option>
+                  </select>
+                </label>
+          <label class="dial">
+                  <span class="dial__label">Priority</span>
+                  <select id="opt-frame-mode" title="Smooth gives controls and display more time; Faster batches intermediate frames for more speed.">
+                    <option value="smooth">Smooth display</option>
+                    <option value="fast" selected>Faster</option>
+                  </select>
+                </label>
+          <label class="toggle" title="Play accelerated game audio during fast forward">
+                  <input type="checkbox" id="opt-fast-audio" checked />
+                  <span>Play sound</span>
+                </label>
+        </section>
+      </div>
+      <div class="game-menu game-menu--addons" id="addon-menu" popover="auto" aria-label="Manage add-ons">
+        <div class="popup-heading"><strong>Manage add-ons</strong><button type="button" class="popup-close" data-close-popup aria-label="Close add-ons">&#215;</button></div>
+        <p class="popup-note">Changes apply to this game immediately.</p>
+        <div id="play-addon-list"></div>
+        <p class="popup-note" id="play-addon-message" role="status"></p>
+      </div>
+
+      <div class="game-menu" id="pane-layout-menu" popover="auto" aria-label="Arrange add-on pane">
+        <div class="popup-heading"><strong id="pane-layout-title">Arrange pane</strong><button type="button" class="popup-close" data-close-popup aria-label="Close">&#215;</button></div>
+        <div class="popup-actions" id="pane-layout-actions"></div>
+      </div>
+      <dialog class="sheet screenshot-gallery" id="vault-modal" aria-label="Vault">
         <form method="dialog" class="sheet__head">
-          <p class="panel__eyebrow">
-            Screenshot<span class="panel__note" id="shot-when"></span>
-          </p>
+          <div><h2>Vault</h2><p id="shot-when"></p></div>
           <button class="key key--slim" type="submit">Close</button>
         </form>
-        <div class="sheet__body sheet__body--shot">
-          <img class="shot__full" id="shot-full" alt="" />
+        <div class="vault-tabs" role="tablist" aria-label="Vault sections">
+          <button type="button" class="vault-tab" role="tab" id="vault-tab-saves" aria-controls="vault-panel-saves" aria-selected="true" data-vault-tab="saves">Saves</button>
+          <button type="button" class="vault-tab" role="tab" id="vault-tab-shots" aria-controls="vault-panel-shots" aria-selected="false" data-vault-tab="shots">Screenshots</button>
         </div>
-        <div class="sheet__foot">
-          <a class="key key--slim" id="shot-open" href="#" target="_blank" rel="noreferrer">
-            Open original
-          </a>
+        <div class="vault-panel" id="vault-panel-saves" role="tabpanel" aria-labelledby="vault-tab-saves"></div>
+        <div class="vault-panel" id="vault-panel-shots" role="tabpanel" aria-labelledby="vault-tab-shots" hidden>
+        <div class="gallery-stage" id="gallery-stage" hidden>
+          <button type="button" class="gallery-arrow" id="shot-prev" aria-label="Previous screenshot" title="Previous screenshot (Left arrow)">&#10094;</button>
+          <img class="shot__full" id="shot-full" alt="" />
+          <button type="button" class="gallery-arrow" id="shot-next" aria-label="Next screenshot" title="Next screenshot (Right arrow)">&#10095;</button>
+        </div>
+        <div class="gallery-footer"><span id="shot-position" role="status"></span><a id="shot-open" href="#" target="_blank" rel="noreferrer" hidden>Open original &#8599;</a></div>
         </div>
       </dialog>
 

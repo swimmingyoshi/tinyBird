@@ -10,6 +10,7 @@ const READ_NAMES = {
   // one: the alphabet is the game's own, and species is encrypted in place.
   gen3_text: value => `Pokémon-alphabet text (${value.len} bytes)`,
   gen3_species: () => 'Pokémon species, decrypted from the record',
+  gen3: value => `${String(value?.field ?? '?').replace(/_/g, ' ')}, decrypted from the record`,
 };
 
 export function describeRead(read) {
@@ -19,7 +20,8 @@ export function describeRead(read) {
   const [type, value] = Object.entries(spec)[0] ?? [];
   if (type === 'literal') return `Fixed text: ${value}`;
   if (type === 'index') return 'Repeated row number';
-  const address = type === 'text' || type === 'gen3_text' ? value?.at : value;
+  if (type === 'const') return `Fixed number: ${value}`;
+  const address = ['text', 'gen3_text', 'gen3'].includes(type) ? value?.at : value;
   const path = typeof address === 'string' ? address : `${address?.at} → ${(address?.deref ?? []).map(n => `read pointer, ${n < 0 ? '-' : '+'}0x${Math.abs(n).toString(16)}`).join(' → ')}`;
   return `${READ_NAMES[type] ? READ_NAMES[type](value) : type} at ${path}`;
 }

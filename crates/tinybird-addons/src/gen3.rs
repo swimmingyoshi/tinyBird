@@ -104,40 +104,179 @@ pub fn decode_text(bytes: &[u8]) -> String {
 /// match the decrypted block. Returning a wrong species would be worse than
 /// returning nothing, because a wrong one still looks like an answer.
 pub fn party_species(memory: &dyn MemoryView, at: u32) -> Option<u16> {
-    let personality = memory.read_u32(at);
-    let ot_id = memory.read_u32(at.checked_add(4)?);
-    // A slot that has never held anything reads as zeroes, and zero is a
-    // plausible key — so the pair, not either one, is what says "empty".
-    if personality == 0 && ot_id == 0 {
-        return None;
-    }
-
-    let key = personality ^ ot_id;
-    let mut decrypted = [0u8; 48];
-    for block in 0..12u32 {
-        let word = memory.read_u32(at.checked_add(32 + block * 4)?) ^ key;
-        let start = block as usize * 4;
-        decrypted[start..start + 4].copy_from_slice(&word.to_le_bytes());
-    }
-
-    // The checksum is over the decrypted block, so it doubles as proof that
-    // the key was right — which is what stops a misaimed address reporting a
-    // confident species from whatever bytes happened to be there.
-    let stored = memory.read_u16(at.checked_add(28)?);
-    let computed = decrypted
-        .chunks_exact(2)
-        .map(|pair| u32::from(u16::from_le_bytes([pair[0], pair[1]])))
-        .sum::<u32>() as u16;
-    if stored != computed {
-        return None;
-    }
-
-    let growth = growth_offset(personality);
-    let species = u16::from_le_bytes([decrypted[growth], decrypted[growth + 1]]);
-    // 412 is one past the last index Generation 3 uses; beyond it the record
-    // is not a Pokémon however well its checksum came out.
-    (species != 0 && species <= 412).then_some(species)
+    Boxed::read(memory, at).map(|boxed| boxed.species())
 }
+
+/// A decrypted record: the plain header, plus the four substructures put back
+/// into a fixed order regardless of what the permutation did to them.
+///
+/// Decrypting is the expensive part — twelve word reads and a checksum — and a
+/// card showing four moves, six EVs and six IVs would otherwise pay for it
+/// sixteen times over. So a caller decrypts once and then asks for fields.
+pub struct Boxed {
+    pub personality: u32,
+    pub ot_id: u32,
+    /// Growth, Attacks, EVs, Misc — always in that order here.
+    blocks: [[u8; 12]; 4],
+}
+
+impl Boxed {
+    /// Read and decrypt the record at `at`, or `None` if it does not hold one.
+    ///
+    /// The checksum is computed over the decrypted block, so it doubles as
+    /// proof that the key was right. That is what makes this safe to point
+    /// anywhere: a wrong address gives a wrong key, the checksum fails, and the
+    /// answer is "nothing here" rather than plausible-looking nonsense.
+    pub fn read(memory: &dyn MemoryView, at: u32) -> Option<Self> {
+        let personality = memory.read_u32(at);
+        let ot_id = memory.read_u32(at.checked_add(4)?);
+        // A slot that never held anything reads as zeroes, and zero is a
+        // plausible key — so the pair, not either one, is what says "empty".
+        if personality == 0 && ot_id == 0 {
+            return None;
+        }
+
+        let key = personality ^ ot_id;
+        let mut decrypted = [0u8; 48];
+        for block in 0..12u32 {
+            let word = memory.read_u32(at.checked_add(32 + block * 4)?) ^ key;
+            let start = block as usize * 4;
+            decrypted[start..start + 4].copy_from_slice(&word.to_le_bytes());
+        }
+
+        let stored = memory.read_u16(at.checked_add(28)?);
+        let computed = decrypted
+            .chunks_exact(2)
+            .map(|pair| u32::from(u16::from_le_bytes([pair[0], pair[1]])))
+            .sum::<u32>() as u16;
+        if stored != computed {
+            return None;
+        }
+
+        let order = SUBSTRUCT_ORDERS[(personality % 24) as usize];
+        let mut blocks = [[0u8; 12]; 4];
+        for (section, &block) in order.iter().enumerate() {
+            blocks[section].copy_from_slice(&decrypted[block * 12..block * 12 + 12]);
+        }
+
+        let boxed = Self {
+            personality,
+            ot_id,
+            blocks,
+        };
+        // Past the last index Generation 3 uses this is not a Pokémon, however
+        // well its checksum came out.
+        (boxed.species() != 0 && boxed.species() <= 412).then_some(boxed)
+    }
+
+    fn byte(&self, section: usize, offset: usize) -> u32 {
+        u32::from(self.blocks[section][offset])
+    }
+    fn half(&self, section: usize, offset: usize) -> u32 {
+        u32::from(u16::from_le_bytes([
+            self.blocks[section][offset],
+            self.blocks[section][offset + 1],
+        ]))
+    }
+    fn word(&self, section: usize, offset: usize) -> u32 {
+        u32::from_le_bytes([
+            self.blocks[section][offset],
+            self.blocks[section][offset + 1],
+            self.blocks[section][offset + 2],
+            self.blocks[section][offset + 3],
+        ])
+    }
+
+    pub fn species(&self) -> u16 {
+        self.half(0, 0) as u16
+    }
+    pub fn held_item(&self) -> u16 {
+        self.half(0, 2) as u16
+    }
+    pub fn experience(&self) -> u32 {
+        self.word(0, 4)
+    }
+    pub fn friendship(&self) -> u32 {
+        self.byte(0, 9)
+    }
+    /// The move in slot 0-3, as a move index.
+    pub fn move_id(&self, slot: usize) -> u16 {
+        self.half(1, slot * 2) as u16
+    }
+    /// Remaining PP for slot 0-3. The maximum is a property of the move, which
+    /// lives in a ROM table this does not read.
+    pub fn pp(&self, slot: usize) -> u32 {
+        self.byte(1, 8 + slot)
+    }
+    pub fn ev(&self, stat: Stat) -> u32 {
+        self.byte(2, stat as usize)
+    }
+    pub fn ev_total(&self) -> u32 {
+        (0..6).map(|offset| self.byte(2, offset)).sum()
+    }
+    /// Six five-bit values and two flags, packed into one word.
+    fn iv_word(&self) -> u32 {
+        self.word(3, 4)
+    }
+    pub fn iv(&self, stat: Stat) -> u32 {
+        (self.iv_word() >> (stat as u32 * 5)) & 0x1F
+    }
+    pub fn iv_total(&self) -> u32 {
+        Stat::ALL.iter().map(|&stat| self.iv(stat)).sum()
+    }
+    pub fn is_egg(&self) -> bool {
+        (self.iv_word() >> 30) & 1 == 1
+    }
+    /// 0 or 1: which of the species' two abilities this one has. Turning that
+    /// into a name needs a species table this crate does not carry.
+    pub fn ability_slot(&self) -> u32 {
+        (self.iv_word() >> 31) & 1
+    }
+    pub fn pokerus(&self) -> u32 {
+        self.byte(3, 0)
+    }
+    pub fn met_location(&self) -> u32 {
+        self.byte(3, 1)
+    }
+    /// Nature is not stored anywhere. It *is* the personality, mod 25.
+    pub fn nature(&self) -> u32 {
+        self.personality % 25
+    }
+    /// Shiny is the trainer and the Pokémon agreeing by chance.
+    pub fn is_shiny(&self) -> bool {
+        let fold = |value: u32| (value >> 16) ^ (value & 0xFFFF);
+        fold(self.ot_id) ^ fold(self.personality) < 8
+    }
+}
+
+/// The order Generation 3 stores stats in, which is not the order it shows them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stat {
+    Hp = 0,
+    Attack = 1,
+    Defense = 2,
+    Speed = 3,
+    SpAttack = 4,
+    SpDefense = 5,
+}
+
+impl Stat {
+    pub const ALL: [Stat; 6] = [
+        Stat::Hp,
+        Stat::Attack,
+        Stat::Defense,
+        Stat::Speed,
+        Stat::SpAttack,
+        Stat::SpDefense,
+    ];
+}
+
+/// The twenty-five natures, in personality order.
+pub const NATURES: [&str; 25] = [
+    "Hardy", "Lonely", "Brave", "Adamant", "Naughty", "Bold", "Docile", "Relaxed", "Impish", "Lax",
+    "Timid", "Hasty", "Serious", "Jolly", "Naive", "Modest", "Mild", "Quiet", "Bashful", "Rash",
+    "Calm", "Gentle", "Sassy", "Careful", "Quirky",
+];
 
 /// How far the Hoenn species sit past the National Dex numbering.
 ///

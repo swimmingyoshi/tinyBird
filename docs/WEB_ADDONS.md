@@ -15,6 +15,13 @@ the first response is used; keep the intended game open for an unambiguous test.
 
 ## Runtime
 
+For exporting discovered numeric addresses to Python, the Workshop's
+**Automation observations** panel uses a separate versioned configuration.
+It includes exact game-code/revision matching and can be loaded by
+`tinybird-headless --observations` or `TinyBird(..., observations=...)`.
+See [Workshop to Python](automation.md#workshop-to-python) for the complete flow.
+Reader manifests remain the format for browser add-on rendering.
+
 Browser manifests are owned by the emulator instance. `tb_install_manifests`
 replaces the complete set atomically; `[]` removes it. Failed validation leaves
 the previous set intact and exposes an error string. Built-in Rust readers
@@ -187,6 +194,21 @@ is not a separate feature but a field with a `max`. `gen3_text` and
 `gen3_species` decode the two things a plain read cannot: the games' own
 alphabet, and the encrypted, personality-permuted species field. The full list
 is in ADDONS.md under *What a field can read*.
+
+**Pokémon detail — moves, EVs, IVs, nature** is the type that reaches the rest
+of the encrypted block. Point it at the start of a 100-byte record and pick the
+part by name from a list of thirty-two, because the block is shuffled
+differently for every Pokémon and there is no offset worth asking anyone to
+type. Moves and held items come back named from the cartridge; choosing an
+effort or individual value fills in its usual ceiling (252, 510, 31, 186) in
+**Bar out of**, so those draw a coloured bar without anyone looking the number
+up. Clearing that box opts out of the bar.
+
+With it, a JSON reader matches the compiled FireRed party panel field for field
+— species, nickname, sprite, HP bar, level, the six battle stats, all four
+moves with their PP, IV and EV totals and per-stat breakdowns, nature, held
+item, friendship and shininess — except the ability name, which needs a table
+the manifest evaluator does not carry.
 
 Rows carry a grip and are dragged to reorder, including into another category;
 a category is dragged by its header strip. A drop that lands somewhere

@@ -8,6 +8,17 @@ export function disabledBuiltins(user) {
   try { const ids = JSON.parse(localStorage.getItem(`${localKey(user)}:builtins`) ?? '[]'); return Array.isArray(ids) ? ids.filter(id => typeof id === 'string') : []; } catch { return []; }
 }
 export function saveDisabledBuiltins(user, ids) { localStorage.setItem(`${localKey(user)}:builtins`, JSON.stringify(ids)); }
+// The two rail cards Play can put away — vault saves and screenshots. They are
+// not add-ons in the manifest sense and run no code of their own, but they are
+// the same kind of choice, so they are kept with the same account-scoped key
+// and offered in the same list.
+export function hiddenPanels(user) {
+  // Screenshots default to the Vault gallery; explicit sidebar choices persist.
+  try { const ids = JSON.parse(localStorage.getItem(`${localKey(user)}:panels`) ?? '["shots"]'); return Array.isArray(ids) ? ids.filter(id => typeof id === 'string') : ['shots']; } catch { return ['shots']; }
+}
+export function saveHiddenPanels(user, ids) {
+  try { localStorage.setItem(`${localKey(user)}:panels`, JSON.stringify(ids)); } catch { /* nothing to persist to */ }
+}
 export function localAddons(user) {
   try {
     const items = JSON.parse(localStorage.getItem(localKey(user)) ?? '[]');

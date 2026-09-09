@@ -1,7 +1,7 @@
 //! Local JSON-lines transport: one isolated runtime per child process.
 use std::io::{self, BufRead, Write};
 use tinybird_core::Gba;
-use tinybird_runtime::{Command, Runtime};
+use tinybird_runtime::{Command, ObservationConfig, Runtime};
 
 fn main() {
     if let Err(error) = run() {
@@ -14,18 +14,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let rom = args
         .next()
-        .ok_or("usage: tinybird-headless ROM [--bios PATH] [--state PATH]")?;
+        .ok_or("usage: tinybird-headless ROM [--bios PATH] [--state PATH] [--observations PATH]")?;
     if rom == "--help" {
-        println!("tinybird-headless ROM [--bios PATH] [--state PATH]\nReads JSON commands from stdin; writes JSON replies to stdout.");
+        println!("tinybird-headless ROM [--bios PATH] [--state PATH] [--observations PATH]\nReads JSON commands from stdin; writes JSON replies to stdout.");
         return Ok(());
     }
     let mut gba = Gba::with_rom(std::fs::read(rom)?);
     let mut state = None;
+    let mut observations = None;
     while let Some(flag) = args.next() {
         let path = args.next().ok_or("option requires a path")?;
         match flag.as_str() {
             "--bios" => gba.load_bios(std::fs::read(path)?),
             "--state" => state = Some(std::fs::read(path)?),
+            "--observations" => {
+                let bytes = std::fs::read(path)?;
+                if bytes.len() > 1_048_576 {
+                    return Err("observation config exceeds 1 MiB".into());
+                }
+                observations = Some(serde_json::from_slice::<ObservationConfig>(&bytes)?);
+            }
             _ => return Err(format!("unknown option: {flag}").into()),
         }
     }
@@ -36,6 +44,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         gba.load_state_bytes(&state)?;
     }
     let mut runtime = Runtime::new(gba)?;
+    if let Some(config) = observations {
+        runtime.execute(Command::ConfigureObservations { config })?;
+    }
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
     loop {

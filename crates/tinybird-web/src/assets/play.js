@@ -2,11 +2,13 @@
 // vault. Everything that touches WebAssembly memory lives in tinybird.js.
 
 import { AudioSink, EmulatorError, TinyBird } from "/tinybird.js";
+import { RECOVERY_INTERVAL, recoveryOwner, observationKey, fingerprint, readRecovery, writeRecovery, validateRecovery } from '/recovery.js';
+import { validateObservationConfig, matchObservationGame } from '/workshop-observations.js';
 if (window.parent !== window && new URLSearchParams(location.search).get('embed') === 'workshop') {
   document.body.dataset.workshopPlayer = 'true';
   const style = document.createElement('link'); style.rel = 'stylesheet'; style.href = '/workshop-player.css'; document.head.append(style);
 }
-import { api as addonApi, localAddons, enabledManifests, setAddonAccount, disabledBuiltins } from "/addon-client.js";
+import { api as addonApi, localAddons, enabledManifests, setAddonAccount, disabledBuiltins, saveDisabledBuiltins, saveLocalAddons, hiddenPanels, saveHiddenPanels } from "/addon-client.js";
 import { mountAccount } from "/account.js";
 import { ACTIONS, Controls, keyLabel, padLabel } from "/controls.js";
 import {
@@ -18,6 +20,22 @@ import {
   unpackSave,
 } from "/saveformat.js";
 import { GBA_FRAME_HZ, MAX_CATCHUP_FRAMES, schedule } from "/pacing.js";
+import {
+  BACKGROUND_LIMIT,
+  THEMES,
+  backgroundSettings,
+  clearBackground,
+  currentTheme,
+  mountTheme,
+  paintBackground,
+  readoutsHidden,
+  saveBackground,
+  setBackgroundSettings,
+  setReadoutsHidden,
+  setSurfaceSettings,
+  setTheme,
+  surfaceSettings,
+} from "/theme.js";
 import {
   HASH_INTERVAL,
   delayForRoundTrip,
@@ -37,6 +55,11 @@ import {
 } from "/lobby.js";
 
 const $ = (id) => document.getElementById(id);
+// The initial vault refresh starts before the gallery handlers are registered.
+let galleryShots = [];
+let galleryIndex = 0;
+let shotsGeneration = 0;
+let savesGeneration = 0;
 
 const el = {
   screen: $("screen"),
@@ -115,14 +138,12 @@ const el = {
   deckHint: $("deck-hint"),
   savesOff: $("saves-off"),
   savesPane: $("pane-saves"),
-  shotsPane: $("pane-shots"),
   shotsList: $("shots-list"),
   shotsOff: $("shots-off"),
-  shotViewer: $("shot-viewer"),
+  vaultModal: $("vault-modal"),
   shotFull: $("shot-full"),
   shotWhen: $("shot-when"),
   shotOpen: $("shot-open"),
-  panePark: $("pane-park"),
   leftPane: $("left-pane"),
   rightPane: $("right-pane"),
   lobbySheet: $("lobby-sheet"),
@@ -181,6 +202,9 @@ function say(message, tone = "") {
 function setLink(state, label) {
   el.linkState.dataset.state = state;
   el.linkLabel.textContent = label;
+  // Centring the bar caps how wide this can be, so a long ROM name ends in an
+  // ellipsis. Keep the whole of it a hover away.
+  el.linkState.title = label;
 }
 
 // --- input --------------------------------------------------------------
@@ -211,7 +235,7 @@ function onKey(event, down) {
   const interactive = event.target instanceof Element && event.target.closest(
     "button, input, select, textarea, a, label, summary, [role=button], [contenteditable=true]",
   );
-  const inDialog = document.querySelector("dialog[open]");
+  const inDialog = document.querySelector("dialog[open], .game-menu:popover-open");
   // Space and Enter activate the focused UI control, not the game. Always
   // release keys that began in the game even if focus moved before keyup.
   if (down && (interactive || inDialog)) return;
@@ -259,11 +283,6 @@ let ffLatched = false;
 // game themselves. Tabbing through the deck still works.
 
 const playViews = ["desk", "focus", "cinema"];
-const viewDescriptions = {
-  desk: "Your game, with everything you need close by",
-  focus: "Game and live details. Esc returns to Desk",
-  cinema: "Wide screen, essential controls. Esc returns to Desk",
-};
 
 function setPlayView(view, announce = true) {
   if (!playViews.includes(view)) view = "desk";
@@ -273,7 +292,6 @@ function setPlayView(view, announce = true) {
   document.querySelectorAll("[data-play-view-button]").forEach(button => {
     button.setAttribute("aria-pressed", String(button.dataset.playViewButton === view));
   });
-  document.querySelector("#view-description").textContent = viewDescriptions[view];
   fitScreen();
   if (announce) say(`${view[0].toUpperCase() + view.slice(1)} view. Tab switches views.`);
 }
@@ -282,23 +300,84 @@ for (const button of document.querySelectorAll("[data-play-view-button]")) {
   button.addEventListener("click", () => setPlayView(button.dataset.playViewButton));
 }
 
-// Keep secondary tools out of the play area until they are needed.
-for (const button of document.querySelectorAll("[data-tool]")) {
-  button.addEventListener("click", () => {
-    const opening = button.getAttribute("aria-expanded") !== "true";
-    for (const tab of document.querySelectorAll("[data-tool]")) {
-      const selected = tab === button && opening;
-      tab.setAttribute("aria-expanded", String(selected));
-      $(tab.getAttribute("aria-controls")).hidden = !selected;
-    }
-    if (opening) requestAnimationFrame(() => {
-      $(button.getAttribute("aria-controls")).scrollIntoView({
-        block: "nearest",
-        behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
-      });
-    });
-  });
+// All command panels use one anchored, non-modal popover at a time.
+const gameMenu = $("game-menu");
+const gameMenuButton = $("btn-game-menu");
+const popupAnchors = new Map([[gameMenu, gameMenuButton]]);
+const popupTriggers = [...document.querySelectorAll('[data-popup], [popovertarget="game-menu"]')];
+const popupControls = 'button:not(:disabled), a[href], input:not([hidden]):not(:disabled), select:not(:disabled), label[tabindex]:not([data-disabled="true"])';
+function positionGameMenu() {
+  for (const popup of document.querySelectorAll('.game-menu:popover-open')) {
+    const anchor = (popupAnchors.get(popup) ?? gameMenuButton).getBoundingClientRect();
+    const bounds = popup.getBoundingClientRect();
+    popup.style.left = `${Math.max(12, Math.min(anchor.right - bounds.width, innerWidth - bounds.width - 12))}px`;
+    const top = anchor.top >= bounds.height + 20 ? anchor.top - bounds.height - 8 : anchor.bottom + 8;
+    popup.style.top = `${Math.max(12, Math.min(top, innerHeight - bounds.height - 12))}px`;
+  }
 }
+function closeToolSheets() {
+  for (const popup of document.querySelectorAll('.game-menu:popover-open')) popup.hidePopover();
+}
+function openToolPopup(popup, trigger) {
+  const anchor = trigger.closest('.game-menu') ? gameMenuButton : trigger;
+  const wasOpen = popup.matches(':popover-open');
+  closeToolSheets();
+  if (wasOpen) return;
+  popupAnchors.set(popup, anchor);
+  popup.showPopover();
+  positionGameMenu();
+}
+for (const trigger of document.querySelectorAll('[data-popup]')) {
+  trigger.addEventListener('click', () => openToolPopup($(trigger.dataset.popup), trigger));
+}
+for (const popup of document.querySelectorAll('.game-menu')) {
+  popup.addEventListener('beforetoggle', event => {
+    for (const trigger of popupTriggers.filter(button => (button.dataset.popup ?? button.getAttribute('popovertarget')) === popup.id)) {
+      trigger.setAttribute('aria-expanded', String(event.newState === 'open'));
+    }
+    const anchor = popupAnchors.get(popup);
+    if (anchor?.getAttribute('aria-controls') === popup.id) anchor.setAttribute('aria-expanded', String(event.newState === 'open'));
+  });
+  popup.addEventListener('toggle', () => {
+    if (!popup.matches(':popover-open')) return;
+    positionGameMenu();
+    const controls = [...popup.querySelectorAll(popupControls)].filter(item => item.getClientRects().length);
+    (controls.find(item => !item.matches('[data-close-popup]')) ?? controls[0])?.focus({ preventScroll: true });
+    if (popup.id === 'addon-menu') renderPlayAddons();
+  });
+  popup.addEventListener('click', event => {
+    const close = event.target.closest('[data-close-popup]');
+    if (close) {
+      popup.hidePopover();
+      (popupAnchors.get(popup) ?? gameMenuButton).focus({ preventScroll: true });
+    }
+    const action = event.target.closest('.popup-actions button, .popup-actions label');
+    if (action && !action.disabled && action.dataset.disabled !== 'true') popup.hidePopover();
+  });
+  popup.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      event.preventDefault(); event.stopPropagation();
+      popup.hidePopover();
+      (popupAnchors.get(popup) ?? gameMenuButton).focus({ preventScroll: true });
+      return;
+    }
+    // Let native sliders, selects, and text fields keep their own arrow keys.
+    if (event.target.matches('input, select, textarea') || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const items = [...popup.querySelectorAll(popupControls)].filter(item => item.getClientRects().length);
+    const index = items.indexOf(document.activeElement);
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+      : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+    items[next]?.focus();
+  });
+  new ResizeObserver(positionGameMenu).observe(popup);
+}
+// Close the root menu before opening the retained Controls dialog/fullscreen.
+gameMenu.addEventListener('click', event => {
+  if (event.target.closest('button:not([data-popup]), a')) gameMenu.hidePopover();
+}, true);
+window.addEventListener('resize', positionGameMenu);
+document.addEventListener('scroll', positionGameMenu, true);
 
 // Native file inputs stay visually hidden; their labels expose keyboard access.
 for (const [label, input] of [[el.loadState, el.fileState], [$("vault-load"), el.fileRom]]) {
@@ -317,7 +396,7 @@ function focusModeWantsTab(event) {
   if (event.code !== "Tab" || event.altKey || event.ctrlKey || event.metaKey) return false;
   // Someone who bound Tab to the game meant it for the game.
   if (controls.actionForKey("Tab") !== null) return false;
-  if (document.querySelector("dialog[open]")) return false;
+  if (document.querySelector("dialog[open], .game-menu:popover-open")) return false;
 
   // Only when the key is not being used to move between controls: a focused
   // button, field or link is someone navigating, and Tab belongs to them.
@@ -340,7 +419,7 @@ window.addEventListener(
 // Escape leaves as well, because it is what everyone tries first.
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && el.rig.dataset.playView !== "desk"
-      && !document.querySelector("dialog[open]")) setPlayView("desk");
+      && !document.querySelector("dialog[open], .game-menu:popover-open")) setPlayView("desk");
 });
 
 setPlayView(recall("play-view") ?? (recall("focus") === "on" ? "focus" : "desk"), false);
@@ -611,6 +690,10 @@ function paintDeckHint() {
     if (key) parts.push([keyLabel(key), what]);
   }
 
+  // The page's own key rather than a binding, so it is named only when the
+  // page actually gets it — the same test the handler makes before taking it.
+  if (controls.actionForKey("Tab") === null) parts.push(["Tab", "switch view"]);
+
   el.deckHint.replaceChildren(
     ...parts.flatMap(([key, what], index) => {
       const strong = document.createElement("b");
@@ -638,7 +721,68 @@ function paintDeckHint() {
  * exact, and the one fractional step left is the browser's own, which it
  * resamples smoothly instead of dropping rows.
  */
+/**
+ * How tall the picture may be in Desk and Focus, measured rather than guessed.
+ *
+ * The cap was `100dvh - 400px`, and the 400 stood in for the bar, the status
+ * line, the transport and the hint. Being a constant it was right at one window
+ * height and wrong at every other: on a tall one it left a band of dead space
+ * under the hint, and a short one would have run the transport off the bottom.
+ * Every one of those pieces is on the page and can be asked its height, so add
+ * them up instead. Cinema does its own sum a few lines below.
+ */
+function fitDeckCap() {
+  const rig = document.querySelector('#rig');
+  if (rig.dataset.playView === 'cinema') return;
+  const column = el.screen.closest('.screen-col');
+  const screens = column?.querySelector('.screens');
+  if (!screens) return;
+
+  const gap = parseFloat(getComputedStyle(column).gap) || 0;
+  const bottom = parseFloat(getComputedStyle(rig).paddingBottom) || 0;
+
+  // Only what sits below the picture in its own column. Whatever is above it
+  // is already paid for by where the picture starts.
+  let below = 0;
+  let seen = false;
+  for (const child of column.children) {
+    if (child === screens) {
+      seen = true;
+      continue;
+    }
+    // offsetParent is null for the hidden helpers in here, which take no room.
+    if (!seen || child.offsetParent === null) continue;
+    below += child.getBoundingClientRect().height + gap;
+  }
+
+  // The last 2px are the bezel's own border, the same crumb cinema allows for.
+  const available = innerHeight - (screens.getBoundingClientRect().top + scrollY)
+    - below - bottom - 2;
+  const cap = `${Math.floor(Math.max(260, available))}px`;
+  // Only on a change: this runs from a ResizeObserver that the write itself
+  // would otherwise wake again.
+  if (rig.style.getPropertyValue('--deck-cap') !== cap) {
+    rig.style.setProperty('--deck-cap', cap);
+  }
+
+  // How far the side rails may reach: the top of the deck down to the underside
+  // of the button bar. Taken from the bar rather than from the column, because
+  // the column also holds the key hints, and a rail level with those is already
+  // past the bar. The rails cannot affect either measurement, so this settles
+  // rather than chasing itself.
+  const transport = column.querySelector('.transport');
+  if (transport) {
+    const reach = transport.getBoundingClientRect().bottom
+      - column.getBoundingClientRect().top;
+    const railCap = `${Math.floor(Math.max(160, reach))}px`;
+    if (rig.style.getPropertyValue('--rail-cap') !== railCap) {
+      rig.style.setProperty('--rail-cap', railCap);
+    }
+  }
+}
+
 function fitScreen() {
+  fitDeckCap();
   if (document.querySelector('#rig').dataset.playView === 'cinema' && el.screen.dataset.mode === 'running') {
     const column = el.screen.closest('.screen-col');
     const screens = column.querySelector('.screens');
@@ -698,7 +842,6 @@ function fitScreen() {
 const resizeObserver = new ResizeObserver(fitScreen);
 resizeObserver.observe(el.screen);
 resizeObserver.observe(document.querySelector('.transport'));
-resizeObserver.observe(document.querySelector('.play-toolbar'));
 window.addEventListener("resize", fitScreen);
 
 /**
@@ -720,11 +863,194 @@ async function toggleFullscreen() {
 }
 
 el.full.addEventListener("click", toggleFullscreen);
+const quickMute = $('quick-mute');
+const quickVolume = $('quick-volume');
+const quickFullscreen = $('quick-fullscreen');
+const quickScreenshot = $('quick-screenshot');
+function syncQuickAudio() {
+  quickMute.setAttribute('aria-pressed', String(!el.optAudio.checked));
+  quickMute.title = el.optAudio.checked ? 'Mute' : 'Unmute';
+  quickVolume.value = el.optVolume.value;
+  quickVolume.title = `Volume: ${el.optVolume.value}%`;
+}
+quickMute.addEventListener('click', () => {
+  el.optAudio.checked = !el.optAudio.checked;
+  el.optAudio.dispatchEvent(new Event('change', { bubbles: true }));
+});
+quickVolume.addEventListener('input', () => {
+  el.optVolume.value = quickVolume.value;
+  el.optVolume.dispatchEvent(new Event('input', { bubbles: true }));
+});
+quickScreenshot.addEventListener('click', () => el.store.click());
+quickFullscreen.addEventListener('click', toggleFullscreen);
+syncQuickAudio();
+
+// Hovering the picture is not the same as wanting the three widgets that sit
+// on top of it. The pointer usually comes to rest on the screen after the last
+// click and stays there, and hover alone leaves the buttons parked over the
+// game for as long as it does. So a pointer that has stopped moving counts as
+// gone and they fade out; any movement brings them straight back.
+const QUICK_IDLE_MS = 2000;
+let quickIdle = 0;
+
+function wakeQuickControls() {
+  clearTimeout(quickIdle);
+  delete el.screen.dataset.quick;
+  quickIdle = setTimeout(() => {
+    // A pointer resting on a control is aiming at it, not abandoning it.
+    // Keyboard focus is held by the stylesheet, which keeps a focused control
+    // lit whatever this says.
+    if (el.screen.querySelector('.screen-quick:hover')) {
+      wakeQuickControls();
+      return;
+    }
+    el.screen.dataset.quick = 'idle';
+  }, QUICK_IDLE_MS);
+}
+
+el.screen.addEventListener('pointermove', wakeQuickControls);
+// Off the picture the hover rule hides them anyway; drop the timer so coming
+// back does not land mid-countdown.
+el.screen.addEventListener('pointerleave', () => {
+  clearTimeout(quickIdle);
+  delete el.screen.dataset.quick;
+});
+
+// --- appearance ----------------------------------------------------------
+//
+// The theme and the background belong to the device, not the account, so this
+// panel only ever talks to localStorage and IndexedDB. Both are applied by
+// theme.js, which every other page calls too: changing the palette here
+// changes it on Home, Info and the rest as well.
+
+const themePick = $('opt-theme');
+const themeSwatches = $('theme-swatches');
+const bgPanel = $('tool-appearance');
+const bgFile = $('bg-file');
+const bgNote = $('bg-note');
+const bgDim = $('opt-bg-dim');
+const bgBlur = $('opt-bg-blur');
+const bgClear = $('bg-clear');
+
+/** Five colours off the theme, so the names are not the only thing to go on. */
+function paintSwatches(id) {
+  const theme = THEMES.find((entry) => entry.id === id) ?? THEMES[0];
+  themeSwatches.replaceChildren(
+    ...['--void', '--shell', '--amber', '--teal', '--play-accent'].map((token) => {
+      const chip = document.createElement('span');
+      chip.style.background = theme.tokens[token];
+      return chip;
+    }),
+  );
+}
+
+for (const theme of THEMES) {
+  const option = document.createElement('option');
+  option.value = theme.id;
+  option.textContent = theme.name;
+  themePick.append(option);
+}
+themePick.value = currentTheme();
+paintSwatches(themePick.value);
+themePick.addEventListener('change', () => paintSwatches(setTheme(themePick.value)));
+
+function showBackground(name) {
+  bgPanel.dataset.hasBg = name ? 'yes' : 'no';
+  bgClear.disabled = !name;
+  bgNote.dataset.tone = '';
+  bgNote.textContent = name
+    ? `${name} — kept in this browser only.`
+    : 'No background set.';
+}
+
+function refuse(message) {
+  bgNote.dataset.tone = 'bad';
+  bgNote.textContent = message;
+}
+
+$('bg-choose').addEventListener('click', () => bgFile.click());
+
+bgFile.addEventListener('change', async () => {
+  const file = bgFile.files?.[0];
+  // Cleared straight away, so picking the same file twice still counts as a
+  // change and the panel does not go quiet on the second try.
+  bgFile.value = '';
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    refuse('That file is not an image.');
+    return;
+  }
+  if (file.size > BACKGROUND_LIMIT) {
+    const mb = (size) => Math.round(size / (1024 * 1024));
+    refuse(`That image is ${mb(file.size)}MB. The limit is ${mb(BACKGROUND_LIMIT)}MB.`);
+    return;
+  }
+  try {
+    await saveBackground(file);
+  } catch {
+    // A browser keeping no site data, or a full store. The picture would not
+    // survive the next load, so do not pretend it is set.
+    refuse('This browser would not store the image.');
+    return;
+  }
+  paintBackground(file);
+  remember('bg-name', file.name);
+  showBackground(file.name);
+});
+
+bgClear.addEventListener('click', async () => {
+  await clearBackground();
+  paintBackground(null);
+  remember('bg-name', '');
+  showBackground('');
+});
+
+for (const [input, key] of [[bgDim, 'dim'], [bgBlur, 'blur']]) {
+  input.addEventListener('input', () => setBackgroundSettings({ [key]: Number(input.value) }));
+}
+
+const panelAlpha = $('opt-panel-alpha');
+const screenAlpha = $('opt-screen-alpha');
+
+for (const [input, key] of [[panelAlpha, 'panel'], [screenAlpha, 'screen']]) {
+  input.addEventListener('input', () => {
+    setSurfaceSettings({ [key]: Number(input.value) });
+    // The picture is sized from the bezel, which these do not resize — but the
+    // panels can reflow a fraction as their fill changes, so re-fit rather than
+    // leave the canvas a pixel out.
+    if (key === 'panel') fitScreen();
+  });
+}
+
+const readoutToggle = $('opt-hide-readouts');
+readoutToggle.addEventListener('change', () => {
+  setReadoutsHidden(readoutToggle.checked);
+  // Both lines are counted when the deck cap is measured, so re-fit and the
+  // picture takes the height they just gave back.
+  fitScreen();
+});
+
+{
+  const stored = backgroundSettings();
+  bgDim.value = String(stored.dim);
+  bgBlur.value = String(stored.blur);
+  const surfaces = surfaceSettings();
+  panelAlpha.value = String(surfaces.panel);
+  screenAlpha.value = String(surfaces.screen);
+  readoutToggle.checked = readoutsHidden();
+}
+
+// The picture has to come out of a database, so the panel is filled in when it
+// arrives rather than left claiming there is nothing there.
+mountTheme().then((blob) => showBackground(blob ? recall('bg-name') || 'Background image' : ''));
 
 document.addEventListener("fullscreenchange", () => {
   const on = document.fullscreenElement === el.screen;
   el.full.setAttribute("aria-pressed", String(on));
   el.full.textContent = on ? "Exit full screen" : "Full screen";
+  quickFullscreen.setAttribute('aria-pressed', String(on));
+  quickFullscreen.setAttribute('aria-label', el.full.textContent);
+  quickFullscreen.title = el.full.textContent;
   // The element's box changes without the window resizing, and the observer
   // fires before the new size settles in some browsers.
   fitScreen();
@@ -1100,12 +1426,9 @@ function toggleCard(key) {
 // party on the left and the battle on the right is the difference between
 // reading one at a time and watching both.
 //
-// Saves is a pane like any other. It starts on the right because that is where
-// it is useful, and it moves like everything else.
+// Vault saves have a fixed card; these slots hold only live add-on sections.
 
 const SIDES = ["left", "right"];
-const SAVES_PANE = "saves";
-const SHOTS_PANE = "shots";
 /** Most panes one column will stack. Two each is four on screen at once. */
 const MAX_SLOTS = 2;
 
@@ -1122,6 +1445,7 @@ const placement = recallPlacement();
 const slots = recallSlots();
 /** The count drawn on the Saves tab, which no longer has an element of its own. */
 let savesCount = "";
+let shotsCount = "";
 /** The sections last drawn, so a move can redraw without waiting for a frame. */
 let lastSections = [];
 
@@ -1160,10 +1484,25 @@ function saveSlots() {
 }
 
 function sideOf(id) {
-  // Saves and shots belong to no game, so they default to the right: without
-  // them that rail would be empty until an addon claimed a cartridge.
-  const defaultsRight = id === SAVES_PANE || id === SHOTS_PANE || id === "enemies";
+  // Opponents appear opposite the player party by default, and so do the two
+  // vault panes: the left rail is where a reader's own sections belong.
+  const defaultsRight = id === "enemies" || id === "saves" || id === "shots";
   return placement[id] ?? (defaultsRight ? "right" : "left");
+}
+
+/**
+ * The live node a built-in pane shows, held across renders.
+ *
+ * These bodies are real elements rather than drawings made from a snapshot, so
+ * the reference has to survive being taken out of the document — by the Vault
+ * modal borrowing it, or by its own pane being torn down when another tab is
+ * picked. Looking it up by id each time would come back null the moment it was
+ * out, and the pane would quietly render empty from then on.
+ */
+const railNodeCache = new Map();
+function railNode(id) {
+  if (!railNodeCache.has(id)) railNodeCache.set(id, $(id));
+  return railNodeCache.get(id);
 }
 
 function moveTo(id, side) {
@@ -1193,17 +1532,6 @@ function selectTab(side, index, id) {
   renderRails(lastSections);
 }
 
-function splitRail(side, available) {
-  if (slots[side].length >= MAX_SLOTS) return;
-  // Open the split on something you are not already looking at, otherwise the
-  // new half is a copy of the old one and the button looks broken.
-  const next = available.find((item) => !slots[side].includes(item.id));
-  if (!next) return;
-  slots[side].push(next.id);
-  saveSlots();
-  renderRails(lastSections);
-}
-
 function closeSlot(side, index) {
   slots[side].splice(index, 1);
   saveSlots();
@@ -1218,6 +1546,29 @@ function closeSlot(side, index) {
  * already exists rather than one built from the snapshot.
  */
 function railItems(sections) {
+  const hidden = hiddenPanels(addonUser);
+  const built = [];
+  // Tabs in the same strip as the reader's own sections rather than cards
+  // stacked above it: three headers down a narrow column cost more room than
+  // the things they were labelling.
+  if (!hidden.includes("saves")) {
+    built.push({
+      id: "saves",
+      title: "Saves",
+      note: savesCount || undefined,
+      sign: `saves|${savesCount}`,
+      node: railNode("pane-saves"),
+    });
+  }
+  if (!hidden.includes("shots")) {
+    built.push({
+      id: "shots",
+      title: "Screenshots",
+      note: shotsCount || undefined,
+      sign: `shots|${shotsCount}`,
+      node: railNode("pane-shots"),
+    });
+  }
   return [
     ...sections.map((section) => ({
       id: section.section_id,
@@ -1229,8 +1580,7 @@ function railItems(sections) {
       sign: JSON.stringify(section),
       build: () => renderContent(section),
     })),
-    { id: SAVES_PANE, title: "Saves", note: savesCount, node: el.savesPane, sign: "saves" },
-    { id: SHOTS_PANE, title: "Shots", note: shotsCount, node: el.shotsPane, sign: "shots" },
+    ...built,
   ];
 }
 
@@ -1245,6 +1595,44 @@ function railItems(sections) {
  * position, so only the pane whose own signature moved is rebuilt.
  */
 const slotCache = new Map();
+const dividerCache = new Map();
+function railDivider(side, host) {
+  if (dividerCache.has(side)) return dividerCache.get(side);
+  const divider = document.createElement('div');
+  divider.className = 'rail-divider'; divider.tabIndex = 0;
+  divider.setAttribute('role', 'separator');
+  divider.setAttribute('aria-label', `Resize ${side} panes`);
+  divider.setAttribute('aria-orientation', 'horizontal');
+  divider.setAttribute('aria-valuemin', '25'); divider.setAttribute('aria-valuemax', '75');
+  function resize(value) {
+    const ratio = Math.max(25, Math.min(75, value));
+    host.style.setProperty('--pane-ratio', `${ratio}fr`);
+    host.style.setProperty('--pane-rest', `${100 - ratio}fr`);
+    divider.setAttribute('aria-valuenow', String(Math.round(ratio)));
+    remember(`split-${side}`, String(ratio));
+  }
+  const saved = Number(recall(`split-${side}`));
+  resize(saved >= 25 && saved <= 75 ? saved : 50);
+  divider.addEventListener('pointerdown', event => {
+    event.preventDefault(); divider.focus(); divider.setPointerCapture(event.pointerId);
+  });
+  divider.addEventListener('pointermove', event => {
+    if (!divider.hasPointerCapture(event.pointerId)) return;
+    const box = host.getBoundingClientRect();
+    resize((event.clientY - box.top) / box.height * 100);
+  });
+  divider.addEventListener('pointerup', event => {
+    if (divider.hasPointerCapture(event.pointerId)) divider.releasePointerCapture(event.pointerId);
+  });
+  divider.addEventListener('keydown', event => {
+    const value = Number(divider.getAttribute('aria-valuenow'));
+    const next = { ArrowUp: value - 5, ArrowDown: value + 5, Home: 25, End: 75 }[event.key];
+    if (next === undefined) return;
+    event.preventDefault(); event.stopPropagation(); resize(next);
+  });
+  dividerCache.set(side, divider);
+  return divider;
+}
 let workshopReadout = null;
 let workshopDraftPreview = { status: 'idle', sections: [], error: 'Add a field in the reader builder to see your add-on here.' };
 let workshopPreviewSignature = '';
@@ -1255,10 +1643,9 @@ function renderWorkshopReadout() {
     workshopReadout.className = 'workshop-readout panel';
     workshopReadout.innerHTML = '<div data-workshop-preview></div>';
     document.querySelector('.transport').before(workshopReadout);
-    const vault = document.createElement('section'); vault.className = 'workshop-vault';
-    vault.append(span('panel__eyebrow', 'Saved in your vault'), el.savesPane);
-    document.getElementById('tool-saves').append(vault);
-    el.savesPane.hidden = false;
+    // The embedded workshop hides the sidebars; keep the same vault card
+    // available under its player rather than moving saves into a command popup.
+    document.querySelector('.screen-col').append(railNode('pane-saves'));
   }
   const signature = JSON.stringify([workshopDraftPreview, [...openCards]]);
   if (signature === workshopPreviewSignature) return;
@@ -1307,9 +1694,8 @@ function renderRails(sections) {
 
     if (mine.length === 0) {
       slots[side] = [];
-      host.replaceChildren(
-        span("rail-note", "Nothing here. Move a section across to fill it."),
-      );
+      host.replaceChildren();
+      host.dataset.split = 'false';
       continue;
     }
 
@@ -1322,6 +1708,8 @@ function renderRails(sections) {
     const blocks = slots[side].map((id, index) =>
       renderSlot(side, index, mine, mine.find((item) => item.id === id)),
     );
+    host.dataset.split = String(blocks.length === 2);
+    if (blocks.length === 2) blocks.splice(1, 0, railDivider(side, host));
     // `replaceChildren` removes and reinserts even a child that is already
     // there, which would undo every reused node above. Only touch the host
     // when the list it holds is actually a different list.
@@ -1329,14 +1717,6 @@ function renderRails(sections) {
       host.childNodes.length === blocks.length &&
       blocks.every((block, index) => host.childNodes[index] === block);
     if (!settled) host.replaceChildren(...blocks);
-  }
-
-  // Panes that exist whether or not a game is loaded sit in the park when no
-  // rail is showing them, rather than being detached from the document.
-  for (const pane of [el.savesPane, el.shotsPane]) {
-    const shown = el.leftPane.contains(pane) || el.rightPane.contains(pane);
-    if (!shown && pane.parentElement !== el.panePark) el.panePark.append(pane);
-    pane.hidden = !shown;
   }
 
   for (const { box, top } of scrolls) {
@@ -1363,8 +1743,6 @@ function renderSlot(side, index, available, item) {
     item.note ?? "",
     slots[side],
     available.map((o) => [o.id, o.title, o.badge?.text ?? "", o.badge?.tone ?? ""]),
-    savesCount,
-    shotsCount,
   ]);
   // Which of this section's cards are open is state the section's own payload
   // knows nothing about, so it has to be signed too — otherwise a click that
@@ -1378,11 +1756,16 @@ function renderSlot(side, index, available, item) {
   if (cached && cached.chromeSig === chromeSig && cached.bodySig === bodySig) {
     // A pane that is a node rather than a drawing can have been taken by the
     // other column since this block was built.
-    if (item.node && !cached.body.contains(item.node)) cached.body.append(item.node);
+    if (item.node && !cached.body.contains(item.node) && !vaultHoldsPanes()) {
+      cached.body.append(item.node);
+    }
     return cached.block;
   }
 
   if (cached && cached.chromeSig === chromeSig) {
+    // Same guard: the modal is showing this node, so leave it there and let the
+    // pane fill back in when the modal closes and asks for a redraw.
+    if (item.node && vaultHoldsPanes()) return cached.block;
     cached.body.replaceChildren(item.node ?? item.build());
     cached.bodySig = bodySig;
     return cached.block;
@@ -1408,11 +1791,13 @@ function renderSlot(side, index, available, item) {
 function buildSlot(side, index, available, item) {
   const block = document.createElement("div");
   block.className = "slot";
+  block.dataset.section = item.id;
 
   if (index === 0) {
     const tabs = document.createElement("div");
     tabs.className = "tabs";
     tabs.setAttribute("role", "tablist");
+    tabs.setAttribute('aria-label', `${side} add-on sections`);
     tabs.append(
       ...available.map((option) => {
         const tab = document.createElement("button");
@@ -1420,6 +1805,18 @@ function buildSlot(side, index, available, item) {
         tab.className = "tabs__tab";
         tab.setAttribute("role", "tab");
         tab.setAttribute("aria-selected", String(option.id === item.id));
+        tab.tabIndex = option.id === item.id ? 0 : -1;
+        tab.id = `tab-${side}-${available.indexOf(option)}`;
+        tab.setAttribute('aria-controls', `pane-body-${side}-${index}`);
+        tab.addEventListener('keydown', event => {
+          if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+          event.preventDefault();
+          const at = available.indexOf(option);
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? available.length - 1
+            : (at + (event.key === 'ArrowRight' ? 1 : -1) + available.length) % available.length;
+          selectTab(side, index, available[next].id);
+          $(`tab-${side}-${next}`)?.focus({ preventScroll: true });
+        });
         // Marked, not hidden: the pane below has it, and swapping the two is a
         // reasonable thing to want.
         if (option.id !== item.id && slots[side].includes(option.id)) {
@@ -1433,10 +1830,6 @@ function buildSlot(side, index, available, item) {
           const flag = span("tabs__flag", option.badge.text);
           if (option.badge.tone) flag.dataset.tone = option.badge.tone;
           tab.append(flag);
-        } else if (option.id === SAVES_PANE && savesCount) {
-          tab.append(span("tabs__count", savesCount));
-        } else if (option.id === SHOTS_PANE && shotsCount) {
-          tab.append(span("tabs__count", shotsCount));
         }
         tab.addEventListener("click", () => selectTab(side, index, option.id));
         return tab;
@@ -1470,33 +1863,47 @@ function buildSlot(side, index, available, item) {
     head.append(span("pane__note", item.note ?? ""));
   }
 
-  const other = side === "left" ? "right" : "left";
-  head.append(
-    railButton(
-      side === "left" ? "move right" : "move left",
-      `Show ${item.title} in the ${side === "left" ? "right" : "left"} companion group`,
-      () => moveTo(item.id, other),
-    ),
-  );
-
-  if (slots[side].length > 1) {
-    head.append(
-      railButton("close", `Stop showing ${item.title} under the other pane`, () =>
-        closeSlot(side, index),
-      ),
-    );
-  } else if (available.length > 1) {
-    // Only offered when there is something else in this column to put below.
-    head.append(
-      railButton("split", "Show a second section under this one", () =>
-        splitRail(side, available),
-      ),
-    );
-  }
+  const arrange = railButton('\u22ef', `Arrange ${item.title}`, () => {
+    const menu = $('pane-layout-menu');
+    $('pane-layout-title').textContent = item.title;
+    const actions = $('pane-layout-actions');
+    actions.replaceChildren();
+    function action(label, run) {
+      const button = railButton(label, label, () => {
+        menu.hidePopover();
+        run();
+        const host = side === 'left' ? el.leftPane : el.rightPane;
+        const moved = document.querySelector(`.slot[data-section="${CSS.escape(item.id)}"]`);
+        (moved ?? host).querySelector('[aria-selected="true"], select, button')?.focus({ preventScroll: true });
+      });
+      button.className = 'key'; actions.append(button);
+    }
+    const other = side === 'left' ? 'right' : 'left';
+    action(`Move to ${other} sidebar`, () => moveTo(item.id, other));
+    if (slots[side].length > 1) {
+      action('Keep only this pane', () => { slots[side] = [item.id]; saveSlots(); renderRails(lastSections); });
+      action('Close this pane', () => closeSlot(side, index));
+    } else {
+      for (const option of available.filter(option => option.id !== item.id)) {
+        action(`Split with ${option.title}`, () => { slots[side] = [item.id, option.id]; saveSlots(); renderRails(lastSections); });
+      }
+    }
+    openToolPopup(menu, arrange);
+  });
+  arrange.className = 'pane-arrange';
+  arrange.setAttribute('aria-label', `Arrange ${item.title}`);
+  arrange.setAttribute('aria-expanded', 'false');
+  arrange.setAttribute('aria-controls', 'pane-layout-menu');
+  head.append(arrange);
   block.append(head);
 
   const body = document.createElement("div");
   body.className = "slot__body";
+  body.id = `pane-body-${side}-${index}`;
+  if (index === 0) {
+    body.setAttribute('role', 'tabpanel');
+    body.setAttribute('aria-labelledby', `tab-${side}-${available.indexOf(item)}`);
+  } else body.setAttribute('aria-label', item.title);
   // A pane is either built from the snapshot or is a node that already exists.
   // Appending the existing one moves it out of whichever rail last had it.
   body.append(item.node ?? item.build());
@@ -1887,6 +2294,7 @@ function restorePreferences() {
   if (Number.isFinite(volume) && volume >= 0 && volume <= 100) {
     el.optVolume.value = String(volume);
   }
+  syncQuickAudio();
 }
 
 const BATTERY_KEY_PREFIX = "tinybird:battery:";
@@ -1948,7 +2356,7 @@ function flushBattery() {
 // --- loading ------------------------------------------------------------
 
 function setControlsEnabled(enabled) {
-  for (const button of [el.play, el.reset, el.eject, el.ff, el.save, el.store, el.cloud]) {
+  for (const button of [el.play, el.reset, el.eject, el.ff, el.save, el.store, quickScreenshot, el.cloud]) {
     button.disabled = !enabled;
   }
 
@@ -1987,6 +2395,8 @@ function requireCartridge(action) {
 function ejectRom() {
   if (!emu?.hasRom) return;
 
+  checkpointRecovery();
+  recoveryGameOwner = null;
   flushBattery();
   emu.eject();
 
@@ -2011,11 +2421,13 @@ function ejectRom() {
   say("Cartridge ejected");
 }
 
-el.eject.addEventListener("click", ejectRom);
+el.eject.addEventListener("click", () => { closeToolSheets(); ejectRom(); });
 
-async function startRom(bytes, name) {
+async function startRom(bytes, name, recovered = null) {
+  if (!recovered) { checkpointRecovery(); flushBattery(); }
   try {
-    emu.loadRom(bytes);
+    if (recovered) emu = recovered;
+    else emu.loadRom(bytes);
   } catch (error) {
     say(error.message, "bad");
     return;
@@ -2029,6 +2441,7 @@ async function startRom(bytes, name) {
   // same file again mid-session, from a vault URL that may have expired, is
   // worse.
   romBytes = new Uint8Array(bytes.slice(0));
+  recoveryGameOwner = recoveryOwner(addonUser);
   romHash = "";
   romFingerprint(romBytes)
     .then((hash) => {
@@ -2061,7 +2474,7 @@ async function startRom(bytes, name) {
 
   // Put the cartridge's own save back before the game looks for it. The
   // snapshot above is what tells us which cartridge this is.
-  const restored = emu.hasBattery && applyBattery(storedBattery(gameCode), gameCode);
+  const restored = !recovered && emu.hasBattery && applyBattery(storedBattery(gameCode), gameCode);
   say(
     `Loaded ${name} · ${formatSize(bytes.byteLength)}` +
       (restored ? " · cartridge save restored" : ""),
@@ -2070,6 +2483,7 @@ async function startRom(bytes, name) {
 
   markVaultSelection(name);
   lobby?.setPlaying(name, gameCode || null);
+  return true;
 }
 
 function formatSize(bytes) {
@@ -2582,6 +2996,134 @@ let romBytes = null;
 let romHash = "";
 /** The BIOS, so a second console can be given the same one. */
 let biosBytes = null;
+let recoveryGameOwner = null;
+let recoveryGeneration = 0;
+let recoveryRestoring = false;
+let recoveryPending = 0;
+let recoveryErrorShown = false;
+
+async function refreshRecovery() {
+  const generation = ++recoveryGeneration;
+  const owner = recoveryOwner(addonUser);
+  $('recovery-card').hidden = true;
+  $('recovery-name').textContent = '';
+  $('recovery-image').removeAttribute('src');
+  try {
+    const record = await readRecovery(owner);
+    if (generation !== recoveryGeneration || owner !== recoveryOwner(addonUser)) return;
+    if (!record) return;
+    $('recovery-name').textContent = record.name;
+    $('recovery-time').textContent = `Last played ${new Date(record.savedAt).toLocaleString()} · automatic checkpoint`;
+    if (record.image?.startsWith('data:image/png;base64,')) $('recovery-image').src = record.image;
+    $('recovery-card').hidden = false;
+  } catch {
+    if (generation === recoveryGeneration) $('recovery-status').textContent = 'Automatic recovery is unavailable: this browser could not open its storage.';
+  }
+}
+
+// Copy the machine synchronously, before a switch/eject can replace it. Hashing
+// and the atomic IndexedDB write can then finish without blocking emulation.
+async function checkpointRecovery() {
+  if (!emu?.hasRom || !romBytes || recoveryRestoring || recoveryGameOwner !== recoveryOwner(addonUser)
+      || emu.linkConnected || session || sessionPhase !== 'off') return;
+  const owner = recoveryGameOwner;
+  recoveryPending++;
+  try {
+    const game = emu.snapshot().rom;
+    const rom = romBytes;
+    let observations = null;
+    try {
+      const text = localStorage.getItem(observationKey(owner, game));
+      if (text) { observations = validateObservationConfig(JSON.parse(text)); matchObservationGame(observations, game); }
+    } catch { observations = null; }
+    const record = {
+      version: 1, savedAt: Date.now(), name: romName, game,
+      state: emu.saveState(), battery: emu.hasBattery ? emu.batterySave() : null,
+      image: frameCanvas.toDataURL('image/png'),
+      context: { placement: { ...placement }, slots: structuredClone(slots), splits: Object.fromEntries(SIDES.map(side => [side, Number(recall(`split-${side}`)) || 50])), hidden: hiddenPanels(addonUser), observations },
+    };
+    const bios = biosBytes;
+    [record.romHash, record.stateHash, record.biosHash] = await Promise.all([fingerprint(rom), fingerprint(record.state), bios ? fingerprint(bios) : null]);
+    await writeRecovery(owner, record, rom);
+    if (owner === recoveryOwner(addonUser)) {
+      $('recovery-status').textContent = 'Automatic recovery stays in this browser. Named saves are in the Vault.';
+      recoveryErrorShown = false;
+      await refreshRecovery();
+    }
+  } catch (error) {
+    if (owner === recoveryOwner(addonUser)) {
+      $('recovery-status').textContent = `Could not save recovery: ${error.message}`;
+      if (!recoveryErrorShown) say('Automatic recovery could not be saved. You can still save to file or the Vault.', 'bad');
+      recoveryErrorShown = true;
+    }
+  } finally { recoveryPending--; }
+}
+
+$('continue-playing').addEventListener('click', async () => {
+  if (recoveryRestoring || !emu || emu.hasRom) return;
+  const owner = recoveryOwner(addonUser);
+  recoveryRestoring = true;
+  $('continue-playing').disabled = true;
+  try {
+    const record = await readRecovery(owner);
+    await validateRecovery(record, biosBytes);
+    const context = record.context;
+    if (context.observations) {
+      validateObservationConfig(context.observations);
+      matchObservationGame(context.observations, record.game);
+    }
+    // Validate in a separate machine. An incompatible state cannot damage the
+    // current emulator or change any persisted layout/configuration.
+    const candidate = await TinyBird.load();
+    if (biosBytes) candidate.loadBios(biosBytes);
+    candidate.loadRom(record.rom);
+    candidate.loadState(record.state);
+    if (record.battery) candidate.loadSave(record.battery);
+    candidate.setPaused(false);
+    candidate.setButtons(0);
+    candidate.installManifests(activeManifests);
+    candidate.setDisabledBuiltins(disabledBuiltins(addonUser));
+    if (owner !== recoveryOwner(addonUser) || emu.hasRom) throw new Error('The account or game changed. Choose Continue playing again.');
+    for (const key of Object.keys(placement)) delete placement[key];
+    Object.assign(placement, Object.fromEntries(Object.entries(context.placement).filter(([, side]) => SIDES.includes(side))));
+    for (const side of SIDES) slots[side] = (context.slots[side] ?? []).filter(id => typeof id === 'string').slice(0, MAX_SLOTS);
+    for (const side of SIDES) {
+      const ratio = Math.max(25, Math.min(75, context.splits?.[side] ?? 50));
+      remember(`split-${side}`, String(ratio));
+      const divider = dividerCache.get(side);
+      if (divider) {
+        const host = divider.parentElement;
+        host?.style.setProperty('--pane-ratio', `${ratio}fr`);
+        host?.style.setProperty('--pane-rest', `${100 - ratio}fr`);
+        divider.setAttribute('aria-valuenow', String(Math.round(ratio)));
+      }
+    }
+    remember('placement', JSON.stringify(placement)); saveSlots();
+    saveHiddenPanels(addonUser, context.hidden);
+    let configSaved = true;
+    try {
+      const key = observationKey(owner, record.game);
+      if (context.observations) localStorage.setItem(key, JSON.stringify(context.observations));
+      else localStorage.removeItem(key);
+    } catch { configSaved = false; }
+    await startRom(record.rom, record.name, candidate);
+    applyVaultPanels();
+    frameClock = 0;
+    present();
+    flushBattery();
+    say(configSaved ? `Continued ${record.name} from your automatic checkpoint.` : 'Game restored, but browser storage could not restore the observation config.', configSaved ? 'good' : 'bad');
+  } catch (error) {
+    $('recovery-status').textContent = `Could not continue: ${error.message}`;
+    say(`Could not continue: ${error.message}`, 'bad');
+  } finally {
+    recoveryRestoring = false;
+    $('continue-playing').disabled = false;
+  }
+});
+
+setInterval(() => { if (running && !recoveryPending) checkpointRecovery(); }, RECOVERY_INTERVAL);
+document.addEventListener('visibilitychange', () => { if (document.hidden) checkpointRecovery(); });
+window.addEventListener('pagehide', () => { checkpointRecovery(); flushBattery(); });
 /** Consoles built for other players' seats, reused across sessions. */
 const peerConsoles = new Map();
 /** The session this browser has asked the room to open, before it opened. */
@@ -3596,7 +4138,7 @@ el.copyCode.addEventListener("click", async () => {
 // on the key says you are in a room, and the watched screen sits under your
 // own.
 
-el.lobbyOpen.addEventListener("click", () => el.lobbySheet.showModal());
+// Multiplayer opens through the shared anchored popup handler.
 
 /** Keep the deck key in step with the room, since the panel is usually shut. */
 function paintLobbyBadge() {
@@ -3669,7 +4211,22 @@ let accountKnown = false;
  * a real change means the vault on screen belongs to the wrong person.
  */
 function onAccountChange(user) {
+  if (accountKnown && recoveryOwner(user) !== recoveryOwner(addonUser)) {
+    checkpointRecovery();
+    recoveryGameOwner = null;
+  }
+  savesGeneration++;
+  showSaves(false);
+  el.savesList.replaceChildren();
+  shotsGeneration++;
+  showShots(false);
   addonUser = user;
+  $('recovery-status').textContent = '';
+  refreshRecovery();
+  applyVaultPanels();
+  playInstalledAddons = [];
+  $('play-addon-message').textContent = '';
+  if ($('addon-menu').matches(':popover-open')) renderPlayAddons();
   setAddonAccount(user);
   addonGeneration++;
   activeManifests = [];
@@ -3833,9 +4390,44 @@ function showSaves(visible) {
  * now, so it is state rather than a node, and setting it redraws the rail that
  * happens to be holding saves.
  */
+// The saves used to be a card to scroll to, which meant leaving Cinema first
+// and hoping the card was on screen. There is a modal for them now, and it
+// opens over whatever view you are in.
+$('btn-vault-saves').addEventListener('click', () => openVault('saves'));
+
+/**
+ * The rail cards Play can put away, and the card each one owns.
+ *
+ * A function rather than a const: applyVaultPanels runs from onAccountChange,
+ * which startup calls well before this point in the file is reached, and a
+ * `const` read that early throws before it is initialised.
+ */
+function vaultPanels() {
+  return [
+    { id: 'saves', name: 'Vault saves', note: 'Sidebar tab · also in the Vault' },
+    { id: 'shots', name: 'Screenshots', note: 'Sidebar tab · also in the Vault' },
+  ];
+}
+
+/**
+ * Show or put away the two rail cards.
+ *
+ * Only the cards: the Vault modal keeps both tabs either way, so turning a
+ * card off tidies the rail rather than taking the feature away. A card being
+ * hidden while the modal holds its contents is fine — they go back into a
+ * hidden card and stay there until it is turned on again.
+ */
+function applyVaultPanels() {
+  // The rails read hiddenPanels themselves; all this has to do is ask for the
+  // redraw that will notice the change.
+  renderRails(lastSections);
+  fitScreen();
+}
+
 function setSavesCount(text) {
   if (savesCount === text) return;
   savesCount = text;
+  // The pane's own note, so the tab strip carries it and no card header has to.
   renderRails(lastSections);
 }
 
@@ -3848,13 +4440,119 @@ function setSavesCount(text) {
 // exists rather than a way to see it.
 
 /** The count drawn on the Shots tab. */
-let shotsCount = "";
 
-function setShotsCount(text) {
-  if (shotsCount === text) return;
-  shotsCount = text;
-  renderRails(lastSections);
+
+function paintGallery() {
+  const shot = galleryShots[galleryIndex];
+  $('gallery-stage').hidden = !shot;
+  el.shotOpen.hidden = !shot;
+  $('shot-prev').disabled = !shot || galleryIndex === 0;
+  $('shot-next').disabled = !shot || galleryIndex === galleryShots.length - 1;
+  $('shot-position').textContent = shot ? `${galleryIndex + 1} of ${galleryShots.length}` : '';
+  el.shotWhen.textContent = shot?.taken_at_ms ? formatWhen(shot.taken_at_ms) : '';
+  if (shot) {
+    el.shotFull.src = shot.url;
+    el.shotFull.alt = shot.game_code ? `Screenshot of ${shot.game_code}` : 'Game screenshot';
+    el.shotOpen.href = shot.url;
+  } else {
+    el.shotFull.removeAttribute('src'); el.shotOpen.removeAttribute('href');
+  }
+  [...el.shotsList.querySelectorAll('button')].forEach((button, index) => {
+    button.setAttribute('aria-current', String(index === galleryIndex));
+  });
 }
+function stepGallery(delta) {
+  galleryIndex = Math.max(0, Math.min(galleryShots.length - 1, galleryIndex + delta));
+  paintGallery();
+}
+$('shot-prev').addEventListener('click', () => stepGallery(-1));
+$('shot-next').addEventListener('click', () => stepGallery(1));
+el.vaultModal.addEventListener('keydown', event => {
+  if (event.target.closest('[data-vault-tab], input, textarea, select') || $('vault-panel-shots').hidden) return;
+  if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+  event.preventDefault(); event.stopPropagation(); stepGallery(event.key === 'ArrowLeft' ? -1 : 1);
+});
+// --- the vault ------------------------------------------------------------
+//
+// Saves and screenshots each keep a card in the companion rail and a tab in
+// here. Rather than render either of them twice, the live nodes move: opening
+// the modal lifts them out of their cards, closing puts them back. One list,
+// one set of ids, and every render path already written keeps working
+// untouched, whichever place the nodes happen to be sitting in.
+
+/** [pane body, the tab panel it visits while the modal is open]. */
+function vaultHomes() {
+  return [
+    ['pane-saves', 'vault-panel-saves'],
+    ['pane-shots', 'vault-panel-shots'],
+  ];
+}
+
+/** True while the modal is holding the pane bodies, so a rail redraw leaves
+ *  them alone instead of pulling them back out from under it. */
+function vaultHoldsPanes() {
+  return el.vaultModal.open;
+}
+
+/**
+ * Lend the two pane bodies to the modal, or ask the rails to take them back.
+ *
+ * Going back is a redraw rather than an append: the rails decide where these
+ * live now, and which tab is showing may well have changed while the modal was
+ * up. Handing the node to a stale container would put it somewhere the rail no
+ * longer draws.
+ */
+function moveVaultContent(intoModal) {
+  if (!intoModal) {
+    renderRails(lastSections);
+    return;
+  }
+  for (const [nodeId, panelId] of vaultHomes()) {
+    const node = railNode(nodeId);
+    const target = $(panelId);
+    // Appending a node already in place would still move it, and moving a
+    // focused control loses the focus, so only when it is somewhere else.
+    if (node && target && node.parentElement !== target) target.append(node);
+  }
+}
+
+function selectVaultTab(which) {
+  if (!['saves', 'shots'].includes(which)) which = 'saves';
+  for (const tab of document.querySelectorAll('[data-vault-tab]')) {
+    const on = tab.dataset.vaultTab === which;
+    tab.setAttribute('aria-selected', String(on));
+    tab.tabIndex = on ? 0 : -1;
+    $(`vault-panel-${tab.dataset.vaultTab}`).hidden = !on;
+  }
+  remember('vault-tab', which);
+}
+
+function openVault(which = recall('vault-tab') || 'saves') {
+  closeToolSheets();
+  moveVaultContent(true);
+  selectVaultTab(which);
+  if (!el.vaultModal.open) el.vaultModal.showModal();
+  paintGallery();
+  refreshShots();
+  refreshSaves();
+}
+
+for (const tab of document.querySelectorAll('[data-vault-tab]')) {
+  tab.addEventListener('click', () => selectVaultTab(tab.dataset.vaultTab));
+  tab.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation();
+    const next = event.key === 'Home' ? 'saves' : event.key === 'End' ? 'shots'
+      : tab.dataset.vaultTab === 'saves' ? 'shots' : 'saves';
+    selectVaultTab(next); $(`vault-tab-${next}`).focus();
+  });
+}
+// Closing covers Escape and the backdrop as well as the Close button, which is
+// why the cards are refilled from here rather than from a click handler.
+el.vaultModal.addEventListener('close', () => moveVaultContent(false));
+
+$('btn-vault').addEventListener('click', () => openVault());
+$('btn-gallery').addEventListener('click', () => openVault('shots'));
 
 /**
  * The screenshots in the vault, newest first.
@@ -3863,46 +4561,68 @@ function setShotsCount(text) {
  * vault gives us — it lists by whatever order it likes.
  */
 async function refreshShots() {
+  const generation = ++shotsGeneration;
   let shots = [];
   try {
     // Scoped to this account by the server. Asking for the whole vault and
     // filtering here would make privacy a setting anyone could turn off in the
     // developer tools.
     const response = await fetch("/api/shots");
+    if (generation !== shotsGeneration) return;
     if (response.status === 401) {
       accounts?.noticeSignedOut();
       el.shotsOff.textContent = "Sign in to keep screenshots.";
       showShots(false);
-      setShotsCount("");
+
       return;
     }
     const body = await response.json();
+    if (generation !== shotsGeneration) return;
+    if (!response.ok) throw new Error(body.error ?? 'Could not load screenshots.');
     if (!body.configured) {
       el.shotsOff.textContent =
-        "Screenshots need the vault. Set TINYBIRD_MEDIA_KEY in .env and restart.";
+        "Screenshot storage is not available on this server.";
       showShots(false);
       return;
     }
     shots = body.shots ?? [];
   } catch {
+    if (generation !== shotsGeneration) return;
+    el.shotsOff.textContent = 'Could not load screenshots. Reopen the gallery to try again.';
     showShots(false);
     return;
   }
 
   if (shots.length === 0) {
+    el.shotsOff.textContent = 'No screenshots yet. Use the camera on the game screen to take one.';
     showShots(false);
-    setShotsCount("");
+
     return;
   }
 
+  const selected = galleryShots[galleryIndex]?.url;
+  galleryShots = [...shots].sort((a, b) => (b.taken_at_ms ?? 0) - (a.taken_at_ms ?? 0));
+  galleryIndex = Math.max(0, galleryShots.findIndex(shot => shot.url === selected));
   showShots(true);
-  setShotsCount(`${shots.length}`);
-  el.shotsList.replaceChildren(...shots.map(renderShot));
+
+  el.shotsList.replaceChildren(...galleryShots.map(renderShot));
+  paintGallery();
 }
 
 function showShots(visible) {
+  if (!visible) {
+    galleryShots = []; galleryIndex = 0;
+    el.shotsList.replaceChildren();
+  }
   el.shotsList.hidden = !visible;
   el.shotsOff.hidden = visible;
+  // Shown on the tab, the way the saves count is.
+  const next = visible && galleryShots.length ? `${galleryShots.length} saved` : '';
+  if (next !== shotsCount) {
+    shotsCount = next;
+    renderRails(lastSections);
+  }
+  paintGallery();
 }
 
 function renderShot(shot) {
@@ -3928,11 +4648,11 @@ function renderShot(shot) {
 }
 
 function showShot(asset, when) {
-  el.shotFull.src = asset.url;
-  el.shotFull.alt = "";
-  el.shotWhen.textContent = when ? formatWhen(when) : "";
-  el.shotOpen.href = asset.url;
-  el.shotViewer.showModal();
+  galleryIndex = Math.max(0, galleryShots.findIndex(shot => shot.url === asset.url));
+  moveVaultContent(true);
+  selectVaultTab('shots');
+  paintGallery();
+  if (!el.vaultModal.open) el.vaultModal.showModal();
 }
 
 /**
@@ -3949,14 +4669,18 @@ async function refreshVault() {
 
 /** Reload the saves list for the current cartridge. */
 async function refreshSaves() {
+  const generation = ++savesGeneration;
+  const requestedGame = gameCode;
   if (!gameCode) {
     showSaves(false);
+    el.savesOff.textContent = 'Load a cartridge to see its vault saves.';
     return;
   }
 
   let listing;
   try {
     const response = await fetch(`/api/saves?game=${encodeURIComponent(gameCode)}`);
+    if (generation !== savesGeneration || requestedGame !== gameCode) return;
     if (response.status === 401) {
       // Accounts are on and nobody is signed in. Say so where the saves would
       // be, rather than hiding the panel as though the vault were off.
@@ -3967,8 +4691,12 @@ async function refreshSaves() {
       return;
     }
     listing = await response.json();
+    if (generation !== savesGeneration || requestedGame !== gameCode) return;
+    if (!response.ok) throw new Error(listing.error ?? 'Could not load vault saves.');
   } catch {
+    if (generation !== savesGeneration || requestedGame !== gameCode) return;
     showSaves(false);
+    el.savesOff.textContent = 'Could not load vault saves. Reopen the Vault to try again.';
     return;
   }
 
@@ -4268,6 +4996,7 @@ async function loadSaveFromVault(save) {
   // game that was loaded when it was shown. That is not the same as a game
   // being loaded *now* — the list survives an eject.
   if (!requireCartridge("load a save state")) return;
+  closeToolSheets();
   say("Fetching save…");
   try {
     const response = await fetchStorage(save.url);
@@ -4569,6 +5298,7 @@ let lastUploadUrl = null;
 el.fileState.addEventListener("change", async (event) => {
   const [file] = event.target.files;
   if (!file) return;
+  closeToolSheets();
   if (!requireCartridge("load a save state")) {
     event.target.value = "";
     return;
@@ -4611,9 +5341,11 @@ el.play.addEventListener("click", () => {
   emu.setPaused(!running);
   el.play.textContent = running ? "Pause" : "Resume";
   setLink(running ? "live" : "idle", running ? romName : "paused");
+  if (!running) checkpointRecovery();
 });
 
 el.reset.addEventListener("click", () => {
+  closeToolSheets();
   emu.reset();
   running = true;
   el.play.textContent = "Pause";
@@ -4656,21 +5388,26 @@ el.optVolume.addEventListener("input", () => {
   const volume = Number(el.optVolume.value) / 100;
   if (audio) audio.setVolume(volume);
   remember("volume", el.optVolume.value);
+  syncQuickAudio();
 });
 
 el.optAudio.addEventListener("change", async () => {
+  syncQuickAudio();
   if (!el.optAudio.checked) {
     if (audio) audio.close();
     audio = null;
     return;
   }
   audio = new AudioSink(emu ? emu.sampleRate : 32768);
-  audio.setVolume(Number(el.optVolume.value) / 100);
+  const sink = audio;
+  sink.setVolume(Number(el.optVolume.value) / 100);
   // Browsers only allow this from a user gesture, which the change event is.
-  if (!(await audio.resume())) {
+  if (!(await sink.resume()) && audio === sink) {
     say("The browser blocked audio. Click the page and try again.", "bad");
     el.optAudio.checked = false;
     audio = null;
+    sink.close();
+    syncQuickAudio();
   }
 });
 
@@ -4725,6 +5462,79 @@ window.addEventListener("drop", async (event) => {
 /** How many manifest addons loaded at boot, for the devtools handle. */
 let manifestsInstalled = 0;
 let addonUser = null;
+let playInstalledAddons = [];
+let playAddonBusy = false;
+
+// Use the same account-scoped preferences as the catalog, without navigating
+// away from the game or giving community content access to executable code.
+function renderPlayAddons() {
+  const list = $('play-addon-list');
+  const focused = document.activeElement?.dataset.addonToggle;
+  list.replaceChildren();
+  const owner = addonUser;
+  function row(key, name, description, enabled, available, change) {
+    const label = document.createElement('label');
+    label.className = 'addon-switch';
+    const text = document.createElement('span');
+    const title = document.createElement('strong'); title.textContent = name;
+    const note = document.createElement('small'); note.textContent = description;
+    text.append(title, note);
+    const input = document.createElement('input');
+    input.type = 'checkbox'; input.checked = enabled;
+    input.dataset.addonToggle = key;
+    input.disabled = !available || playAddonBusy;
+    input.addEventListener('change', async () => {
+      if (owner?.id !== addonUser?.id) { renderPlayAddons(); return; }
+      const next = input.checked;
+      playAddonBusy = true;
+      for (const toggle of list.querySelectorAll('input')) toggle.disabled = true;
+      $('play-addon-message').textContent = '';
+      try {
+        await change(next);
+        if (owner?.id !== addonUser?.id) return;
+        await installManifests();
+        addonChannel?.postMessage({ type: 'changed' });
+      } catch (error) {
+        if (owner?.id === addonUser?.id) $('play-addon-message').textContent = error.message;
+      } finally {
+        playAddonBusy = false;
+        renderPlayAddons();
+        if ($('addon-menu').matches(':popover-open')) {
+          [...list.querySelectorAll('input')].find(toggle => toggle.dataset.addonToggle === key)?.focus({ preventScroll: true });
+        }
+      }
+    });
+    label.append(text, input); list.append(label);
+  }
+  for (const panel of vaultPanels()) {
+    row(`panel:${panel.id}`, panel.name, panel.note,
+      !hiddenPanels(owner).includes(panel.id), true, enabled => {
+        const next = new Set(hiddenPanels(owner));
+        if (enabled) next.delete(panel.id); else next.add(panel.id);
+        saveHiddenPanels(owner, [...next]);
+        applyVaultPanels();
+      });
+  }
+  const disabled = disabledBuiltins(owner);
+  for (const info of emu?.snapshot().builtin_addons ?? []) {
+    row(`builtin:${info.addon_id}`, info.display_name, 'Built-in', !disabled.includes(info.addon_id), true, enabled => {
+      const next = new Set(disabledBuiltins(owner));
+      if (enabled) next.delete(info.addon_id); else next.add(info.addon_id);
+      saveDisabledBuiltins(owner, [...next]);
+    });
+  }
+  for (const item of playInstalledAddons) {
+    row(`installed:${item.id}`, item.name, item.available ? `Installed · release ${item.release}` : 'Unavailable',
+      item.enabled, item.available, enabled => addonApi(`/${item.id}/installation`, 'PUT', { release: item.release, enabled }));
+  }
+  for (const item of localAddons(owner)) {
+    row(`local:${item.manifest.addon_id}`, item.manifest.display_name, 'Local', item.enabled, true, enabled => {
+      saveLocalAddons(owner, localAddons(owner).map(other => other.manifest.addon_id === item.manifest.addon_id ? { ...other, enabled } : other));
+    });
+  }
+  if (!list.childElementCount) list.textContent = emu ? 'No add-ons installed.' : 'Loading add-ons…';
+  if (focused) [...list.querySelectorAll('input')].find(input => input.dataset.addonToggle === focused)?.focus({ preventScroll: true });
+}
 let addonGeneration = 0;
 let activeManifests = [];
 let addonChannel;
@@ -4768,6 +5578,7 @@ async function installManifests() {
     applyBuiltinPreferences();
     const result = addonUser ? await addonApi('/installed') : { installed: [] };
     if (generation !== addonGeneration) return;
+    playInstalledAddons = result.installed;
     const manifests = enabledManifests(result.installed, localAddons(addonUser));
     const installed = emu.installManifests(manifests);
     activeManifests = manifests;
@@ -4775,6 +5586,8 @@ async function installManifests() {
     const snapshot = emu.snapshot();
     renderSnapshot(snapshot);
     paintAddonStatus(snapshot);
+    $('play-addon-message').textContent = '';
+    if ($('addon-menu').matches(':popover-open')) renderPlayAddons();
   } catch (error) {
     if (generation === addonGeneration) {
       if (error.status === 401 || error.status === 409) {
@@ -4782,6 +5595,7 @@ async function installManifests() {
         accounts?.refresh();
       }
       $('addon-runtime-status').textContent = `Add-ons: ${error.message}`;
+      $('play-addon-message').textContent = `Could not refresh add-ons: ${error.message}`;
     }
   }
 }

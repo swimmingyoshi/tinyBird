@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "game": { "code": "TBST", "revision": 2 },
+  "fields": [
+    { "name": "player.hp", "address": 33554433, "width": 2 }
+  ]
+}

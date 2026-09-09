@@ -1,8 +1,9 @@
 import { api, localAddons, localKey, saveLocalAddons, parseManifest } from '/addon-client.js';
 import { REGIONS, hex, numberValue, readNumber, scanMemory, starterManifest, searchPattern, scanPattern,
-  FIELD_KINDS, fieldSpec, fieldForm, addSection, updateSection, removeSection, moveSection,
+  FIELD_KINDS, GEN3_FIELDS, fieldSpec, fieldForm, addSection, updateSection, removeSection, moveSection,
   addField, updateField, removeField, moveField, setLead, sectionFields, partyTemplate } from '/workshop-model.js';
 import { memorySheet, builtinSheet, describeRead } from '/memory-sheets.js';
+import { mountObservations } from '/workshop-observations.js';
 
 // These tools are first-party panels. Shared add-ons remain read-only data.
 export function mountWorkshop({ root, getEmulator, getUser, preview, installed, focusGame, onPreview = () => {} }) {
@@ -54,7 +55,9 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
           <div class="workshop-grid">
             <div data-address-label><label>Value address<input data-address placeholder="0x02000000" spellcheck="false"></label><button type="button" data-find-address>Find in game</button></div>
             <label data-size-label hidden>Number size<select data-field-size><option value="u8">8-bit</option><option value="u16" selected>16-bit</option><option value="u32">32-bit</option></select></label>
+            <label data-gen3-label hidden>Which part of the record<select data-gen3-field></select></label>
             <div data-max-label hidden><label>Maximum address<input data-max placeholder="0x02000002" spellcheck="false"></label><button type="button" data-find-max>Find maximum</button></div>
+            <label data-cap-label hidden>Bar out of<input data-cap type="number" min="1" placeholder="leave blank for no bar"></label>
             <label data-length-label hidden>Length in bytes<input data-text-length type="number" min="1" max="64" value="16"></label>
             <label data-literal-label hidden>Fixed text<input data-literal maxlength="256" placeholder="Shown as-is"></label>
           </div>
@@ -75,10 +78,12 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
             <p data-search-error role="alert"></p><p data-count role="status">Enter a value to start searching.</p><div class="workshop-results" data-results></div>
           </section>
           <div class="workshop-field-live"><span class="workshop-eyebrow">LIVE VALUE</span><output data-field-live>Choose an address to test this field.</output></div>
+          <button type="button" data-use-observation>Use this address for automation</button>
           <details data-notes><summary>Discovery notes <span class="workshop-muted">optional</span></summary><label>How you verified this value<input data-field-note maxlength="256" placeholder="What it means and when it is valid"></label></details>
           <p data-field-error role="alert"></p>
           <div class="workshop-editor-actions"><button type="button" data-add>Add to reader</button><button type="button" data-add-another>Add &amp; next field</button></div>
         </section>
+        <div data-observation-workspace></div>
         <details class="workshop-advanced" data-advanced><summary>Advanced tools</summary>
           <details class="workshop-diagnostics"><summary>Reader value details</summary><div class="workshop-preview" data-preview>Load a game and add a field to begin.</div></details>
           <label>Reader JSON<textarea data-json rows="12" spellcheck="false"></textarea></label><button type="button" data-apply>Apply JSON</button><a href="/reader-guide" target="_blank" rel="noopener">Format guide</a>
@@ -100,6 +105,15 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
     </dialog>
 `;
   const $ = name => root.querySelector(`[data-${name}]`);
+  const observations = mountObservations({ root: $('observation-workspace'), getEmulator, getUser });
+  $('use-observation').addEventListener('click', () => act(() => {
+    requireGame();
+    const kind = $('field-type').value;
+    const type = kind === 'bar' ? $('field-size').value : kind;
+    const width = { u8: 1, u16: 2, u32: 4 }[type];
+    if (!width) throw new Error('Automation observations currently support plain unsigned numbers and bar values.');
+    observations.useAddress(numberValue($('address').value, 'u32'), width);
+  }));
   const node = (tag, text) => { const el = document.createElement(tag); el.textContent = text; return el; };
   let owner, draft = null, previous = null, candidates = null, scanKey = '', gameKey = '', lastFrame = 0, currentEmulator;
   let jsonDirty = false, previewKey = '', lastStored = null;
@@ -107,7 +121,7 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
   let addressTarget = 'address';
   const searches = new Map();
   const finder = $('finder');
-  const formKeys = ['label', 'field-type', 'address', 'max', 'field-size', 'text-length', 'literal', 'field-note', 'target'];
+  const formKeys = ['label', 'field-type', 'address', 'max', 'field-size', 'gen3-field', 'cap', 'text-length', 'literal', 'field-note', 'target'];
   const rawForm = () => Object.fromEntries(formKeys.map(key => [key, $(key).value]));
   const formChanged = () => !$('field-editor').hidden && JSON.stringify(rawForm()) !== formBaseline;
   const tell = text => { ($('finish-dialog').open ? $('finish-message') : $('message')).textContent = text; };
@@ -645,11 +659,28 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
   }));
   $('field-type').value = 'u16';
 
+  $('gen3-field').replaceChildren(...Object.entries(GEN3_FIELDS).map(([value, spec]) => {
+    const option = node('option', spec.label);
+    option.value = value;
+    return option;
+  }));
+  // Picking "IV — Attack" should not also mean looking up that IVs stop at 31.
+  // Changing the field offers its usual ceiling; clearing the box opts out.
+  $('gen3-field').addEventListener('change', () => {
+    const cap = GEN3_FIELDS[$('gen3-field').value]?.cap;
+    $('cap').value = cap ? String(cap) : '';
+    fieldControls();
+    // `input` fires on a select before `change`, so the sample taken by the
+    // shared listener above used the previous ceiling. Take another.
+    sampleField();
+  });
+
   const TYPE_HELP = {
     bar: 'Two addresses: the value now, and the maximum it is out of. The reader draws a bar and colours it — green, amber, then red as it empties.',
     text: 'Plain ASCII. Most games store menus this way; Pokémon names do not.',
     gen3_text: 'Generation 3 stores names in an alphabet of its own, so a plain text read gives punctuation. This applies the right table. A nickname sits 8 bytes into a party record.',
     gen3_species: 'Species is encrypted and shuffled inside the record, so point this at the START of the 100-byte record, not at a species field. The reader decrypts it and names it from the cartridge.',
+    gen3: 'Moves, EVs, IVs, nature and the rest live in an encrypted block that is shuffled differently for every Pokémon, so you pick the part by name rather than by address. Point this at the START of the 100-byte record. Moves and held items are named from the cartridge; EVs and IVs come with their usual ceiling filled in, so they draw a bar.',
     literal: 'A fixed word. Useful as a heading when the game stores no name.',
     index: 'Which entry this is, counting from one. Only means anything in a repeating category.',
   };
@@ -661,6 +692,8 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
     $('address-label').hidden = !spec.address;
     $('size-label').hidden = !spec.size;
     $('max-label').hidden = !spec.max;
+    $('gen3-label').hidden = !spec.gen3;
+    $('cap-label').hidden = !spec.cap;
     $('length-label').hidden = !spec.length;
     $('literal-label').hidden = kind !== 'literal';
     if (!spec.address || (addressTarget === 'max' && !spec.max)) finder.hidden = true;
@@ -685,6 +718,8 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
       length: Number($('text-length').value),
       address: spec.address ? numberValue($('address').value, 'u32') : 0,
       max: spec.max ? numberValue($('max').value, 'u32') : null,
+      gen3Field: $('gen3-field').value,
+      cap: spec.cap && $('cap').value.trim() ? Number($('cap').value) : null,
     };
   }
 
@@ -696,6 +731,8 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
     $('field-size').value = form.size;
     $('text-length').value = String(form.length);
     $('literal').value = form.literal;
+    $('gen3-field').value = form.gen3Field ?? 'species';
+    $('cap').value = form.cap ? String(form.cap) : '';
     $('field-note').value = form.hint;
     fieldControls();
   }
@@ -731,7 +768,7 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
     checkJson(); requireSettledField();
     const base = ensureDraft();
     if (!base.sections.length) setDraft(addSection(base, { title: 'Stats' }));
-    fillForm({ label: '', kind: 'u16', address: 0, max: null, size: 'u16', length: 16, literal: '', hint: '' });
+    fillForm({ label: '', kind: 'u16', address: 0, max: null, size: 'u16', length: 16, literal: '', hint: '', gen3Field: 'species', cap: null });
     if (section !== null) $('target').value = String(section);
     showEditor(); formBaseline = JSON.stringify(rawForm()); persist(); sampleField(); $('label').focus();
   }
@@ -865,6 +902,7 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
   }));
   function tick() {
     try {
+      observations.update();
       if (owner !== (getUser()?.id ?? null)) accountChanged();
       if (!root.open || document.hidden || root.closest('[data-addon-view]')?.hidden) return;
       synchronize();

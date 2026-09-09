@@ -12,6 +12,25 @@
   --dim: #7c8aa3;
   --bad: #e55a5a;
 
+  /* The playroom wears a slightly lighter, cooler set of the same roles. They
+     live here, with the rest of the palette, so a theme has one place to write
+     to; theme.js overwrites every one of these on <html>. Named defaults also
+     mean /play still looks right with scripting off. */
+  --play-shell: #111923;
+  --play-rule: #26313e;
+  --play-ink: #edf2f8;
+  --play-dim: #9ba9bc;
+  --play-accent: #b9eed4;
+  --play-sunk: #0b131d;
+  --play-raise: #1c2935;
+  --play-line: #35414e;
+
+  /* How much of the ground shows through. Separate on purpose: panels carry
+     text and want to stay readable, the picture carries none and can go much
+     further. Both start opaque, so neither does anything until asked. */
+  --panel-alpha: 100%;
+  --screen-alpha: 100%;
+
   /* Type --------------------------------------------------------------- */
   --display: "Silkscreen", "Courier New", monospace;
   --body: "IBM Plex Mono", ui-monospace, "Consolas", monospace;
@@ -25,6 +44,46 @@
 
 * {
   box-sizing: border-box;
+}
+
+/* The custom background.
+ *
+ * The picture gets two fixed layers of its own rather than going on an
+ * element, because both of the controls over it are things an element cannot
+ * do to itself: `filter: blur()` on a background would blur the text sitting
+ * on it, and lowering opacity would fade every panel with it. A layer to blur
+ * and a layer to dim keeps both away from the content.
+ *
+ * Painting the ground on <html> as well is what stops the browser propagating
+ * body's background up to the canvas, which would otherwise cover the picture. */
+:root[data-bg="on"] {
+  background: var(--void);
+}
+
+:root[data-bg="on"] body {
+  background: transparent;
+}
+
+:root[data-bg="on"] body::before,
+:root[data-bg="on"] body::after {
+  content: "";
+  position: fixed;
+  z-index: -1;
+  pointer-events: none;
+}
+
+:root[data-bg="on"] body::before {
+  /* Bled well past the viewport: a blur has nothing to sample beyond its own
+     box, so an inset of 0 would fade to transparent along all four edges. */
+  inset: calc(var(--bg-blur, 0px) * -3);
+  background: var(--bg-image) center / cover no-repeat;
+  filter: blur(var(--bg-blur, 0px));
+}
+
+:root[data-bg="on"] body::after {
+  inset: 0;
+  background: var(--void);
+  opacity: var(--bg-dim, 0.45);
 }
 
 /* Any rule that sets `display` beats the `hidden` attribute, and several below
@@ -81,6 +140,7 @@ code {
 /* Chrome ---------------------------------------------------------------- */
 
 .bar {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--gutter);
@@ -176,6 +236,44 @@ code {
 @keyframes pulse {
   50% {
     opacity: 0.25;
+  }
+}
+
+/* The state indicator, centred on the bar and taken out of the flow.
+   It is the one item up here whose text changes length — a ROM name is as long
+   as whatever the file was called, and it swaps to "paused" and back while you
+   play — so in the row it shoved the nav sideways every time a cartridge went
+   in or the game stopped. Out of flow it cannot move anything, and it sits on
+   the bar's true centre whatever it happens to say. Top and bottom pin it to
+   the content row rather than the padding the border hangs off.
+
+   Only where there is a middle to sit in: below this the nav and the account
+   button reach the centre by themselves, so narrow screens keep the ordinary
+   in-flow bar above and nothing overlaps. */
+@media (min-width: 1200px) {
+  .bar__state {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    /* Spans the whole padding box, then gives back exactly the padding the bar
+       is using — which is var(--unit) here, 20px in the playroom and 14px when
+       that narrows. Inheriting it keeps this centred on the content row
+       without this rule having to know any of those numbers. */
+    padding-bottom: inherit;
+    transform: translateX(-50%);
+    max-width: min(320px, 26%);
+  }
+
+  .bar__state .dot {
+    flex: none;
+  }
+
+  /* Truncation belongs on the text, not on the flex row holding it. */
+  #link-label {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 }
 
@@ -946,7 +1044,7 @@ code {
 
 .panel {
   padding: calc(var(--unit) * 2);
-  background: var(--shell);
+  background: color-mix(in srgb, var(--shell) var(--panel-alpha), transparent);
   border: var(--edge);
 }
 
@@ -3217,18 +3315,101 @@ button.card__head:hover .card__title {
 }
 
 /* The way through to tickets, on the contact page. Only drawn when there is
-   something behind it — a key, accounts, and somebody signed in. */
+   something behind it — a key, accounts, and somebody signed in.
+
+   This used to be one amber phrase inside a sentence: "Messages you have
+   already sent, and whatever came back". It said what was behind it and gave
+   no sign that it was the way there — somebody looking for their tickets read
+   a sentence rather than finding a control. So the verb leads, as a key like
+   every other action on the site, and the sentence stays as the thing under it
+   that says what you will find. */
 .contact__tickets {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--unit) calc(var(--unit) * 1.5);
   margin: 0 0 calc(var(--unit) * 2);
-  font-size: 12px;
-  color: var(--dim);
+  padding: var(--unit) calc(var(--unit) * 1.5);
+  border: 1px solid rgba(255, 176, 71, 0.35);
+  border-left: 2px solid var(--amber);
+  background: rgba(255, 176, 71, 0.06);
 }
 
-.contact__tickets a {
+/* Amber, because this is the one thing on the page that leaves it. */
+.contact__tickets-go {
+  border-color: var(--amber);
   color: var(--amber);
+  font-family: var(--display);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.contact__tickets-go:hover {
+  background: var(--amber);
+  color: var(--void);
+}
+
+.contact__tickets-note {
+  flex: 1 1 14ch;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--dim);
+  line-height: 1.5;
+}
+
+/* Account-scoped places, in the account menu.
+
+   Drawn as rows rather than as keys: they are somewhere to go, and a row that
+   names the place with a line under it saying what is there reads as a
+   destination, where a button reads as something that happens now. */
+.account__links {
+  display: grid;
+  gap: 2px;
+  margin-bottom: var(--unit);
+  padding-bottom: var(--unit);
+  border-bottom: var(--edge);
+}
+
+.account__link {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1px var(--unit);
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  color: var(--ink);
+  font-size: 12px;
   text-decoration: none;
 }
 
-.contact__tickets a:hover {
-  text-decoration: underline;
+/* A row with no border and no underline needs something saying it leaves the
+   page. The arrow is that, at rest rather than only on hover. */
+.account__link::after {
+  content: "\2192";
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  color: var(--dim);
+}
+
+.account__link:hover::after,
+.account__link:focus-visible::after {
+  color: var(--amber);
+}
+
+.account__link:hover,
+.account__link:focus-visible {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
+.account__link-note {
+  grid-column: 1;
+  color: var(--dim);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.account__link:hover .account__link-note {
+  color: var(--dim);
 }

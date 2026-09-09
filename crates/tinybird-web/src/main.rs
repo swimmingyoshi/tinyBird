@@ -79,6 +79,7 @@ const PACING_JS: &str = include_str!("assets/pacing.js");
 const LOBBY_JS: &str = include_str!("assets/lobby.js");
 const LINK_JS: &str = include_str!("assets/link.js");
 const CONTROLS_JS: &str = include_str!("assets/controls.js");
+const THEME_JS: &str = include_str!("assets/theme.js");
 const STYLES_CSS: &str = include_str!("assets/styles.css");
 const CONSOLE_CSS: &str = concat!(
     include_str!("assets/console.css"),
@@ -224,6 +225,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/workshop.js", get(|| async { static_text(include_str!("assets/workshop.js"), "text/javascript; charset=utf-8") }))
         .route("/workshop-model.js", get(|| async { static_text(include_str!("assets/workshop-model.js"), "text/javascript; charset=utf-8") }))
+        .route("/workshop-observations.js", get(|| async { static_text(include_str!("assets/workshop-observations.js"), "text/javascript; charset=utf-8") }))
+        .route("/recovery.js", get(|| async { static_text(include_str!("assets/recovery.js"), "text/javascript; charset=utf-8") }))
         .route("/workshop.css", get(|| async { static_text(include_str!("assets/workshop.css"), "text/css; charset=utf-8") }))
         .route(
             "/addon-client.js",
@@ -293,6 +296,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/lobby.js", get(lobby_js))
         .route("/link.js", get(link_js))
         .route("/controls.js", get(controls_js))
+        .route("/theme.js", get(theme_js))
         .route("/console.css", get(console_css))
         .route("/tinybird.wasm", get(wasm_module))
         .route("/bios", get(bios_image))
@@ -612,6 +616,10 @@ async fn pacing_js() -> Response {
 
 async fn controls_js() -> Response {
     static_text(CONTROLS_JS, "application/javascript; charset=utf-8")
+}
+
+async fn theme_js() -> Response {
+    static_text(THEME_JS, "application/javascript; charset=utf-8")
 }
 
 async fn lobby_js() -> Response {
@@ -1227,14 +1235,32 @@ async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderMap) 
     {
         Ok(user) => text(
             StatusCode::OK,
-            serde_json::json!({ "configured": true, "user": user }).to_string(),
+            // `tickets` says whether the support portal has anything behind
+            // it, so the account menu can offer the way to it rather than
+            // linking somewhere that would only apologise. It needs a contact
+            // key to name the project and accounts to have a sender at all;
+            // being signed in is implied by there being a user here.
+            serde_json::json!({
+                "configured": true,
+                "user": user,
+                "tickets": state.contact.is_configured(),
+            })
+            .to_string(),
             "application/json; charset=utf-8",
         ),
         // Not being signed in is an ordinary answer here, not an error: the
         // page needs to know so it can show the sign-in panel.
         Err(AuthError::NoSession) => text(
             StatusCode::OK,
-            serde_json::json!({ "configured": true, "user": null }).to_string(),
+            // Reported signed out as well as signed in: it describes the
+            // server, not the person, and the menu reads it once on load
+            // rather than again on the way through the sign-in form.
+            serde_json::json!({
+                "configured": true,
+                "user": null,
+                "tickets": state.contact.is_configured(),
+            })
+            .to_string(),
             "application/json; charset=utf-8",
         ),
         Err(err) => auth_error(&err),
