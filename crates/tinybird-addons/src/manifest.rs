@@ -1230,35 +1230,35 @@ mod tests {
                 BASE,
                 loaded_record(personality, 0x1234_5678, 21, &[0xCD, 0xFF]),
             );
-            let reader = addon(&format!(
-                r#"{{
+            let reader = addon(
+                r#"{
                   "manifest_version": 2,
                   "addon_id": "custom.detail",
                   "display_name": "Detail",
-                  "matches": {{ "game_code": ["BPRE"], "revision": [0] }},
-                  "sections": [{{
+                  "matches": { "game_code": ["BPRE"], "revision": [0] },
+                  "sections": [{
                     "id": "party", "title": "Party", "kind": "cards",
-                    "repeat": {{ "count": 1, "stride": 100 }},
-                    "card": {{
-                      "title": {{ "gen3": {{ "at": "0x02024284", "field": "species" }} }},
+                    "repeat": { "count": 1, "stride": 100 },
+                    "card": {
+                      "title": { "gen3": { "at": "0x02024284", "field": "species" } },
                       "fields": [
-                        {{ "label": "Move 1", "read": {{ "gen3": {{ "at": "0x02024284", "field": "move1" }} }} }},
-                        {{ "label": "Move 2", "read": {{ "gen3": {{ "at": "0x02024284", "field": "move2" }} }} }},
-                        {{ "label": "PP 1", "read": {{ "gen3": {{ "at": "0x02024284", "field": "pp1" }} }} }},
-                        {{ "label": "HP EV", "read": {{ "gen3": {{ "at": "0x02024284", "field": "ev_hp" }} }},
-                          "max": {{ "const": 252 }} }},
-                        {{ "label": "EV total", "read": {{ "gen3": {{ "at": "0x02024284", "field": "ev_total" }} }},
-                          "max": {{ "const": 510 }} }},
-                        {{ "label": "Atk IV", "read": {{ "gen3": {{ "at": "0x02024284", "field": "iv_attack" }} }},
-                          "max": {{ "const": 31 }} }},
-                        {{ "label": "Nature", "read": {{ "gen3": {{ "at": "0x02024284", "field": "nature" }} }} }},
-                        {{ "label": "Friendship", "read": {{ "gen3": {{ "at": "0x02024284", "field": "friendship" }} }} }},
-                        {{ "label": "Egg", "read": {{ "gen3": {{ "at": "0x02024284", "field": "is_egg" }} }} }}
+                        { "label": "Move 1", "read": { "gen3": { "at": "0x02024284", "field": "move1" } } },
+                        { "label": "Move 2", "read": { "gen3": { "at": "0x02024284", "field": "move2" } } },
+                        { "label": "PP 1", "read": { "gen3": { "at": "0x02024284", "field": "pp1" } } },
+                        { "label": "HP EV", "read": { "gen3": { "at": "0x02024284", "field": "ev_hp" } },
+                          "max": { "const": 252 } },
+                        { "label": "EV total", "read": { "gen3": { "at": "0x02024284", "field": "ev_total" } },
+                          "max": { "const": 510 } },
+                        { "label": "Atk IV", "read": { "gen3": { "at": "0x02024284", "field": "iv_attack" } },
+                          "max": { "const": 31 } },
+                        { "label": "Nature", "read": { "gen3": { "at": "0x02024284", "field": "nature" } } },
+                        { "label": "Friendship", "read": { "gen3": { "at": "0x02024284", "field": "friendship" } } },
+                        { "label": "Egg", "read": { "gen3": { "at": "0x02024284", "field": "is_egg" } } }
                       ]
-                    }}
-                  }}]
-                }}"#
-            ));
+                    }
+                  }]
+                }"#,
+            );
 
             let snapshot = read_of(&reader, &memory).expect("detail should report");
             let AddonSectionContent::Cards(cards) = &snapshot.sections[0].content else {

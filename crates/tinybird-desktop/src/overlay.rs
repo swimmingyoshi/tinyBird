@@ -522,12 +522,11 @@ fn draw_char_scaled(
     bg: u32,
 ) {
     let code = ch as usize;
-    if code < 0x20 || code > 0x7E {
+    if !(0x20..=0x7E).contains(&code) {
         return;
     }
     let glyph = &FONT[code - 0x20];
-    for row in 0..CHAR_H {
-        let byte = glyph[row];
+    for (row, &byte) in glyph.iter().enumerate().take(CHAR_H) {
         for col in 0..CHAR_W {
             let on = (byte >> (7 - col)) & 1 != 0;
             let color = if on { fg } else { bg };
@@ -651,7 +650,7 @@ fn draw_detached_addon_background(
         buf[row_start..row_start + buf_w].fill(row_color);
     }
 
-    let top_band_h = (buf_h / 10).max(12).min(40);
+    let top_band_h = (buf_h / 10).clamp(12, 40);
     for y in 0..top_band_h {
         let band = lerp_color(accent, top, y, top_band_h.saturating_mul(3));
         let row_start = y * buf_w;
@@ -1069,10 +1068,7 @@ pub fn draw_addon_panel(
         has_rich_renderer && expanded && panel_w >= preview_w + 460 && panel_h >= 300;
 
     let (content_x, content_w) = if expanded && !has_rich_renderer {
-        let card_w = panel_w
-            .saturating_sub(32)
-            .min(GENERIC_CONTENT_MAX_W)
-            .max(180);
+        let card_w = panel_w.saturating_sub(32).clamp(180, GENERIC_CONTENT_MAX_W);
         (panel_x + panel_w.saturating_sub(card_w + 16), card_w)
     } else {
         let start = if side_by_side_preview {
@@ -3395,7 +3391,7 @@ pub fn draw_pause_screen(buf: &mut [u32], buf_w: usize, buf_h: usize, screen: Pa
     );
     y += 14;
     let save_line = "States: F5 Save Menu   F8 Load Menu";
-    draw_text_centered(buf, buf_w, buf_h, center_x, y, &save_line, 1, ink, panel_bg);
+    draw_text_centered(buf, buf_w, buf_h, center_x, y, save_line, 1, ink, panel_bg);
     y += 14;
     draw_text_centered(
         buf,

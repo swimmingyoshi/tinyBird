@@ -9,3 +9,6 @@ description = "Shared addon snapshot contracts for tinyBird hosts and tools"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

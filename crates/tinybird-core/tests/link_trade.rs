@@ -294,11 +294,12 @@ fn run_with_jitter(
                 // running until the message reaches it — one way, not a round
                 // trip. Whatever it does in that window is time the two
                 // consoles did not spend together.
-                let lead = if spike_every > 0 && transfers > 0 && transfers % spike_every == 0 {
-                    spike_cycles
-                } else {
-                    delay_cycles
-                };
+                let lead =
+                    if spike_every > 0 && transfers > 0 && transfers.is_multiple_of(spike_every) {
+                        spike_cycles
+                    } else {
+                        delay_cycles
+                    };
                 if lead > 0 {
                     let until = consoles[1].total_cycles + lead;
                     while consoles[1].total_cycles < until && !consoles[1].link_transfer_pending() {
@@ -401,7 +402,7 @@ fn write_film(name: &str, frames: &[Vec<u8>], rows: usize) {
                         let start = y * w * 3;
                         out.extend_from_slice(&frame[start..start + w * 3]);
                     }
-                    None => out.extend(std::iter::repeat(0u8).take(w * 3)),
+                    None => out.extend(std::iter::repeat_n(0u8, w * 3)),
                 }
             }
         }

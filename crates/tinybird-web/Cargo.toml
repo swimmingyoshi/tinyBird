@@ -24,3 +24,6 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 # Splitting a WebSocket into a reader and a writer, so a member can be sent
 # other people's messages while their own are still arriving.
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+[lints]
+workspace = true

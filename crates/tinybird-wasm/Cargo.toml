@@ -20,3 +20,6 @@ serde_json.workspace = true
 # Built with a plain `cargo build --target wasm32-unknown-unknown`; there is no
 # wasm-bindgen step, so the only prerequisite is `rustup target add`.
 target = "wasm32-unknown-unknown"
+
+[lints]
+workspace = true

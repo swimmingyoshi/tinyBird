@@ -256,8 +256,8 @@ impl Background {
         let screen_base = self.control.get_screen_base();
 
         // Calculate initial coordinates using affine transformation
-        let mut x_coord = self.ref_x as i32;
-        let mut y_coord = self.ref_y as i32;
+        let mut x_coord = self.ref_x;
+        let mut y_coord = self.ref_y;
 
         // Advance y coordinate by one scanline
         for _ in 0..y {

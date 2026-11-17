@@ -762,7 +762,7 @@ pub async fn list_shots(config: &MediaConfig, owner: &str) -> ShotsResponse {
         })
         .collect();
 
-    shots.sort_by(|a, b| b.taken_at_ms.cmp(&a.taken_at_ms));
+    shots.sort_by_key(|shot| std::cmp::Reverse(shot.taken_at_ms));
 
     ShotsResponse {
         configured: true,

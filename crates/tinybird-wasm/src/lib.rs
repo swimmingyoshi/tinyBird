@@ -780,9 +780,6 @@ pub extern "C" fn tb_snapshot_len() -> usize {
     unsafe { emulator().map_or(0, |emu| emu.snapshot.len()) }
 }
 
-// -------------------------------------------------------------- save states
-
-/// Serialize a save state. Invalidates [`tb_state_ptr`].
 // ------------------------------------------------------------ battery saves
 //
 // A save state is a photograph of the whole machine; a battery save is what the
@@ -959,7 +956,7 @@ pub extern "C" fn tb_link_connect(id: u32, players: u32) -> i32 {
         let Some(emu) = emulator() else {
             return TB_ERR_NOT_INITIALISED;
         };
-        if players < 2 || players > 4 || id >= players {
+        if !(2..=4).contains(&players) || id >= players {
             return TB_ERR_BAD_ARGUMENT;
         }
         emu.gba.link_connect(id as u8, players as u8);

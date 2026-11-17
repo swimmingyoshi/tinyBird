@@ -107,10 +107,6 @@ fn expect_pass(name: &str) {
     expect_pass_in(name, VERDICT_DEFAULT, false);
 }
 
-fn expect_pass_with(name: &str, use_bios: bool) {
-    expect_pass_in(name, VERDICT_DEFAULT, use_bios);
-}
-
 fn expect_pass_in(name: &str, verdict_reg: usize, use_bios: bool) {
     let verdict = run(name, verdict_reg, use_bios);
     println!("{}", verdict.describe(name));

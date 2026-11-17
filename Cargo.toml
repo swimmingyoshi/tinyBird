@@ -18,6 +18,27 @@ edition = "2021"
 license = "MIT"
 authors = ["tinyBird Team"]
 
+# Clippy is a gate in CI (`-D warnings`), so anything switched off is switched
+# off here, once, with the reason beside it, rather than scattered through the
+# tree as `#[allow]`.
+[workspace.lints.clippy]
+# The scanline and sprite renderers, and the desktop overlay's draw helpers,
+# take a buffer, its dimensions, a position and a palette. Bundling those into
+# a struct per call site would be ceremony, not clarity.
+too_many_arguments = "allow"
+# Dirty-range tuples and the trade harness's closures; naming each would hide
+# what they are.
+type_complexity = "allow"
+# Manifest and addon enums are built a handful of times at load, never in a hot
+# loop, so boxing the large variant buys nothing.
+large_enum_variant = "allow"
+# The Err is an axum `Response`, which is what a handler returns anyway.
+result_large_err = "allow"
+# Tests set up a default machine and then poke the fields under test.
+field_reassign_with_default = "allow"
+# Colours are written 0xAARRGGBB; grouping them in fours splits the channels.
+unusual_byte_groupings = "allow"
+
 [profile.dev]
 opt-level = 2
 

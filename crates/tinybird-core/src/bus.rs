@@ -14,9 +14,9 @@ use std::cell::{Cell, RefCell};
 
 thread_local! {
     /// Current emulator cycle (set by Gba::step for debug watchpoints)
-    pub static DEBUG_CYCLE: Cell<u64> = Cell::new(0);
+    pub static DEBUG_CYCLE: Cell<u64> = const { Cell::new(0) };
     /// Current PC (set by Gba::step for debug watchpoints)
-    pub static DEBUG_PC: Cell<u32> = Cell::new(0);
+    pub static DEBUG_PC: Cell<u32> = const { Cell::new(0) };
 }
 
 /// Bus error types
@@ -128,6 +128,7 @@ pub trait Bus {
     /// opcode, so probing it through the bus reports whatever is latched.
     fn has_real_bios(&self) -> bool;
 
+    /// Read a byte (8-bit) from the bus (does not update open bus value)
     fn read_u8(&self, addr: u32) -> u8;
 
     /// Read a halfword (16-bit) from the bus (does not update open bus value)
@@ -199,6 +200,8 @@ const HLE_STUB_OPCODE: u32 = 0xE12F_FF1E;
 /// A plain SRAM cartridge carries 32 KB, half the window it appears in.
 const SRAM_CHIP_SIZE: usize = 0x8000;
 
+/// The memory bus: BIOS, work RAM, I/O registers, video memory and the
+/// cartridge, behind the address decoding a GBA does.
 #[derive(Clone)]
 pub struct SimpleBus {
     /// BIOS memory (32KB, read-only after boot)
@@ -937,6 +940,8 @@ impl SimpleBus {
         self.audio_io_dirty.is_dirty()
     }
 
+    /// The span of audio registers written since the last call, cleared by
+    /// reading it.
     pub fn take_audio_io_dirty_range(&mut self) -> Option<(usize, usize)> {
         self.audio_io_dirty.take()
     }
@@ -991,7 +996,7 @@ impl SimpleBus {
     #[inline(always)]
     fn mark_dma_dirty(&mut self, offset: usize) {
         // DMA registers occupy I/O offsets 0xB0..=0xDF (all four channels)
-        if offset >= 0xB0 && offset <= 0xDF {
+        if (0xB0..=0xDF).contains(&offset) {
             self.dma_dirty = true;
         }
     }
@@ -1006,7 +1011,7 @@ impl SimpleBus {
     }
 
     fn mark_ppu_io_dirty(&mut self, offset: usize, len: usize) {
-        let start = offset.max(PPU_IO_START);
+        let start = offset;
         let end = offset.saturating_add(len).min(PPU_IO_END);
         if start < end {
             self.ppu_io_dirty
@@ -1168,15 +1173,6 @@ impl SimpleBus {
             0x1_4000
         } else {
             0x1_0000
-        }
-    }
-
-    /// Note where an instruction was fetched from, for BIOS protection.
-    fn note_opcode_fetch(&self, addr: u32, opcode: u32) {
-        let in_bios = addr <= REGION_BIOS_END;
-        self.executing_in_bios.set(in_bios);
-        if in_bios {
-            self.bios_opcode.set(opcode);
         }
     }
 
@@ -1549,7 +1545,7 @@ impl Bus for SimpleBus {
         self.record_cpu_access(addr, AccessWidth::Byte, AccessKind::Data);
         let masked_addr = self.mask_address(addr);
 
-        let value = match addr {
+        match addr {
             REGION_BIOS_START..=REGION_BIOS_END => {
                 let word = self.bios_read_u32(masked_addr);
                 (word >> ((masked_addr & 3) * 8)) as u8
@@ -1577,16 +1573,14 @@ impl Bus for SimpleBus {
                 // Unmapped - open bus behavior
                 ((self.open_bus_value >> 8) & 0xFF) as u8
             }
-        };
-
-        value
+        }
     }
 
     fn read_u16(&self, addr: u32) -> u16 {
         self.record_cpu_access(addr & !1, AccessWidth::Half, AccessKind::Data);
         let masked_addr = self.mask_address(addr) & !1;
 
-        let value = match addr {
+        match addr {
             REGION_BIOS_START..=REGION_BIOS_END => {
                 let word = self.bios_read_u32(masked_addr);
                 (word >> ((masked_addr & 2) * 8)) as u16
@@ -1652,16 +1646,14 @@ impl Bus for SimpleBus {
                 // Unmapped - open bus behavior
                 (self.open_bus_value & 0xFFFF) as u16
             }
-        };
-
-        value
+        }
     }
 
     fn read_u32(&self, addr: u32) -> u32 {
         self.record_cpu_access(addr & !3, AccessWidth::Word, AccessKind::Data);
         let masked_addr = self.mask_address(addr) & !3;
 
-        let value = match addr {
+        match addr {
             REGION_BIOS_START..=REGION_BIOS_END => self.bios_read_u32(masked_addr),
             REGION_EWRAM_START..=REGION_EWRAM_END => {
                 let idx = masked_addr as usize & !3;
@@ -1732,9 +1724,7 @@ impl Bus for SimpleBus {
                 // Unmapped - open bus behavior
                 self.open_bus_value
             }
-        };
-
-        value
+        }
     }
 
     fn read_opcode_u16(&self, addr: u32) -> u16 {
@@ -1876,7 +1866,7 @@ impl Bus for SimpleBus {
         let masked_addr = self.mask_address(addr);
 
         // Debug logging for PPU register writes
-        if debug_config().ppu_debug && addr >= 0x04000000 && addr < 0x04000060 {
+        if debug_config().ppu_debug && (0x04000000..0x04000060).contains(&addr) {
             println!("PPU write: {:08x} = {:02x}", addr, value);
         }
 
@@ -1963,7 +1953,7 @@ impl Bus for SimpleBus {
         let bytes = value.to_le_bytes();
 
         // Trace DMA register writes when TINYBIRD_DMA_DEBUG is set
-        if debug_config().dma_debug && addr >= 0x040000B0 && addr <= 0x040000DE {
+        if debug_config().dma_debug && (0x040000B0..=0x040000DE).contains(&addr) {
             let names = ["SAD_L", "SAD_H", "DAD_L", "DAD_H", "CNT_L", "CNT_H"];
             let ch = ((addr - 0x040000B0) / 12) as usize;
             let reg = (((addr - 0x040000B0) % 12) / 2) as usize;
@@ -2072,7 +2062,7 @@ impl Bus for SimpleBus {
         let bytes = value.to_le_bytes();
 
         // Trace DMA register writes when TINYBIRD_DMA_DEBUG is set
-        if debug_config().dma_debug && addr >= 0x040000B0 && addr <= 0x040000DE {
+        if debug_config().dma_debug && (0x040000B0..=0x040000DE).contains(&addr) {
             eprintln!("DMA u32 write: addr={:08x} val={:08x}", addr, value);
         }
 

@@ -219,11 +219,9 @@ impl Cpu {
             );
         }
         if (cpsr & (1 << 7)) == 0 {
-            let return_addr = if self.registers.is_thumb_mode() {
-                self.pipeline.fetch_addr.wrapping_add(4)
-            } else {
-                self.pipeline.fetch_addr.wrapping_add(4)
-            };
+            // The same in ARM and Thumb state: LR is the next instruction
+            // plus 4, which is what `SUBS PC, LR, #4` undoes on the way out.
+            let return_addr = self.pipeline.fetch_addr.wrapping_add(4);
             self.registers
                 .enter_exception_with_return_addr(CpuMode::IRQ, return_addr);
             self.pipeline.branch_with_mode(0x00000018, false); // IRQ vector

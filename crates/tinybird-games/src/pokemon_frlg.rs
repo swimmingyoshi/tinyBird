@@ -1867,9 +1867,7 @@ fn parse_party_at(
     let mut party = Vec::with_capacity(party_count);
     for slot in 0..party_count {
         let raw = read_party_slot(memory, base + (slot * PARTY_SLOT_SIZE) as u32);
-        let Some(member) = parse_party_member(&raw, slot as u8 + 1) else {
-            return None;
-        };
+        let member = parse_party_member(&raw, slot as u8 + 1)?;
         party.push(member);
     }
 
@@ -2053,13 +2051,12 @@ fn move_slots(moves: [u16; 4], pp: [u8; 4]) -> Vec<FireRedMoveSlot> {
         .iter()
         .zip(pp.iter())
         .enumerate()
-        .filter_map(|(idx, (&move_id, &pp))| {
-            (move_id != 0).then(|| FireRedMoveSlot {
-                slot: idx as u8 + 1,
-                move_id,
-                name: move_display_name(move_id),
-                pp,
-            })
+        .filter(|&(_idx, (&move_id, &_pp))| move_id != 0)
+        .map(|(idx, (&move_id, &pp))| FireRedMoveSlot {
+            slot: idx as u8 + 1,
+            move_id,
+            name: move_display_name(move_id),
+            pp,
         })
         .collect()
 }
@@ -2685,7 +2682,7 @@ mod tests {
             species_name: "Pidgey".to_string(),
             personality: 0,
             ot_id: 0,
-            level: 10 + u8::from(slot),
+            level: 10 + slot,
             current_hp,
             max_hp,
             status: 0,
