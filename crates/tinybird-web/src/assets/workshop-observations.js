@@ -27,7 +27,7 @@ export function matchObservationGame(config, game) {
   if (config.game.code !== (game.game_code ?? game.code) || config.game.revision !== game.revision) throw new Error(`This configuration requires ${config.game.code} revision ${config.game.revision}.`);
 }
 
-export function mountObservations({ root, getEmulator, getUser }) {
+export function mountObservations({ root, getEmulator }) {
   root.innerHTML = `<details class="workshop-observations" data-observations>
     <summary>Automation observations <span data-observation-count>0</span></summary>
     <p>Name memory values for Python experiments. These are separate from your reader's display fields.</p>
@@ -88,7 +88,7 @@ export function mountObservations({ root, getEmulator, getUser }) {
   function update() {
     const emu = getEmulator();
     const nextGame = emu?.hasRom ? emu.snapshot().rom : null;
-    const nextKey = nextGame ? `tinybird:observations:${getUser()?.id ?? 'guest'}:${nextGame.game_code}:${nextGame.revision}` : null;
+    const nextKey = nextGame ? `tinybird:observations:guest:${nextGame.game_code}:${nextGame.revision}` : null;
     const changed = key !== nextKey;
     if (changed) {
       key = nextKey; game = nextGame; fields = []; cancel(); message('');

@@ -29,7 +29,7 @@ for path in files.values():
         raise SystemExit(f'Missing required artifact: {path}. Build the web, runtime and WASM packages first.')
 args.output.mkdir(parents=True, exist_ok=True)
 destination = args.output / f'tinybird-local-{platform.system().lower()}-{platform.machine().lower()}.zip'
-launcher = '@echo off\r\ncd /d "%~dp0"\r\ntinybird-web.exe --mode local --host 127.0.0.1 --port 8877 --wasm tinybird_wasm.wasm --roms roms --bios gba_bios.bin\r\npause\r\n' if suffix else '#!/bin/sh\ncd -- "$(dirname -- "$0")" || exit 1\nexec ./tinybird-web --mode local --host 127.0.0.1 --port 8877 --wasm tinybird_wasm.wasm --roms roms --bios gba_bios.bin\n'
+launcher = '@echo off\r\ncd /d "%~dp0"\r\ntinybird-web.exe --host 127.0.0.1 --port 8877 --wasm tinybird_wasm.wasm --roms roms --bios gba_bios.bin\r\npause\r\n' if suffix else '#!/bin/sh\ncd -- "$(dirname -- "$0")" || exit 1\nexec ./tinybird-web --host 127.0.0.1 --port 8877 --wasm tinybird_wasm.wasm --roms roms --bios gba_bios.bin\n'
 with zipfile.ZipFile(destination, 'w', zipfile.ZIP_DEFLATED) as archive:
     for name, path in files.items():
         archive.write(path, name)

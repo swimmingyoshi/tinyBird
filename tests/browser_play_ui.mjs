@@ -180,11 +180,6 @@ await screenshot("controls-dialog");
 await key("Escape");
 assert.equal(await client.eval('document.querySelector("#controls-sheet").open'), false);
 assert.equal(await mode(), "focus", "Closing a dialog must not also leave Focus");
-await click("#btn-game-menu");
-await click("#btn-lobby");
-assert.equal(await client.eval('document.querySelector("#lobby-sheet").matches(":popover-open")'), true);
-await screenshot("multiplayer-popup");
-await key("Escape");
 await key("Escape");
 assert.equal(await mode(), "desk");
 await click('[data-tool="saves"]');
@@ -201,13 +196,8 @@ for (let attempt = 0; attempt < 100; attempt++) {
 assert.ok(downloaded, "Save to file must still download a state");
 assert.ok((await stat(resolve(downloads, downloaded))).size > 1024);
 await click('[data-play-view-button="cinema"]');
-// Exercise the shared-screen layout without claiming a multiplayer connection.
-await client.eval(`document.querySelector('#lobby-workspace').dataset.view='shared';
-  document.querySelector('#lobby-watch').hidden=false;
-  document.querySelector('#lobby-screen').src=document.querySelector('#canvas').toDataURL(); true`);
 await sleep(100);
-assert.ok(await client.eval('document.querySelector("#lobby-watch").getBoundingClientRect().width > 200'));
-await screenshot("cinema-shared");
+await screenshot("cinema");
 for (const width of [320, 390, 768, 1440]) {
   await client.call("Emulation.setDeviceMetricsOverride", { width, height: 844, deviceScaleFactor: 1, mobile: width < 500 });
   for (const view of ["desk", "focus", "cinema"]) {
@@ -217,12 +207,12 @@ for (const width of [320, 390, 768, 1440]) {
   }
 }
 await client.call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
-await screenshot("mobile-shared");
+await screenshot("mobile");
 await client.call("Page.reload");
 await waitFor(client, "!!window.tinybird?.emu", "reload failed");
 assert.equal(await mode(), "cinema", "View must persist across reload");
 await screenshot("empty-mobile");
-for (const route of ["/", "/info", "/contact", "/support/tickets"]) {
+for (const route of ["/", "/addons"]) {
   for (const width of [320, 390, 768, 1440]) {
     await client.call("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: width < 500 });
     await client.call("Page.navigate", { url: BASE + route });
@@ -233,7 +223,7 @@ for (const route of ["/", "/info", "/contact", "/support/tickets"]) {
     if (width === 390 || width === 1440) await screenshot(`${route.replaceAll('/', '_')}-${width}`);
   }
 }
-console.log("PASS: playback, saves, dialogs, centered views; Home, Info, Contact and Tickets navigation and 320-1440px layouts");
+console.log("PASS: playback, saves, dialogs, centered views; start and add-on page navigation and 320-1440px layouts");
 await fetch(`${client.devtools}/json/close/${client.target}`);
 client.socket.close();
 process.exit(0);

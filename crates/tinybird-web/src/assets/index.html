@@ -5,10 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>tinyBird</title>
     <meta name="color-scheme" content="dark" />
-    <meta
-      name="description"
-      content="A Game Boy Advance emulator that runs on the desktop, in the browser, and as a live stream overlay from one core."
-    />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -25,140 +21,80 @@
           tinyBird
         </a>
         <nav class="bar__nav" aria-label="Main navigation">
-          <a class="is-current" aria-current="page" href="/">Home</a>
+          <a class="is-current" aria-current="page" href="/">Start</a>
           <a href="/play">Play</a>
           <a href="/addons">Add-ons</a>
-          <a href="/info">Info</a>
-          <a href="/contact">Contact</a>
         </nav>
         <p class="bar__state" id="link-state" data-state="idle">
           <span class="dot" aria-hidden="true"></span><span id="link-label">checking</span>
         </p>
-
-        <!-- The account menu, built by account.js and the same on every
-             page. In the bar because it is checked rarely and read never. -->
-        <div class="account" id="account" hidden></div>
       </header>
 
-      <!-- The home page is a landing page and nothing else now. What used to
-           sit here — a live storage read-out, the commands to run it yourself,
-           a contact form — was all real, and all of it was answering a
-           question nobody arriving at the front door had asked yet. Those live
-           on /info and /contact. What is left is one claim, the three places
-           it holds, and the way on. -->
+      <!-- The page a fresh checkout opens on. It answers one question, "is
+           this set up to play?", from what is actually on disk, and points at
+           everything the server offers. -->
       <main class="home">
         <section class="hero">
           <p class="hero__kicker">Game Boy Advance · Rust · WebAssembly</p>
-          <h1 class="hero__title">
-            One GBA core.<br />Three places to run it.
-          </h1>
+          <h1 class="hero__title">tinyBird, running locally.</h1>
           <p class="hero__lede">
-            tinyBird emulates a Game Boy Advance in Rust. The same core drives a
-            desktop app, this page, and the stream overlays — so a game reports
-            the same live data wherever you run it.
+            This server is for building and testing from a checkout. It listens
+            on this machine only and serves the browser player, your ROM folder
+            and BIOS, and the add-on tools.
           </p>
           <p class="hero__actions">
-            <a class="key key--lead" href="/play">Play in this browser</a>
-            <a class="key" href="/info">Where things stand</a>
+            <a class="key key--lead" href="/play">Open the player</a>
+            <a class="key" href="/addons">Add-ons and Workshop</a>
           </p>
         </section>
 
-        <!-- Three surfaces over one core. This was a table, which was the
-             right shape while it was a spec sheet among other spec sheets; on
-             a page that is now only this, three cards give each surface the
-             room to say what it is actually for. -->
+        <section class="panel">
+          <p class="panel__eyebrow">
+            This checkout<span class="panel__note" id="setup-note">checking</span>
+          </p>
+          <p class="panel__lead" id="setup-lead">Reading what is on disk…</p>
+          <dl class="facts" id="setup-facts" hidden>
+            <div><dt>Emulator module</dt><dd id="setup-wasm">—</dd></div>
+            <div><dt>BIOS</dt><dd id="setup-bios">—</dd></div>
+            <div><dt>ROMs</dt><dd id="setup-roms">—</dd></div>
+            <div><dt>Add-ons</dt><dd id="setup-addons">—</dd></div>
+          </dl>
+          <p class="panel__foot" id="setup-fix" hidden></p>
+        </section>
+
         <section class="strip">
-          <h2 class="strip__title">Surfaces</h2>
+          <h2 class="strip__title">Other ways to run the core</h2>
           <div class="tiles">
             <article class="tile tile--go">
               <p class="tile__index" aria-hidden="true">01</p>
-              <h3 class="tile__name">Browser</h3>
-              <p class="tile__spec"><code>WebAssembly · 60 fps</code></p>
-              <p class="tile__body">
-                Play a ROM from your vault, or off your own disk, with nothing
-                to install.
-              </p>
-              <a class="tile__link" href="/play">Open the emulator</a>
-            </article>
-
-            <article class="tile tile--go">
-              <p class="tile__index" aria-hidden="true">02</p>
               <h3 class="tile__name">Desktop</h3>
               <p class="tile__spec"><code>cargo run --release</code></p>
               <p class="tile__body">
-                Full speed, gamepads, save states, and the addon dashboard in a
-                native window.
+                A native window with gamepads, save states and the add-on
+                dashboard.
               </p>
-              <a class="tile__link" href="/info">How to run it</a>
             </article>
-
+            <article class="tile tile--go">
+              <p class="tile__index" aria-hidden="true">02</p>
+              <h3 class="tile__name">Headless</h3>
+              <p class="tile__spec"><code>cargo run -p tinybird-runtime</code></p>
+              <p class="tile__body">
+                JSON lines over stdin and stdout, for scripts, tests and the
+                Python tools in <code>examples/python</code>.
+              </p>
+            </article>
             <article class="tile tile--go">
               <p class="tile__index" aria-hidden="true">03</p>
               <h3 class="tile__name">Overlay</h3>
-              <p class="tile__spec"><code>OBS browser source</code></p>
+              <p class="tile__spec"><code>TINYBIRD_WEB_OVERLAY=1</code></p>
               <p class="tile__body">
-                Live party and encounter data on a stream, read out of the game
-                as it runs.
+                Stream pages that read the desktop app's export. Off unless the
+                server is started with that variable.
               </p>
               <a class="tile__link" href="/overlay/full">Open the overlay</a>
             </article>
           </div>
         </section>
-
-        <!-- Addons: the thing that makes this more than an emulator. -->
-        <section class="strip">
-          <h2 class="strip__title">Game addons</h2>
-          <p class="strip__lede">
-            An addon reads live state out of the running game and publishes it
-            through one schema, so the dashboard, the overlay, and any tool of
-            yours see the same data. They are JSON, not code.
-          </p>
-          <div class="tiles">
-            <article class="tile tile--quiet">
-              <h3 class="tile__name">Pokémon FireRed / LeafGreen</h3>
-              <p class="tile__body">Party, area encounters, active battle.</p>
-            </article>
-            <article class="tile tile--quiet">
-              <h3 class="tile__name">Final Fantasy Tactics Advance</h3>
-              <p class="tile__body">
-                Player name, every unit on the field by name with HP and MP,
-                and which of them are yours.
-              </p>
-            </article>
-            <article class="tile tile--quiet">
-              <h3 class="tile__name">Any other cartridge</h3>
-              <p class="tile__body">
-                Header, region, maker, checksum. This one claims every ROM and
-                runs last, so a game nobody has written an addon for still
-                shows something useful.
-              </p>
-            </article>
-          </div>
-        </section>
-
-        <!-- Signposts. The nav has both, but the nav is four words in a bar;
-             somebody who has read this far deserves to be told what is
-             actually on the other end. -->
-        <nav class="strip">
-          <h2 class="strip__title">More</h2>
-          <div class="tiles tiles--wide">
-            <a class="tile tile--link" href="/info">
-              <h3 class="tile__name">Where things stand</h3>
-              <p class="tile__body">
-                What the emulator does well, what is half-built, and what is
-                knowingly missing — plus this server's own state and the
-                commands to run your own.
-              </p>
-            </a>
-            <a class="tile tile--link" href="/contact" id="signpost-contact" hidden>
-              <h3 class="tile__name">Get in touch</h3>
-              <p class="tile__body">
-                A cartridge that renders wrong, a save that will not load, an
-                addon you want written. It reaches a person.
-              </p>
-            </a>
-          </div>
-        </nav>
       </main>
 
       <footer class="foot">
@@ -167,6 +103,6 @@
       </footer>
     </div>
 
-    <script type="module" src="/home.js"></script>
+    <script type="module" src="/start.js"></script>
   </body>
 </html>

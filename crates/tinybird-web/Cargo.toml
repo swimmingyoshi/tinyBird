@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Local web overlay and API server for tinyBird exports"
+description = "Local web server for the tinyBird browser player, add-on tools and overlay"
 
 [[bin]]
 name = "tinybird-web"
@@ -12,18 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 tinybird-addons.workspace = true
-axum = { workspace = true, features = ["multipart", "ws"] }
-serde.workspace = true
+axum.workspace = true
 serde_json.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+# Fetches species sprites once and caches them on disk; see sprites.rs.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread"] }
-# Session identifiers must be unguessable, so they come from OS entropy rather
-# than a general-purpose PRNG.
-getrandom = "0.2"
-rusqlite = { version = "0.43", features = ["bundled"] }
-# Splitting a WebSocket into a reader and a writer, so a member can be sent
-# other people's messages while their own are still arriving.
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 [lints]
 workspace = true

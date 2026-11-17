@@ -1,36 +1,20 @@
 //! Every page's header links, in the same order.
 //!
-//! Add-ons arrived after the other four pages and was appended to the end of
-//! each nav by hand — except on the add-ons page itself, which was written
-//! fresh with it after Play. So the header moved depending on which page you
-//! were standing on, which is exactly the kind of thing nobody notices while
-//! writing a page and everybody notices while using the site.
+//! The header once moved depending on which page you were standing on, because
+//! a link added later was appended by hand to each copy in a different place:
+//! exactly the kind of thing nobody notices while writing a page and everybody
+//! notices while using it.
 //!
 //! The markup stays hand-written per page, because a nav rendered by script is
 //! a nav that is missing before the script runs. This test is what keeps the
-//! six copies agreeing.
+//! copies agreeing.
 
 use std::path::Path;
 
-/// The order, once. Tickets is a sub-page of Contact and sits beside it; every
-/// other page carries the same five links.
-const ORDER: [(&str, &str); 6] = [
-    ("/", "Home"),
-    ("/play", "Play"),
-    ("/addons", "Add-ons"),
-    ("/info", "Info"),
-    ("/contact", "Contact"),
-    ("/support/tickets", "Tickets"),
-];
+/// The order, once. Every page carries all of them.
+const ORDER: [(&str, &str); 3] = [("/", "Start"), ("/play", "Play"), ("/addons", "Add-ons")];
 
-const PAGES: [&str; 6] = [
-    "index.html",
-    "play.html",
-    "addons.html",
-    "info.html",
-    "contact.html",
-    "tickets.html",
-];
+const PAGES: [&str; 3] = ["index.html", "play.html", "addons.html"];
 
 /// The `href`/text pairs inside the page's `bar__nav`, in document order.
 fn nav_links(html: &str) -> Vec<(String, String)> {
@@ -71,11 +55,8 @@ fn every_page_lists_the_header_links_in_the_same_order() {
         let html = page(name);
         let links = nav_links(&html);
 
-        // A page carries whichever links it always carried — only Tickets is
-        // optional — but never in an order of its own.
         let expected: Vec<(String, String)> = ORDER
             .iter()
-            .filter(|(href, _)| links.iter().any(|(seen, _)| seen == href))
             .map(|(href, text)| (href.to_string(), text.to_string()))
             .collect();
 
@@ -88,14 +69,7 @@ fn every_page_lists_the_header_links_in_the_same_order() {
 
 #[test]
 fn every_page_marks_itself_as_the_current_one() {
-    for (name, current) in PAGES.iter().zip([
-        "/",
-        "/play",
-        "/addons",
-        "/info",
-        "/contact",
-        "/support/tickets",
-    ]) {
+    for (name, current) in PAGES.iter().zip(["/", "/play", "/addons"]) {
         let html = page(name);
         let start = html.find("<nav class=\"bar__nav\"").expect("bar__nav");
         let end = html[start..].find("</nav>").expect("closed") + start;
@@ -130,33 +104,4 @@ fn the_header_never_links_somewhere_that_is_not_routed() {
             );
         }
     }
-}
-
-/// Tickets has to be reachable from somewhere that is not the contact page.
-///
-/// It is the one account-scoped page with no place in the main nav, so before
-/// the account menu carried it the only way in was a sentence halfway down
-/// /contact — which is where the complaint came from.
-#[test]
-fn tickets_are_reachable_from_the_account_menu() {
-    let menu = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/account.js"),
-    )
-    .expect("read account.js");
-    assert!(
-        menu.contains("href=\"/support/tickets\""),
-        "the account menu no longer offers a way to tickets"
-    );
-
-    // And the contact page leads with the verb rather than burying the link
-    // in a sentence about what is behind it.
-    let contact = page("contact.html");
-    let start = contact
-        .find("contact__tickets")
-        .expect("contact tickets block");
-    let block = &contact[start..start + 400];
-    assert!(
-        block.contains("View your tickets"),
-        "the contact page's ticket link no longer says what it does"
-    );
 }

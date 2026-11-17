@@ -1,27 +1,18 @@
 // Wiring for the play page: input, the frame loop, the live read-out, and the
-// vault. Everything that touches WebAssembly memory lives in tinybird.js.
+// local ROM library. Everything that touches WebAssembly memory lives in
+// tinybird.js.
 
 import { AudioSink, EmulatorError, TinyBird } from "/tinybird.js";
-import { mountDeployment } from '/deployment.js';
-mountDeployment();
-import { RECOVERY_INTERVAL, recoveryOwner, observationKey, fingerprint, readRecovery, writeRecovery, validateRecovery } from '/recovery.js';
+import { RECOVERY_INTERVAL, RECOVERY_OWNER, observationKey, fingerprint, readRecovery, writeRecovery, validateRecovery } from '/recovery.js';
 import { validateObservationConfig, matchObservationGame } from '/workshop-observations.js';
 if (window.parent !== window && new URLSearchParams(location.search).get('embed') === 'workshop') {
   document.body.dataset.workshopPlayer = 'true';
   const style = document.createElement('link'); style.rel = 'stylesheet'; style.href = '/workshop-player.css'; document.head.append(style);
 }
-import { api as addonApi, localAddons, enabledManifests, setAddonAccount, disabledBuiltins, saveDisabledBuiltins, saveLocalAddons, hiddenPanels, saveHiddenPanels } from "/addon-client.js";
-import { mountAccount } from "/account.js";
+import { localAddons, enabledManifests, disabledBuiltins, saveDisabledBuiltins, saveLocalAddons, hiddenPanels, saveHiddenPanels } from "/addon-client.js";
 import { ACTIONS, Controls, keyLabel, padLabel } from "/controls.js";
-import {
-  THUMBNAIL_PREFIX_BYTES,
-  gzip,
-  packSave,
-  readBattery,
-  readThumbnail,
-  unpackSave,
-} from "/saveformat.js";
-import { GBA_FRAME_HZ, MAX_CATCHUP_FRAMES, schedule } from "/pacing.js";
+import { unpackSave } from "/saveformat.js";
+import { GBA_FRAME_HZ, schedule } from "/pacing.js";
 import {
   BACKGROUND_LIMIT,
   THEMES,
@@ -38,30 +29,8 @@ import {
   setTheme,
   surfaceSettings,
 } from "/theme.js";
-import {
-  HASH_INTERVAL,
-  delayForRoundTrip,
-  openSession,
-  packState,
-  romFingerprint,
-  unpackState,
-} from "/link.js";
-import {
-  FRAME_INTERVAL_MS,
-  FRAME_QUALITY,
-  LINK_MAX_LEAD,
-  LINK_TICK_TIMEOUT_MS,
-  LINK_TIMEOUT_MS,
-  LobbyConnection,
-  SNAPSHOT_INTERVAL_MS,
-} from "/lobby.js";
 
 const $ = (id) => document.getElementById(id);
-// The initial vault refresh starts before the gallery handlers are registered.
-let galleryShots = [];
-let galleryIndex = 0;
-let shotsGeneration = 0;
-let savesGeneration = 0;
 
 const el = {
   screen: $("screen"),
@@ -90,28 +59,6 @@ const el = {
   optOverlay: $("opt-overlay"),
   optOverlayRow: $("opt-overlay-row"),
   overlayStage: $("overlay-stage"),
-  cloud: $("btn-cloud"),
-  lobbyNote: $("lobby-note"),
-  lobbyOut: $("lobby-out"),
-  lobbyIn: $("lobby-in"),
-  lobbyCode: $("lobby-code"),
-  lobbyRoom: $("lobby-room"),
-  lobbyMembers: $("lobby-members"),
-  lobbyHint: $("lobby-hint"),
-  join: $("btn-join"),
-  host: $("btn-host"),
-  leave: $("btn-leave"),
-  lock: $("btn-lock"),
-  share: $("opt-share"),
-  link: $("opt-link"),
-  linkNote: $("lobby-link-note"),
-  lobbyWorkspace: $("lobby-workspace"),
-  lobbyWatch: $("lobby-watch"),
-  lobbyScreen: $("lobby-screen"),
-  lobbyCaption: $("lobby-caption"),
-  copyCode: $("btn-copy-code"),
-  savesPanel: $("saves-panel"),
-  savesList: $("saves-list"),
   overlayFrame: $("overlay-frame"),
   cart: $("cart"),
   cartPrefix: $("cart-prefix"),
@@ -138,19 +85,8 @@ const el = {
   padStatusText: $("pad-status-text"),
   padStatusPad: $("pad-status-pad"),
   deckHint: $("deck-hint"),
-  savesOff: $("saves-off"),
-  savesPane: $("pane-saves"),
-  shotsList: $("shots-list"),
-  shotsOff: $("shots-off"),
-  vaultModal: $("vault-modal"),
-  shotFull: $("shot-full"),
-  shotWhen: $("shot-when"),
-  shotOpen: $("shot-open"),
   leftPane: $("left-pane"),
   rightPane: $("right-pane"),
-  lobbySheet: $("lobby-sheet"),
-  lobbyOpen: $("btn-lobby"),
-  lobbyBadge: $("lobby-badge"),
 };
 
 const ctx = el.canvas.getContext("2d", { alpha: false });
@@ -261,9 +197,7 @@ function applyInput() {
   const mask = Controls.maskFor(held);
   if (mask !== buttons) {
     buttons = mask;
-    // Linked input belongs to a future frame. Mutating just this console now
-    // would make state hashes depend on when a keyboard event arrived.
-    if (emu && !session) emu.setButtons(buttons);
+    if (emu) emu.setButtons(buttons);
   }
   // The deck button latches and the binding is momentary, so either one alone
   // is enough. Without the latch in this expression, pressing any other key
@@ -920,10 +854,10 @@ el.screen.addEventListener('pointerleave', () => {
 
 // --- appearance ----------------------------------------------------------
 //
-// The theme and the background belong to the device, not the account, so this
-// panel only ever talks to localStorage and IndexedDB. Both are applied by
-// theme.js, which every other page calls too: changing the palette here
-// changes it on Home, Info and the rest as well.
+// The theme and the background belong to the device, so this panel only ever
+// talks to localStorage and IndexedDB. Both are applied by theme.js, which
+// every other page calls too: changing the palette here changes it on the
+// start and add-on pages as well.
 
 const themePick = $('opt-theme');
 const themeSwatches = $('theme-swatches');
@@ -1059,7 +993,6 @@ document.addEventListener("fullscreenchange", () => {
 });
 
 function setFastForward(on) {
-  on = on && !speedUpBlocked();
   if (fastForward === on) return;
   fastForward = on;
   frameClock = 0;
@@ -1067,20 +1000,6 @@ function setFastForward(on) {
   el.ff.setAttribute("aria-pressed", String(on));
 }
 
-function speedUpBlocked() {
-  return Boolean(session || emu?.linkConnected || (el.link.checked && lobby?.connected));
-}
-
-function syncSpeedControls() {
-  const blocked = speedUpBlocked();
-  el.ff.disabled = blocked;
-  el.optSpeed.disabled = blocked;
-  el.ff.title = blocked ? "Fast forward is unavailable while the lobby link cable is on" : "Run the game faster while held or toggled";
-  if (blocked) {
-    ffLatched = false;
-    setFastForward(false);
-  }
-}
 
 el.ff.addEventListener("click", () => {
   ffLatched = !ffLatched;
@@ -1150,16 +1069,7 @@ function runPaced(now, speed) {
       }
     }
   }
-  // A frame can stop part-way through, at a link transfer, so what was asked
-  // for and what was finished are not the same number.
-  lastFinished = emu.frameCount - before;
-  return lastFinished;
-}
-
-/** How many of the frames just asked for actually finished. */
-let lastFinished = 0;
-function framesFinished(asked) {
-  return Math.min(asked, lastFinished);
+  return emu.frameCount - before;
 }
 
 /** Run frames for a slice of wall time rather than to a schedule. */
@@ -1197,55 +1107,13 @@ let unlimitedFrameMs = UNLIMITED_BUDGET_MS;
 
 function tick(now) {
   requestAnimationFrame(tick);
-  syncSpeedControls();
   if (!fastForward || fastForwardSpeed !== 0 || !running) unlimitedLast = 0;
-
-  // Room upkeep first, and outside the check below: watching a room-mate must
-  // keep working while your own game is paused, and somebody who stopped
-  // sharing should stop looking live whether or not you are playing.
-  if (liveSince.size > 0) expireStaleSharers();
 
   if (!emu || !running) {
     // Nothing accrues while paused, so there is nothing to catch up on.
     frameClock = 0;
     return;
   }
-
-  // A lockstep session offers itself as soon as the room and the cartridge
-  // allow. Doing it here rather than only on a membership change covers the
-  // orders that arrive the other way round — a game loaded after the room was
-  // joined, a fingerprint that finished hashing after the roster settled.
-  if (LOCKSTEP && sessionPhase === "off" && lockstepWanted()) offerConsole();
-
-  // The parent decides when a transfer happens, and has to be able to do so
-  // while frozen waiting for the last one — otherwise the first transfer of a
-  // session would be the only one.
-  if (!session) driveLink(now);
-
-  // A link transfer waiting on the network freezes emulated time.
-  //
-  // The cable is the one place where the game's sense of time and the
-  // network's disagree, and they disagree by a lot. A transfer between two
-  // consoles takes about a third of a scanline; a round trip to another player
-  // takes tens of milliseconds, thousands of times longer. Running frames
-  // while we wait would show the game a transfer no cable could have produced,
-  // and link code answers that by deciding the cable came out.
-  //
-  // Freezing spends the latency in wall-clock time instead. The game runs
-  // slower while linked, but every transfer still costs it exactly what the
-  // hardware would, so nothing times out and nothing loses sync. The clock is
-  // reset for the same reason it is when paused: debt accrued while waiting
-  // would be spent racing ahead the moment the data lands.
-  //
-  // Everything below this still runs. The room has to keep being serviced
-  // while the cable waits, because the room is what the cable is waiting on.
-  //
-  // A lockstep session has no such wait: the cable is carried inside this
-  // page, so a transfer costs a function call and there is nothing to freeze
-  // for. What a session waits on instead is the next frame's input, which is
-  // once a frame rather than nine times, and `runLockstep` handles it.
-  const linkWaiting = !session && (sessionPhase === "opening" || emu.linkPending || heldAtBarrier(now));
-  if (linkWaiting) frameClock = 0;
 
   const unlimited = fastForward && fastForwardSpeed === 0;
 
@@ -1254,57 +1122,12 @@ function tick(now) {
   // thing that knows what time it is. Pushed every frame rather than once, so
   // berry growth and the tides in Shoal Cave follow the wall clock rather than
   // however long the emulator happened to be running.
-  //
-  // Except in a lockstep session, where the seed was pushed once when the
-  // session opened and must never be pushed again. Two browsers each reading
-  // their own `Date.now` is precisely the divergence a session exists to
-  // prevent: Emerald reads the cartridge clock, and two consoles told
-  // different times stop agreeing within a frame. The clock then advances from
-  // the cycles the machine actually runs, which is the only sense in which a
-  // linked cartridge clock can be right on both machines at once.
-  if (!session) emu.setWallClock(Date.now() / 1000);
+  emu.setWallClock(Date.now() / 1000);
 
-  // With a cable attached the running is done by the slice pump, so that the
-  // other console never waits a whole frame for an answer. This loop then only
-  // decides how much the pump is allowed to run — and carries on, because
-  // everything below still has to happen while linked. Returning here instead
-  // stopped the battery being flushed, which is not a luxury during a trade:
-  // trading writes to the cartridge.
-  let ran = 0;
-  if (session) {
-    // Every console in this browser, one frame each, cable and all. The only
-    // thing that can stop it is input that has not arrived.
-    ran = runLockstep(now);
-  } else if (emu.linkConnected) {
-    if (!linkWaiting) {
-      const due = schedule(now, frameClock, fastForward ? fastForwardSpeed : 1);
-      frameClock = due.clock;
-      framesOwed = Math.min(framesOwed + due.frames, MAX_CATCHUP_FRAMES);
-    }
-    pumpSlices();
-  } else {
-    ran = linkWaiting
-      ? 0
-      : unlimited
-        ? runUnlimited()
-        : runPaced(now, fastForward ? fastForwardSpeed : 1);
-    framesRun += ran;
-  }
-
-  // A transfer that began inside the frame just run goes out now rather than
-  // a frame later. The core stops the frame the moment one starts, so this is
-  // the first opportunity, and taking it saves another 16ms per transfer.
-  if (ran > 0 && !session) driveLink(now);
-
-  // Count what was run and, on the parent, tell the room.
-  //
-  // Only frames this loop finished: one cut short by a transfer is counted by
-  // `resumeAfterTransfer` when it actually completes, and counting it here as
-  // well would have the parent claim frames it has not run.
-  if (ran > 0 && !session && emu.linkConnected) {
-    linkFrame += framesFinished(ran);
-    if (isParent() && lobby?.connected) lobby.publishLinkTick(linkFrame);
-  }
+  const ran = unlimited
+    ? runUnlimited()
+    : runPaced(now, fastForward ? fastForwardSpeed : 1);
+  framesRun += ran;
 
   // Only draw when something changed; at normal speed most callbacks on a
   // high-refresh display have no new frame to show.
@@ -1321,18 +1144,7 @@ function tick(now) {
     const snapshot = emu.snapshot();
     renderSnapshot(snapshot);
     pushToOverlay(snapshot);
-
-    // And to the room, less often: it crosses a network, and a read-out twice
-    // a second is plenty for "what is everyone playing".
-    if (lobby?.connected && now - lastPublishedAt > SNAPSHOT_INTERVAL_MS) {
-      lastPublishedAt = now;
-      lobby.publish(snapshot);
-    }
   }
-
-  // Sharing runs on its own clock: a picture is worth sending ten times a
-  // second where a read-out is worth two.
-  shareFrame(now);
 
   // Cheap: the flag is a bool, and the copy only happens when the game has
   // actually written to the cartridge.
@@ -1341,23 +1153,13 @@ function tick(now) {
     flushBattery();
   }
 
-  // How fast the cable is actually carrying, alongside the frame rate.
-  if (emu.linkConnected) {
-    if (now - rateWindowStart >= 1000) {
-      linkRate = (linkTally.settled - rateWindowCount) * (1000 / (now - rateWindowStart));
-      rateWindowCount = linkTally.settled;
-      rateWindowStart = now;
-      renderLinkNote();
-    }
-  }
-
   if (now - fpsWindowStart >= 1000) {
     // Emulated frames per second, which is the number that means something.
     // Counting callbacks would just report the monitor's refresh rate.
     const fps = (framesRun * 1000) / (now - fpsWindowStart);
     const speed = fps / GBA_FRAME_HZ;
     el.footPerf.textContent = fastForward
-      ? `${fps.toFixed(1)} fps · ${speed.toFixed(1)}\u00d7`
+      ? `${fps.toFixed(1)} fps · ${speed.toFixed(1)}×`
       : `${fps.toFixed(1)} fps`;
     framesRun = 0;
     fpsWindowStart = now;
@@ -1427,8 +1229,6 @@ function toggleCard(key) {
 // of six is taller than the screen it describes, and being able to put the
 // party on the left and the battle on the right is the difference between
 // reading one at a time and watching both.
-//
-// Vault saves have a fixed card; these slots hold only live add-on sections.
 
 const SIDES = ["left", "right"];
 /** Most panes one column will stack. Two each is four on screen at once. */
@@ -1445,9 +1245,6 @@ const placement = recallPlacement();
  * letterbox.
  */
 const slots = recallSlots();
-/** The count drawn on the Saves tab, which no longer has an element of its own. */
-let savesCount = "";
-let shotsCount = "";
 /** The sections last drawn, so a move can redraw without waiting for a frame. */
 let lastSections = [];
 
@@ -1486,25 +1283,9 @@ function saveSlots() {
 }
 
 function sideOf(id) {
-  // Opponents appear opposite the player party by default, and so do the two
-  // vault panes: the left rail is where a reader's own sections belong.
-  const defaultsRight = id === "enemies" || id === "saves" || id === "shots";
-  return placement[id] ?? (defaultsRight ? "right" : "left");
-}
-
-/**
- * The live node a built-in pane shows, held across renders.
- *
- * These bodies are real elements rather than drawings made from a snapshot, so
- * the reference has to survive being taken out of the document — by the Vault
- * modal borrowing it, or by its own pane being torn down when another tab is
- * picked. Looking it up by id each time would come back null the moment it was
- * out, and the pane would quietly render empty from then on.
- */
-const railNodeCache = new Map();
-function railNode(id) {
-  if (!railNodeCache.has(id)) railNodeCache.set(id, $(id));
-  return railNodeCache.get(id);
+  // Opponents appear opposite the player party by default: the left rail is
+  // where a reader's own sections belong.
+  return placement[id] ?? (id === "enemies" ? "right" : "left");
 }
 
 function moveTo(id, side) {
@@ -1540,39 +1321,9 @@ function closeSlot(side, index) {
   renderRails(lastSections);
 }
 
-/**
- * Everything that can sit in a rail: the addon's sections, then saves.
- *
- * Saves is described the same way a section is, so the rail code never has to
- * know which is which. The only difference is that its body is a node that
- * already exists rather than one built from the snapshot.
- */
+/** Everything that can sit in a rail: the addon's sections. */
 function railItems(sections) {
-  const hidden = hiddenPanels(addonUser);
-  const built = [];
-  // Tabs in the same strip as the reader's own sections rather than cards
-  // stacked above it: three headers down a narrow column cost more room than
-  // the things they were labelling.
-  if (!hidden.includes("saves")) {
-    built.push({
-      id: "saves",
-      title: "Saves",
-      note: savesCount || undefined,
-      sign: `saves|${savesCount}`,
-      node: railNode("pane-saves"),
-    });
-  }
-  if (!hidden.includes("shots")) {
-    built.push({
-      id: "shots",
-      title: "Screenshots",
-      note: shotsCount || undefined,
-      sign: `shots|${shotsCount}`,
-      node: railNode("pane-shots"),
-    });
-  }
-  return [
-    ...sections.map((section) => ({
+  return sections.map((section) => ({
       id: section.section_id,
       title: section.title,
       note: section.note,
@@ -1581,9 +1332,7 @@ function railItems(sections) {
       // numbers again" from "something moved" without rebuilding to find out.
       sign: JSON.stringify(section),
       build: () => renderContent(section),
-    })),
-    ...built,
-  ];
+    }));
 }
 
 /**
@@ -1645,9 +1394,6 @@ function renderWorkshopReadout() {
     workshopReadout.className = 'workshop-readout panel';
     workshopReadout.innerHTML = '<div data-workshop-preview></div>';
     document.querySelector('.transport').before(workshopReadout);
-    // The embedded workshop hides the sidebars; keep the same vault card
-    // available under its player rather than moving saves into a command popup.
-    document.querySelector('.screen-col').append(railNode('pane-saves'));
   }
   const signature = JSON.stringify([workshopDraftPreview, [...openCards]]);
   if (signature === workshopPreviewSignature) return;
@@ -1756,19 +1502,11 @@ function renderSlot(side, index, available, item) {
   const bodySig = `${item.sign}|${openHere}`;
 
   if (cached && cached.chromeSig === chromeSig && cached.bodySig === bodySig) {
-    // A pane that is a node rather than a drawing can have been taken by the
-    // other column since this block was built.
-    if (item.node && !cached.body.contains(item.node) && !vaultHoldsPanes()) {
-      cached.body.append(item.node);
-    }
     return cached.block;
   }
 
   if (cached && cached.chromeSig === chromeSig) {
-    // Same guard: the modal is showing this node, so leave it there and let the
-    // pane fill back in when the modal closes and asks for a redraw.
-    if (item.node && vaultHoldsPanes()) return cached.block;
-    cached.body.replaceChildren(item.node ?? item.build());
+    cached.body.replaceChildren(item.build());
     cached.bodySig = bodySig;
     return cached.block;
   }
@@ -1908,7 +1646,7 @@ function buildSlot(side, index, available, item) {
   } else body.setAttribute('aria-label', item.title);
   // A pane is either built from the snapshot or is a node that already exists.
   // Appending the existing one moves it out of whichever rail last had it.
-  body.append(item.node ?? item.build());
+  body.append(item.build());
   block.append(body);
 
   return { block, body };
@@ -1951,11 +1689,7 @@ function renderSnapshot(snapshot) {
   // The maker code is trivia nobody reads twice, so it rides in the strip's
   // tooltip rather than taking a row of its own.
   el.cart.title = `Maker ${rom.maker_code || "unknown"} \u00b7 ${romName || rom.title || ""}`.trim();
-  if (code && code !== gameCode) {
-    // A different cartridge means a different set of saves.
-    gameCode = code;
-    refreshSaves();
-  }
+  gameCode = code;
   el.cartRev.textContent = String(rom.revision ?? 0);
 
   const addon = snapshot.addon;
@@ -2250,8 +1984,8 @@ function span(className, text) {
 // which is what a game means when it says a slot is corrupt or missing.
 //
 // The browser keeps them per cartridge, so returning to a game finds its save
-// where it left it. They also ride inside every vault save, so restoring a slot
-// restores both halves together.
+// where it left it. They also ride inside the automatic recovery checkpoint,
+// so restoring one restores both halves together.
 
 /** Remember a preference across visits. Failing is not worth interrupting. */
 function remember(key, value) {
@@ -2285,12 +2019,6 @@ function restorePreferences() {
 
   // Explicitly against null: `Number(null)` is 0, not NaN, so treating a
   // missing preference as a number silently starts every visitor muted.
-  el.share.checked = recall("share") === "1";
-  // Off unless asked for: a cable is a thing you agree to, and an unwanted one
-  // costs emulation speed for a game that will never use it.
-  el.link.checked = recall("link") === "1";
-  renderLinkNote();
-
   const stored = recall("volume");
   const volume = stored === null ? NaN : Number(stored);
   if (Number.isFinite(volume) && volume >= 0 && volume <= 100) {
@@ -2315,7 +2043,7 @@ function persistBattery(code, bytes) {
     localStorage.setItem(batteryKey(code), btoa(binary));
   } catch {
     // A full or disabled store is not worth interrupting play for; the save
-    // still lives in the emulator and still goes to the vault.
+    // still lives in the emulator and in the recovery checkpoint.
   }
 }
 
@@ -2358,7 +2086,7 @@ function flushBattery() {
 // --- loading ------------------------------------------------------------
 
 function setControlsEnabled(enabled) {
-  for (const button of [el.play, el.reset, el.eject, el.ff, el.save, el.store, quickScreenshot, el.cloud]) {
+  for (const button of [el.play, el.reset, el.eject, el.ff, el.save, el.store, quickScreenshot]) {
     button.disabled = !enabled;
   }
 
@@ -2398,7 +2126,6 @@ function ejectRom() {
   if (!emu?.hasRom) return;
 
   checkpointRecovery();
-  recoveryGameOwner = null;
   flushBattery();
   emu.eject();
 
@@ -2419,7 +2146,6 @@ function ejectRom() {
   // The same words the bar carries before anything is loaded, because that is
   // the state the machine is now in.
   setLink("idle", "no cartridge");
-  lobby?.setPlaying(null, null);
   say("Cartridge ejected");
 }
 
@@ -2435,24 +2161,9 @@ async function startRom(bytes, name, recovered = null) {
     return;
   }
 
-  // Kept, rather than handed over and forgotten. A lockstep session runs the
-  // other player's console in this browser too, and a console with no
-  // cartridge in it cannot run anything — so when both players are on the same
-  // game, which is every battle and most trades, these are the bytes that go
-  // into the second core. Sixteen megabytes is a lot to hold; fetching the
-  // same file again mid-session, from a vault URL that may have expired, is
-  // worse.
+  // Kept, rather than handed over and forgotten: the automatic checkpoint
+  // stores the cartridge beside the state so it can be restored on its own.
   romBytes = new Uint8Array(bytes.slice(0));
-  recoveryGameOwner = recoveryOwner(addonUser);
-  romHash = "";
-  romFingerprint(romBytes)
-    .then((hash) => {
-      romHash = hash;
-    })
-    .catch(() => {
-      // Without a fingerprint a session cannot prove the two cartridges match,
-      // so it will refuse to start. That is the right failure.
-    });
 
   romName = name;
   running = true;
@@ -2483,8 +2194,7 @@ async function startRom(bytes, name, recovered = null) {
     "good",
   );
 
-  markVaultSelection(name);
-  lobby?.setPlaying(name, gameCode || null);
+  markLibrarySelection(name);
   return true;
 }
 
@@ -2494,32 +2204,10 @@ function formatSize(bytes) {
   return `${bytes} B`;
 }
 
-/**
- * Fetch a storage URL.
- *
- * The CDN sends `Access-Control-Allow-Origin: *`, so the browser reads it
- * directly and the bytes never touch our server. The proxy is kept as a
- * fallback because a CORS regression upstream would otherwise break loading
- * saves and vault ROMs with nothing but "Failed to fetch" to go on.
- */
-async function fetchStorage(url) {
-  if (!/^https?:\/\//i.test(url) || url.startsWith(window.location.origin)) {
-    return fetch(url);
-  }
-
-  try {
-    const direct = await fetch(url);
-    if (direct.ok) return direct;
-  } catch {
-    // Cross-origin failure; fall through to the proxy.
-  }
-  return fetch(`/api/proxy?url=${encodeURIComponent(url)}`);
-}
-
 async function loadFromUrl(url, name) {
   say(`Fetching ${name}…`);
   try {
-    const response = await fetchStorage(url);
+    const response = await fetch(url);
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
     await startRom(await response.arrayBuffer(), name);
   } catch (error) {
@@ -2531,474 +2219,15 @@ async function loadFromFile(file) {
   await startRom(await file.arrayBuffer(), file.name);
 }
 
-// --- lobby --------------------------------------------------------------
+// --- automatic recovery -------------------------------------------------
 //
-// A room is people, not a game. Everyone in it runs their own emulator on their
-// own machine; what travels is the addon snapshot — the same read-out the
-// stream overlay renders — so the panel can say what everyone is playing
-// without anything being emulated on the server.
+// One checkpoint in this browser, written every half minute and when the tab
+// is hidden, so a closed tab or a crash costs at most that much play.
 
-/** The room we are in, or null. */
-let lobby = null;
-/** When a snapshot was last published. */
-let lastPublishedAt = 0;
-/** When a frame was last published. */
-let lastFrameAt = 0;
-/** Who we are watching, or null. */
-let watching = null;
-
-// --- the link cable -------------------------------------------------------
-//
-// One console is the parent and the rest are children, exactly as on hardware.
-// The parent decides when a transfer happens; every console contributes one
-// halfword; everybody ends up holding all four.
-//
-// Over a cable that costs a third of a scanline. Over a network it costs a
-// round trip, which is why `tick` refuses to run frames while one is in
-// flight: emulated time must not advance across the wait, or the game sees a
-// transfer no cable could have produced and concludes the link is broken.
-
-/** Which transfer we are on. The parent owns this number. */
-let linkSeq = 0;
-/** `idle`, or `collecting` while the parent waits for the other consoles. */
-let linkPhase = "idle";
-/** Halfwords that have arrived for the transfer being collected, by member. */
-let linkAnswers = new Map();
-/** When the parent gives up waiting and transfers without the stragglers. */
-let linkDeadline = 0;
-/** When a child gives up on a transfer that never arrived. */
-let childDeadline = 0;
-/** The transfer a child has joined, so a late or repeated result is ignored. */
-let childSeq = -1;
-/** The cable as it currently stands, as "seat/players", or "none". */
-let cableShape = "none";
-/** Core cycle count at the start of the current linked frame. */
-let linkFrameCycle = 0;
-
-// --- the frame barrier ----------------------------------------------------
-//
-// Relaying halfwords is not on its own enough to keep two consoles together.
-// Each browser has its own frame clock, and between transfers a child runs
-// freely while the parent is stopped waiting for it — so the child gains most
-// of a frame on every transfer and the two drift apart. Pokémon exchanges a
-// halfword every frame; a handshake is dozens of them, and by the end the two
-// games are nowhere near each other. That is what "if one side is a little
-// late, the game can wait forever" looks like from the inside.
-//
-// The parent is the clock. It is already held back by every transfer, because
-// it cannot finish a frame until the children have answered, so only the
-// children need restraining. One small message a frame does it, and costs no
-// round trip of its own: the parent says how far it has got, and a child never
-// runs past that.
-
-/** Frames run since the cable was plugged in. */
-let linkFrame = 0;
-/** How far the parent says it has got. Children only. */
-let grantedFrame = 0;
-/** When the parent's clock was last heard from. */
-let lastTickAt = 0;
-
-// --- running a frame in slices --------------------------------------------
-//
-// JavaScript is single-threaded, so a message that arrives while a whole frame
-// is being run waits for the end of it. A frame costs about fourteen
-// milliseconds on this emulator, and a game trading Pokémon asks for a
-// transfer roughly every two, so the answer was always late: measured round
-// trips were 12.8ms on a machine talking to itself, where a socket should
-// manage under one.
-//
-// So while a cable is attached the frame is run in slices with a yield
-// between them, and the socket gets serviced in the gaps. Unlinked play keeps
-// the plain synchronous path, which is proven and has nothing to gain here.
-
-/**
- * Instructions per slice.
- *
- * Measured across a range, by round trip and by transfers a second:
- *
- * ```text
- *  2000   1.0ms   246/s
- *  4000   1.0ms   242/s
- *  8000   2.5ms   198/s
- * 16000   3.1ms   109/s
- * ```
- *
- * Below about four thousand the round trip stops improving — the benchmark
- * runs out of transfers to ask for before the pump runs out of speed — so this
- * takes the largest slice that still answers in a millisecond, which is half
- * the yields of the alternative for the same result.
- */
-const SLICE_STEPS = 4000;
-/** Small slices keep catch-up from running past the parent's transfer point. */
-const LINK_CATCHUP_STEPS = 256;
-/** A malformed or incompatible clock message must not lock the page. */
-// Joining browsers do not attach on the same animation frame. A slower child
-// can be tens of frames behind before FireRed begins its first transfer, so the
-// bound must cover startup skew as well as an ordinary network hop. At 256
-// instructions per slice this covers roughly a second of emulated frames, while
-// still bounding a corrupt clock message.
-const LINK_CATCHUP_MAX_SLICES = 65536;
-
-/** Frames owed to the pacing clock but not yet run. */
-let framesOwed = 0;
-/** Whether the slice pump is already going round. */
-let pumping = false;
-
-/**
- * Hand control back to the event loop for the shortest time possible.
- *
- * `setTimeout` is clamped to about four milliseconds once nested, which would
- * cost more than it saves. A message channel posts back on the next macrotask
- * without that floor.
- */
-const yieldToEvents = (() => {
-  const channel = new MessageChannel();
-  let waiting = null;
-  channel.port1.onmessage = () => {
-    const resume = waiting;
-    waiting = null;
-    resume?.();
-  };
-  return () =>
-    new Promise((resume) => {
-      waiting = resume;
-      channel.port2.postMessage(0);
-    });
-})();
-
-/** Run the frames the clock has allowed, a slice at a time. */
-async function pumpSlices() {
-  // A lockstep session owns emulated time completely. A frame run from here
-  // would be a frame the other browser did not run, which is a desync — and
-  // one that would not show up until a state hash caught it seconds later.
-  if (session) return;
-  if (pumping) return;
-  pumping = true;
-  try {
-    while (framesOwed > 0) {
-      // Everything that stops a frame being run at all, re-checked every time
-      // round: the cable can come out and a transfer can begin mid-frame.
-      if (!emu || !running || !emu.linkConnected) break;
-      if (emu.linkPending || heldAtBarrier(performance.now())) break;
-
-      if (emu.runSlice(SLICE_STEPS)) {
-        framesOwed -= 1;
-        framesRun += 1;
-        linkFrame += 1;
-        linkFrameCycle = emu.cycleCount;
-        if (isParent() && lobby?.connected) lobby.publishLinkTick(linkFrame);
-        if (audio && audio.ready && !fastForward) audio.push(emu.takeAudio());
-        present();
-      } else if (emu.linkPending) {
-        // The slice stopped for a transfer rather than running out of steps.
-        // Announcing it here is the whole point of slicing.
-        driveLink(performance.now());
-      }
-
-      await yieldToEvents();
-    }
-  } finally {
-    pumping = false;
-  }
-}
-
-/**
- * A tally of what the cable has done, for when a game says the link broke.
- *
- * None of this is on screen. It is here because a link failure looks identical
- * from the outside whatever caused it, and the difference between "the other
- * console never answered", "we ran out of time waiting", and "data arrived for
- * a transfer we were not in" is the whole diagnosis. Readable in devtools as
- * `tinybird.link`.
- */
-const linkTally = {
-  started: 0,
-  answered: 0,
-  settled: 0,
-  timedOut: 0,
-  couldNotJoin: 0,
-  /** Transfers a console bowed out of, saying so rather than going quiet. */
-  skipped: 0,
-  refusedDelivery: 0,
-  abandoned: 0,
-  /** Frames carried on part-way through, rather than waiting for the next. */
-  resumed: 0,
-  /** Of those, the ones that stopped at yet another transfer. */
-  resumedIntoAnother: 0,
-  /** Milliseconds a transfer takes to come back, averaged and at worst. */
-  roundTripMs: 0,
-  worstRoundTripMs: 0,
-};
-
-/** When the parent asked, so the answer can be timed. */
-let askedAt = 0;
-/** Transfers a second, over a rolling window. */
-let linkRate = 0;
-let rateWindowStart = 0;
-let rateWindowCount = 0;
-
-/**
- * The last few exchanges, newest last, as "parent/child" hex.
- *
- * A stalled link looks the same from outside whichever console went quiet.
- * Seeing what actually crossed the wire says which: a console that has stopped
- * taking part sends the same value forever, or `ffff`, while the other keeps
- * changing.
- */
-const linkRecent = [];
-const LINK_RECENT_KEPT = 12;
-
-/** This console's seat on the cable, or null if it has none. */
-function mySeat() {
-  const me = lobby?.members.find((member) => member.id === lobby.you);
-  return me?.seat ?? null;
-}
-
-/** Whether this console is the one that clocks the cable. */
-function isParent() {
-  return mySeat() === 0;
-}
-
-/** Everyone on the cable, including us. */
-function seatedMembers() {
-  return (lobby?.members ?? []).filter((member) => member.seat !== undefined && member.seat !== null);
-}
-
-/**
- * Plug into the cable, or unplug, to match the room and the toggle.
- *
- * Called whenever the membership or the toggle changes. Attaching a cable
- * makes the core watch its serial registers on every instruction, so a room
- * you joined only to watch someone should not be paying for one.
- */
-function reseatCable() {
-  if (!emu) return;
-  if (LOCKSTEP) {
-    reseatLockstep();
-    return;
-  }
-
-  const seated = seatedMembers();
-  const seat = mySeat();
-  // The number of seats, not the number of people: somebody leaving seat 1 of
-  // three leaves a gap, and the gap still reads as an absent console.
-  const players = seated.length ? Math.max(...seated.map((m) => m.seat)) + 1 : 0;
-  const canLink = el.link.checked && lobby?.connected && players >= 2 && seat !== null;
-
-  // A member list arrives every time anyone loads a game or changes what they
-  // are playing, not only when somebody joins or leaves. Re-seating on all of
-  // them tore down a cable that had not changed and abandoned whatever
-  // transfer was on it, which is what made the link work only after being
-  // switched off and on again.
-  const shape = canLink ? `${seat}/${players}` : "none";
-  if (shape !== cableShape) {
-    cableShape = shape;
-    if (canLink) {
-      emu.linkConnect(seat, players);
-      linkFrameCycle = emu.cycleCount;
-    } else {
-      emu.linkDisconnect();
-      linkFrameCycle = 0;
-    }
-    linkPhase = "idle";
-    childSeq = -1;
-    // A new cable is a new clock; counting on from the old one would leave a
-    // child holding a barrier that the parent has never heard of.
-    linkFrame = 0;
-    grantedFrame = 0;
-    lastTickAt = 0;
-  }
-
-  renderLinkNote();
-}
-
-/**
- * Say what the cable is doing, because none of it is otherwise visible.
- *
- * Once it is carrying traffic this turns into a read-out. A link that fails
- * looks the same from the outside whatever went wrong, and the numbers that
- * tell the causes apart — how fast the other console answers, how many
- * transfers were lost and how — are otherwise only reachable from devtools,
- * which is no use to somebody in the middle of a trade.
- */
-function renderLinkNote() {
-  syncSpeedControls();
-  if (!el.linkNote) return;
-  paintLobbyBadge();
-  $("btn-link-retry").hidden = sessionPhase !== "failed";
-  el.linkNote.dataset.tone = "";
-  if (!el.link.checked) {
-    el.linkNote.textContent = "Off. Games will not see each other.";
-    return;
-  }
-  if (!lobby?.connected) {
-    el.linkNote.textContent = "On. Start or join a room to link.";
-    return;
-  }
-
-  // A lockstep session reports something different from a relay, because the
-  // numbers that matter are different. There is no round trip per transfer to
-  // report and no lost transfers to count; what can go wrong is that a frame's
-  // input did not arrive, so that is what is shown.
-  if (LOCKSTEP) {
-    el.linkNote.dataset.tone = sessionPhase === "failed" ? "bad" : "";
-    if (sessionPhase === "failed") {
-      el.linkNote.textContent = `Link stopped: ${sessionNote}`;
-      return;
-    }
-    if (!session) {
-      el.linkNote.textContent =
-        sessionPhase === "opening"
-          ? "Starting both consoles…"
-          : sessionPhase === "offering"
-            ? "Offering this console…"
-            : !emu?.hasRom
-              ? "Load your game first, then enable the cable on both screens."
-              : "Waiting for Player 2. Both players must load a game and enable Link cable.";
-      return;
-    }
-    el.linkNote.textContent = waitingSince > 0 && performance.now() - waitingSince > 750
-      ? `Player ${session.mySeat + 1}: Waiting for the other player. Keep both game tabs open and running.`
-      : `Connected: Player ${session.mySeat + 1} of ${session.players}. Open the multiplayer area in both games.`;
-    return;
-  }
-
-  if (!emu?.linkConnected) {
-    el.linkNote.textContent = "Waiting for a second console.";
-    return;
-  }
-
-  const seat = mySeat();
-  const who =
-    seat === 0
-      ? `Player 1 of ${seatedMembers().length}, driving the cable`
-      : `Player ${seat + 1} of ${seatedMembers().length}`;
-  const transport = lobby?.linkTransport === "local" ? " · direct" : "";
-
-  // Nothing has crossed yet: the games are linked but not talking.
-  if (linkTally.settled === 0) {
-    el.linkNote.textContent = `${who}${transport}. No transfers yet.`;
-    return;
-  }
-
-  const rate = Math.round(linkRate);
-
-  // Only the parent asks, so only the parent can time the answer. Showing a
-  // child a round trip of zero would be inventing a number.
-  const trip = seat === 0 ? ` · ${linkTally.roundTripMs.toFixed(1)}ms` : "";
-  const trouble = describeLinkLoss();
-  el.linkNote.textContent = `${who} · ${rate}/s${trip}${transport}${trouble}`;
-  // A link that is losing transfers is the thing worth noticing, so it is the
-  // one state that changes colour.
-  el.linkNote.dataset.tone = trouble ? "bad" : "";
-}
-
-/**
- * What is going wrong with the cable, not just how much.
- *
- * A bare count of lost transfers says a link is unhappy and nothing about why,
- * and the four ways it can go wrong want four different fixes. Naming the one
- * that dominates turns "12 lost" into a direction to look in — which is the
- * difference between a bug report and a diagnosis.
- */
-function describeLinkLoss() {
-  const causes = [
-    // A console asked to join a transfer it could not reach: it was ahead of
-    // the parent, or too far behind to catch up. A synchronisation problem.
-    [linkTally.couldNotJoin + linkTally.skipped, "out of step"],
-    // Nobody answered in time. The network, or a console that stopped running.
-    [linkTally.timedOut, "no answer"],
-    // Data arrived at a console that was not waiting for it.
-    [linkTally.refusedDelivery, "arrived late"],
-    // A wait given up on, usually because the room went away.
-    [linkTally.abandoned, "given up"],
-  ];
-
-  const lost = causes.reduce((total, [count]) => total + count, 0);
-  if (lost === 0) return "";
-
-  const [, worst] = causes.reduce((a, b) => (b[0] > a[0] ? b : a));
-  return ` · ${lost} lost, mostly ${worst}`;
-}
-
-// --- lockstep -------------------------------------------------------------
-//
-// The relay above is kept because it is proven and because `?relay=1` is a way
-// back if this turns out to have a hole in it. It is not the default and
-// should not be: it cannot reach full speed, for reasons `link.js` sets out at
-// length. Everything below runs every console in this browser and puts only
-// input on the wire.
-
-/**
- * Match the session to the room, tearing the old one down if the room changed.
- *
- * A session is built from a fixed list of seats and a state each of them
- * started from, so a seat appearing or leaving is a different session rather
- * than an adjustment to this one. The replacement is offered on the next tick;
- * doing it here would race the membership update that caused it.
- */
-function reseatLockstep() {
-  const want = lockstepWanted();
-  const shape = want
-    ? seatedMembers()
-        .sort((a, b) => a.seat - b.seat)
-        .map((member) => member.id)
-        .join(",")
-    : "none";
-
-  if (shape !== cableShape) {
-    cableShape = shape;
-    endSession();
-  }
-  renderLinkNote();
-}
-
-/** Put the relay's cable away, so two cables are never on one console. */
-function stopRelayCable() {
-  if (emu?.linkConnected) emu.linkDisconnect();
-  linkPhase = "idle";
-  childSeq = -1;
-  linkFrame = 0;
-  grantedFrame = 0;
-  lastTickAt = 0;
-  linkFrameCycle = 0;
-}
-
-/** Whether to run linked play in lockstep rather than by relaying halfwords. */
-const LOCKSTEP = new URLSearchParams(window.location.search).get("relay") !== "1";
-
-/** The live session, or null. */
-let session = null;
-let sessionGeneration = 0;
-let openingSessionId = "";
-let pendingInputs = [];
-/** `off`, `offering`, `opening`, `live` or `failed`. */
-let sessionPhase = "off";
-/** Why the last session stopped, for the read-out. */
-let sessionNote = "";
-/** What every seated console published about itself, by member id. */
-const hellos = new Map();
-let helloReannounced = false;
-/**
- * Which console each member is, by member id.
- *
- * The room's own seat numbers are not used directly: a room may leave a gap —
- * somebody in seat 2 with seat 1 empty — and a cable may not, so a session
- * compacts them and this is the mapping it settled on.
- */
-let sessionSeats = new Map();
-
-/** Which console a member is in the running session, or null. */
-function seatOf(id) {
-  const seat = sessionSeats.get(id);
-  return seat === undefined ? null : seat;
-}
-/** The cartridge in the machine, and its fingerprint. */
+/** The cartridge in the machine. */
 let romBytes = null;
-let romHash = "";
-/** The BIOS, so a second console can be given the same one. */
+/** The BIOS, which a checkpoint records so it is restored against the same one. */
 let biosBytes = null;
-let recoveryGameOwner = null;
 let recoveryGeneration = 0;
 let recoveryRestoring = false;
 let recoveryPending = 0;
@@ -3006,13 +2235,13 @@ let recoveryErrorShown = false;
 
 async function refreshRecovery() {
   const generation = ++recoveryGeneration;
-  const owner = recoveryOwner(addonUser);
+  const owner = RECOVERY_OWNER;
   $('recovery-card').hidden = true;
   $('recovery-name').textContent = '';
   $('recovery-image').removeAttribute('src');
   try {
     const record = await readRecovery(owner);
-    if (generation !== recoveryGeneration || owner !== recoveryOwner(addonUser)) return;
+    if (generation !== recoveryGeneration) return;
     if (!record) return;
     $('recovery-name').textContent = record.name;
     $('recovery-time').textContent = `Last played ${new Date(record.savedAt).toLocaleString()} · automatic checkpoint`;
@@ -3026,9 +2255,8 @@ async function refreshRecovery() {
 // Copy the machine synchronously, before a switch/eject can replace it. Hashing
 // and the atomic IndexedDB write can then finish without blocking emulation.
 async function checkpointRecovery() {
-  if (!emu?.hasRom || !romBytes || recoveryRestoring || recoveryGameOwner !== recoveryOwner(addonUser)
-      || emu.linkConnected || session || sessionPhase !== 'off') return;
-  const owner = recoveryGameOwner;
+  if (!emu?.hasRom || !romBytes || recoveryRestoring) return;
+  const owner = RECOVERY_OWNER;
   recoveryPending++;
   try {
     const game = emu.snapshot().rom;
@@ -3042,28 +2270,24 @@ async function checkpointRecovery() {
       version: 1, savedAt: Date.now(), name: romName, game,
       state: emu.saveState(), battery: emu.hasBattery ? emu.batterySave() : null,
       image: frameCanvas.toDataURL('image/png'),
-      context: { placement: { ...placement }, slots: structuredClone(slots), splits: Object.fromEntries(SIDES.map(side => [side, Number(recall(`split-${side}`)) || 50])), hidden: hiddenPanels(addonUser), observations },
+      context: { placement: { ...placement }, slots: structuredClone(slots), splits: Object.fromEntries(SIDES.map(side => [side, Number(recall(`split-${side}`)) || 50])), hidden: hiddenPanels(), observations },
     };
     const bios = biosBytes;
     [record.romHash, record.stateHash, record.biosHash] = await Promise.all([fingerprint(rom), fingerprint(record.state), bios ? fingerprint(bios) : null]);
     await writeRecovery(owner, record, rom);
-    if (owner === recoveryOwner(addonUser)) {
-      $('recovery-status').textContent = 'Automatic recovery stays in this browser. Named saves are in the Vault.';
-      recoveryErrorShown = false;
-      await refreshRecovery();
-    }
+    $('recovery-status').textContent = 'Automatic recovery stays in this browser.';
+    recoveryErrorShown = false;
+    await refreshRecovery();
   } catch (error) {
-    if (owner === recoveryOwner(addonUser)) {
-      $('recovery-status').textContent = `Could not save recovery: ${error.message}`;
-      if (!recoveryErrorShown) say('Automatic recovery could not be saved. You can still save to file or the Vault.', 'bad');
-      recoveryErrorShown = true;
-    }
+    $('recovery-status').textContent = `Could not save recovery: ${error.message}`;
+    if (!recoveryErrorShown) say('Automatic recovery could not be saved. You can still save to a file.', 'bad');
+    recoveryErrorShown = true;
   } finally { recoveryPending--; }
 }
 
 $('continue-playing').addEventListener('click', async () => {
   if (recoveryRestoring || !emu || emu.hasRom) return;
-  const owner = recoveryOwner(addonUser);
+  const owner = RECOVERY_OWNER;
   recoveryRestoring = true;
   $('continue-playing').disabled = true;
   try {
@@ -3084,8 +2308,8 @@ $('continue-playing').addEventListener('click', async () => {
     candidate.setPaused(false);
     candidate.setButtons(0);
     candidate.installManifests(activeManifests);
-    candidate.setDisabledBuiltins(disabledBuiltins(addonUser));
-    if (owner !== recoveryOwner(addonUser) || emu.hasRom) throw new Error('The account or game changed. Choose Continue playing again.');
+    candidate.setDisabledBuiltins(disabledBuiltins());
+    if (emu.hasRom) throw new Error('A game was loaded meanwhile. Eject it and choose Continue playing again.');
     for (const key of Object.keys(placement)) delete placement[key];
     Object.assign(placement, Object.fromEntries(Object.entries(context.placement).filter(([, side]) => SIDES.includes(side))));
     for (const side of SIDES) slots[side] = (context.slots[side] ?? []).filter(id => typeof id === 'string').slice(0, MAX_SLOTS);
@@ -3101,7 +2325,7 @@ $('continue-playing').addEventListener('click', async () => {
       }
     }
     remember('placement', JSON.stringify(placement)); saveSlots();
-    saveHiddenPanels(addonUser, context.hidden);
+    saveHiddenPanels(Array.isArray(context.hidden) ? context.hidden : []);
     let configSaved = true;
     try {
       const key = observationKey(owner, record.game);
@@ -3109,7 +2333,6 @@ $('continue-playing').addEventListener('click', async () => {
       else localStorage.removeItem(key);
     } catch { configSaved = false; }
     await startRom(record.rom, record.name, candidate);
-    applyVaultPanels();
     frameClock = 0;
     present();
     flushBattery();
@@ -3126,1032 +2349,6 @@ $('continue-playing').addEventListener('click', async () => {
 setInterval(() => { if (running && !recoveryPending) checkpointRecovery(); }, RECOVERY_INTERVAL);
 document.addEventListener('visibilitychange', () => { if (document.hidden) checkpointRecovery(); });
 window.addEventListener('pagehide', () => { checkpointRecovery(); flushBattery(); });
-/** Consoles built for other players' seats, reused across sessions. */
-const peerConsoles = new Map();
-/** The session this browser has asked the room to open, before it opened. */
-let begunSession = "";
-/** When our own hello went out, so the echo measures the trip to the server. */
-let helloSentAt = 0;
-/** Round trip to the relay, in milliseconds. Decides the input delay. */
-let relayRoundTripMs = 60;
-/** Frames the session wanted to run but could not, for want of input. */
-let stalledFrames = 0;
-let waitingSince = 0;
-/** Library listing, fetched once when a session needs somebody else's game. */
-let libraryCache = null;
-
-/** Whether a lockstep session should be running, given the room and the toggle. */
-function lockstepWanted() {
-  if (!LOCKSTEP || !emu?.hasRom || !el.link.checked) return false;
-  if (!lobby?.connected) return false;
-  const seated = seatedMembers();
-  return seated.length >= 2 && mySeat() !== null;
-}
-
-/**
- * Offer this console to the room, so a session can be built from it.
- *
- * What is offered is a save state, not a battery save. A battery save would
- * mean resetting to the title screen to start a link, which is not what a cable
- * does; a state means both players carry on from where they are. It costs a
- * few hundred kilobytes once, against nothing per frame afterwards.
- *
- * The state is also what makes determinism achievable at all: every browser
- * restores every console from the same bytes, so the two start from a position
- * they provably agree on rather than from two independently-arrived-at guesses.
- */
-async function offerConsole() {
-  // Only from a standing start. A failed session stays failed until the room
-  // changes: retrying a link that just corrupted itself, once a frame, is how
-  // a bad state becomes an unusable page.
-  if (sessionPhase !== "off") return;
-  if (!lockstepWanted() || !romHash) return;
-
-  sessionPhase = "offering";
-  sessionNote = "";
-  renderLinkNote();
-
-  const generation = sessionGeneration;
-  try {
-    const state = await packState(emu.saveState());
-    if (generation !== sessionGeneration || !lockstepWanted()) return;
-    helloSentAt = performance.now();
-    lobby.publishLinkHello({
-      seat: mySeat(),
-      romHash,
-      romName,
-      gameCode,
-      state,
-    });
-  } catch (error) {
-    if (generation === sessionGeneration) failSession(`could not offer this console: ${error.message}`);
-  }
-}
-
-/**
- * Take somebody's offer, and open a session once every seat has made one.
- *
- * Only the parent decides when. Everyone else waits to be told, which is what
- * makes the terms — the seed, the delay, the order of seats — the same set of
- * terms on every machine rather than three machines' opinions.
- */
-function acceptHello(from, message) {
-  if (!lockstepWanted()) return;
-  if (sessionPhase === "failed" && from !== lobby.you) endSession();
-  hellos.set(from, message);
-
-  // The other player may enable the cable long after our first offer.
-  // Repeat it once when both offers are present, before the parent begins.
-  const ownHello = hellos.get(lobby.you);
-  if (sessionPhase === "offering" && ownHello && hellos.size > 1 && !helloReannounced) {
-    helloReannounced = true;
-    lobby.publishLinkHello({
-      seat: ownHello.seat, romHash: ownHello.rom_hash,
-      romName: ownHello.rom_name, gameCode: ownHello.game_code, state: ownHello.state,
-    });
-  }
-
-  if (from === lobby.you && helloSentAt) {
-    // Our own hello coming back has been to the server and returned, which is
-    // the round trip the input delay has to cover. Measuring it here costs no
-    // message of its own.
-    relayRoundTripMs = performance.now() - helloSentAt;
-    helloSentAt = 0;
-  }
-
-  if (!isParent() || sessionPhase === "live" || sessionPhase === "opening") return;
-
-  const seated = seatedMembers().sort((a, b) => a.seat - b.seat);
-  if (seated.length < 2 || !seated.every((member) => hellos.has(member.id))) return;
-
-  // Asking is remembered separately from having opened, because between the
-  // two there is a round trip. A fourth player's hello arriving inside it
-  // would otherwise ask a second time, and the room would be told to open two
-  // sessions whose order nobody agrees on.
-  if (begunSession) return;
-  begunSession = `${lobby.you}:${Date.now().toString(36)}`;
-
-  lobby.publishLinkBegin({
-    session: begunSession,
-    // The cartridge clock every console starts from. Whole seconds, because
-    // that is the resolution the chip has, and one number rather than each
-    // browser's own `Date.now`, which is the whole point.
-    seed: Math.floor(Date.now() / 1000),
-    delay: delayForRoundTrip(relayRoundTripMs + 20),
-    // Seat order, compacted. A room can leave a gap — somebody in seat 2 with
-    // seat 1 empty — and a cable cannot, so the console a player sits in is
-    // their position in this list.
-    seats: seated.map((member) => member.id),
-  });
-}
-
-/** Open the session the parent has described. */
-async function beginSession(message) {
-  if (sessionPhase === "live" || sessionPhase === "opening") return;
-  if (!lockstepWanted()) return;
-
-  const ids = Array.isArray(message.seats) ? message.seats : [];
-  const mine = ids.indexOf(lobby.you);
-  if (mine < 0) return;
-
-  const entries = [];
-  for (let seat = 0; seat < ids.length; seat += 1) {
-    const hello = hellos.get(ids[seat]);
-    if (!hello) {
-      failSession("a player did not say what they were running");
-      return;
-    }
-    entries.push({
-      seat,
-      id: ids[seat],
-      romHash: hello.rom_hash,
-      romName: hello.rom_name,
-      gameCode: hello.game_code,
-      packed: hello.state,
-    });
-  }
-
-  const generation = sessionGeneration;
-  openingSessionId = message.session;
-  pendingInputs = [];
-  sessionPhase = "opening";
-  sessionNote = "";
-  sessionSeats = new Map(ids.map((id, seat) => [id, seat]));
-  renderLinkNote();
-
-  try {
-    // The relay's cable must come out first. Both would otherwise be attached
-    // to the same console, and the relay's timeouts would abandon transfers
-    // the session had already carried.
-    stopRelayCable();
-
-    for (const entry of entries) entry.state = await unpackState(entry.packed);
-
-    const opened = await openSession({
-      id: message.session,
-      seats: entries,
-      mySeat: mine,
-      localEmu: emu,
-      delay: Math.min(12, Math.max(2, Number(message.delay) || 3)),
-      seed: Number(message.seed) || Math.floor(Date.now() / 1000),
-      bios: biosBytes,
-      makeConsole: () => spareConsole(entries.length),
-      resolveRom: resolvePeerRom,
-      isCurrent: () => generation === sessionGeneration,
-    });
-
-    if (generation !== sessionGeneration) return;
-    session = opened;
-    for (const input of pendingInputs) {
-      if (!session.acceptInput(input.seat, input.frame, input.keys)) {
-        throw new Error("The other player got too far ahead during setup. Reconnect the cable.");
-      }
-    }
-    pendingInputs = [];
-    openingSessionId = "";
-    sessionPhase = "live";
-    stalledFrames = 0;
-    waitingSince = 0;
-    framesOwed = 0;
-    frameClock = 0;
-    running = true;
-    say(`Link connected. You are Player ${mine + 1}. Open the multiplayer area in both games.`);
-  } catch (error) {
-    if (generation === sessionGeneration) failSession(error.message);
-  } finally {
-    renderLinkNote();
-  }
-}
-
-/**
- * A second emulator for somebody else's seat.
- *
- * The module is instantiated again rather than the core being taught about
- * multiple machines. Each instantiation gets its own linear memory, so the
- * `static mut EMULATOR` inside is a singleton per instance and two of them do
- * not see each other — which is exactly the isolation two consoles want, for
- * no Rust at all.
- */
-async function spareConsole(players) {
-  for (const [seat, core] of peerConsoles) {
-    if (seat < players) {
-      peerConsoles.delete(seat);
-      return core;
-    }
-  }
-  return TinyBird.load();
-}
-
-/**
- * Find the cartridge a seat needs.
- *
- * The common case is that it is the one already in the machine: two people
- * battling, or trading between two copies of the same game. Beyond that we can
- * only offer what this browser already has — ROMs are not relayed, so a link
- * between two different games needs both games on both machines.
- */
-async function resolvePeerRom(entry) {
-  if (entry.romHash === romHash && romBytes) return romBytes;
-
-  if (libraryCache === null) {
-    const [vault, local] = await Promise.all([fetchVault(), fetchLocal()]);
-    libraryCache = [...vault.assets, ...local];
-  }
-
-  const named = libraryCache.filter((asset) => asset.name === entry.romName);
-  for (const asset of named) {
-    try {
-      const response = await fetchStorage(asset.url);
-      if (!response.ok) continue;
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if ((await romFingerprint(bytes)) === entry.romHash) return bytes;
-    } catch {
-      // Try the next candidate rather than failing the whole session on one
-      // unreachable vault entry.
-    }
-  }
-
-  throw new Error(
-    `this link needs ${entry.romName || "another cartridge"}, which is not in this browser`,
-  );
-}
-
-/** Stop the session, saying why. */
-function failSession(reason) {
-  if (openingSessionId && lobby?.connected) lobby.publishLinkBye(openingSessionId);
-  sessionGeneration += 1;
-  openingSessionId = "";
-  pendingInputs = [];
-  if (session) {
-    if (lobby?.connected) lobby.publishLinkBye(session.id);
-    for (let seat = 0; seat < session.consoles.length; seat += 1) {
-      if (seat !== session.mySeat) peerConsoles.set(seat, session.consoles[seat]);
-    }
-  }
-  session?.detach();
-  session = null;
-  sessionPhase = "failed";
-  sessionNote = reason;
-  hellos.clear();
-  helloReannounced = false;
-  begunSession = "";
-  say(`Link stopped: ${reason}`, "bad");
-  renderLinkNote();
-}
-
-/** Take the session down without calling it a failure. */
-function endSession() {
-  if (openingSessionId && lobby?.connected) lobby.publishLinkBye(openingSessionId);
-  sessionGeneration += 1;
-  openingSessionId = "";
-  pendingInputs = [];
-  if (session) {
-    if (lobby?.connected) lobby.publishLinkBye(session.id);
-    // Kept for the next session. Instantiating the module means fetching and
-    // compiling it again, which is a visible pause, and a room's membership
-    // changes every time anybody loads a game.
-    for (let seat = 0; seat < session.consoles.length; seat += 1) {
-      if (seat !== session.mySeat) peerConsoles.set(seat, session.consoles[seat]);
-    }
-    session.detach();
-  }
-  session = null;
-  sessionPhase = "off";
-  sessionNote = "";
-  hellos.clear();
-  helloReannounced = false;
-  begunSession = "";
-}
-
-/** Publish this player's mask for a frame far enough ahead to arrive in time. */
-function publishInput() {
-  const at = session.pushLocal(buttons);
-  if (at !== null) lobby.publishLinkInput(session.id, at, buttons);
-}
-
-/**
- * Run the session for this animation frame.
- *
- * Where the relay stalls nine times a frame — once per transfer — this stalls
- * at most once, and only when a message for the next frame has not arrived
- * yet. Everything else, the whole cable included, happens here without leaving
- * the page.
- */
-function runLockstep(now) {
-  const due = schedule(now, frameClock, 1);
-  frameClock = due.clock;
-  framesOwed = Math.min(framesOwed + due.frames, MAX_CATCHUP_FRAMES);
-
-  publishInput();
-
-  let ran = 0;
-  while (framesOwed > 0) {
-    if (!session.ready) {
-      // The next frame is waiting on somebody else. Debt accrued while waiting
-      // would be spent racing ahead the moment it lands, so it is dropped —
-      // the same rule the unlinked loop uses when the page was paused.
-      stalledFrames += 1;
-      if (!waitingSince) waitingSince = now;
-      framesOwed = 0;
-      frameClock = 0;
-      break;
-    }
-
-    if (!session.runFrame()) {
-      failSession("a frame could not be completed");
-      return 0;
-    }
-
-    waitingSince = 0;
-    framesOwed -= 1;
-    framesRun += 1;
-    ran += 1;
-    publishInput();
-
-    if (audio && audio.ready) audio.push(session.local.takeAudio());
-    // The other consoles produce sound too, into a buffer nobody empties.
-    // Emptying it is what keeps that from growing for the length of a session.
-    for (let seat = 0; seat < session.consoles.length; seat += 1) {
-      if (seat !== session.mySeat) session.consoles[seat].takeAudio();
-    }
-
-    if (session.hashDue) {
-      const value = session.hash();
-      lobby.publishLinkHash(session.id, session.frame, value);
-      if (session.recordHash(session.frame, value) !== null) {
-        failSession("the two consoles computed different states");
-        return ran;
-      }
-    }
-  }
-
-  // Drawing is the caller's, which already knows to do it only when something
-  // changed.
-  return ran;
-}
-
-/**
- * Carry a transfer, if the parent has one to carry.
- *
- * Only the parent does anything here. A child answers when it is asked, which
- * arrives as a message rather than on the frame clock.
- */
-function driveLink(now) {
-  // A transfer that cannot possibly be answered — the cable came out, or the
-  // room went away — has to be let go of, or this console never runs again.
-  if (!emu?.linkConnected || !lobby?.connected) {
-    if (emu?.linkPending && emu.linkAbandon()) linkTally.abandoned++;
-    return;
-  }
-
-  if (!isParent()) {
-    // A child waits for data it has been promised, and that wait is what keeps
-    // it in step. If the promise is not kept it has to give up rather than sit
-    // there: the parent has a deadline, and until this was added a child had
-    // none at all, so one lost message stopped its game for good.
-    if (emu.linkPending && now >= childDeadline && emu.linkAbandon()) {
-      linkTally.abandoned++;
-    }
-    return;
-  }
-
-  if (linkPhase === "idle" && emu.linkPending) {
-    linkSeq = (linkSeq + 1) & 0xffff;
-    linkPhase = "collecting";
-    linkAnswers = new Map([[lobby.you, emu.linkSendValue]]);
-    linkDeadline = now + LINK_TIMEOUT_MS;
-    askedAt = now;
-    linkTally.started++;
-    const offset = Math.max(0, Math.floor(emu.cycleCount - linkFrameCycle));
-    lobby.publishLinkStart(linkSeq, linkFrame, offset);
-    return;
-  }
-
-  if (linkPhase !== "collecting") return;
-
-  // Going ahead without a straggler is not a failure mode, it is the one the
-  // hardware has: a console that does not answer reads as absent, and the
-  // game's own link code already knows what to do about that. Waiting forever
-  // instead would hang a game that a player simply closed the tab on.
-  if (everyoneAnswered()) {
-    settleLink();
-  } else if (now >= linkDeadline) {
-    linkTally.timedOut++;
-    settleLink();
-  }
-}
-
-/**
- * Carry on through a frame that a transfer interrupted.
- *
- * The core stops a frame the instant a transfer begins, so a frame containing
- * several transfers needs several resumes before it is finished. Pokémon asks
- * for about seven a frame during a trade — four hundred a second — and waiting
- * for the next animation frame between each capped the link at one per display
- * frame, about sixty. Eight times too slow, and what the game makes of that is
- * a black screen and "Communication error".
- *
- * This is not extra emulated time. The console stopped part-way through a
- * frame the pacing had already allowed; this finishes that same frame. The
- * rate is bounded by the network round trip, because each resume can only
- * happen once the previous transfer's data has come back.
- */
-function resumeAfterTransfer() {
-  if (!emu?.linkConnected || !running) return;
-  linkTally.resumed++;
-  // The pump does the running; this only wakes it. It stopped because a
-  // transfer was outstanding, and that transfer has just landed.
-  pumpSlices();
-}
-
-/**
- * Bring a child to the instruction-time at which the parent started a transfer.
- *
- * The parent resumes as soon as it has collected the previous halfword, while
- * the child receives that result one network hop later. Without this catch-up,
- * the next start can make the child answer with the previous protocol value.
- * FireRed tolerates a few milliseconds of that skew, then reports a link error
- * immediately after the two confirmation prompts.
- */
-function catchUpToLinkStart(targetFrame, targetOffset) {
-  // Relay-only, like everything it runs. In a session the two consoles are
-  // already at the same instruction, because they are both in this browser.
-  if (session) return false;
-  const frame = Number(targetFrame);
-  const offset = Number(targetOffset);
-  if (!Number.isSafeInteger(frame) || !Number.isSafeInteger(offset) || frame < 0 || offset < 0) {
-    return false;
-  }
-
-  // Being past the parent's frame cannot be repaired without rollback. The
-  // frame barrier should make this impossible; refusing is safer than sending
-  // a value from the future and corrupting every later protocol word.
-  if (linkFrame > frame) return false;
-
-  // This is synchronization work, not pacing debt. Do not race ahead again on
-  // the next animation callback to make up the wall time spent doing it.
-  frameClock = 0;
-  let slices = 0;
-  while (
-    linkFrame < frame &&
-    !emu.linkPending &&
-    slices < LINK_CATCHUP_MAX_SLICES
-  ) {
-    const finished = emu.runSlice(LINK_CATCHUP_STEPS);
-    slices += 1;
-    if (finished) {
-      framesOwed = Math.max(0, framesOwed - 1);
-      framesRun += 1;
-      linkFrame += 1;
-      linkFrameCycle = emu.cycleCount;
-      if (audio && audio.ready && !fastForward) audio.push(emu.takeAudio());
-      present();
-    }
-  }
-  if (linkFrame !== frame) return false;
-
-  const targetCycle = linkFrameCycle + offset;
-  while (
-    emu.cycleCount < targetCycle &&
-    linkFrame === frame &&
-    !emu.linkPending &&
-    slices < LINK_CATCHUP_MAX_SLICES
-  ) {
-    // Use broad slices while far away, then approach one instruction at a
-    // time. A broad final slice can cross VBlank, complete the next frame and
-    // turn a child that was microscopically behind into one a frame ahead.
-    const remaining = targetCycle - emu.cycleCount;
-    const steps = remaining > 4096 ? LINK_CATCHUP_STEPS : remaining > 256 ? 16 : 1;
-    const finished = emu.runSlice(steps);
-    slices += 1;
-    if (finished) {
-      framesOwed = Math.max(0, framesOwed - 1);
-      framesRun += 1;
-      linkFrame += 1;
-      linkFrameCycle = emu.cycleCount;
-      if (audio && audio.ready && !fastForward) audio.push(emu.takeAudio());
-      present();
-    }
-  }
-  return linkFrame === frame && emu.cycleCount >= targetCycle;
-}
-
-/**
- * Whether this console has run as far as the parent has, and must wait.
- *
- * Only children wait: the parent is the clock, and holding it back would leave
- * nobody to follow. A child that has heard nothing for a while runs anyway —
- * a barrier that never lifts is a hang, and a parent that paused or closed its
- * tab must not take the other player's game with it.
- */
-function heldAtBarrier(now) {
-  if (!emu?.linkConnected || isParent()) return false;
-  if (now - lastTickAt > LINK_TICK_TIMEOUT_MS) return false;
-  // A lead of one means the child may advance from one frame behind to level,
-  // but may not begin the frame that would put it ahead.
-  return linkFrame + LINK_MAX_LEAD > grantedFrame;
-}
-
-/** Whether every console on the cable has offered its halfword. */
-function everyoneAnswered() {
-  return seatedMembers()
-    .filter((member) => member.id !== lobby.you)
-    .every((member) => linkAnswers.has(member.id));
-}
-
-/** Hand the collected halfwords to every console, our own included. */
-function settleLink() {
-  const values = [0xffff, 0xffff, 0xffff, 0xffff];
-  for (const member of seatedMembers()) {
-    const answer = linkAnswers.get(member.id);
-    if (answer !== undefined) values[member.seat] = answer & 0xffff;
-  }
-
-  // The parent drives the clock line, so its transfer time is the cable's and
-  // travels with the data. A child timing the wire from its own baud setting
-  // would hold it far too long and miss the next transfer.
-  const cycles = emu.linkTransferCycles;
-
-  // How long the answer took. This is the whole budget: a game asking for
-  // several hundred transfers a second cannot have them if each costs more
-  // than a couple of milliseconds.
-  if (askedAt) {
-    const trip = performance.now() - askedAt;
-    askedAt = 0;
-    linkTally.roundTripMs = linkTally.roundTripMs
-      ? linkTally.roundTripMs * 0.9 + trip * 0.1
-      : trip;
-    linkTally.worstRoundTripMs = Math.max(linkTally.worstRoundTripMs, trip);
-  }
-
-  linkRecent.push(values.map((v) => v.toString(16).padStart(4, "0")).join("/"));
-  if (linkRecent.length > LINK_RECENT_KEPT) linkRecent.shift();
-
-  linkPhase = "idle";
-  if (emu.linkDeliver(values, cycles)) linkTally.settled++;
-  else linkTally.refusedDelivery++;
-  lobby.publishLinkData(linkSeq, values, cycles);
-
-  // And straight on with the frame, rather than idling until the next one.
-  resumeAfterTransfer();
-}
-/** Members whose frames have arrived recently, by id. */
-const liveSince = new Map();
-
-/**
- * How long a member counts as sharing after their last frame.
- *
- * Somebody who stops sharing sends nothing rather than announcing it, so this
- * is what makes their light go out.
- */
-const LIVE_TIMEOUT_MS = 2000;
-
-/** Remove the remote picture and return the play space to its solo layout. */
-function clearWatchedScreen() {
-  el.lobbyWatch.hidden = true;
-  el.lobbyScreen.removeAttribute("src");
-  el.lobbyScreen.alt = "Shared game screen";
-  el.lobbyCaption.textContent = "\u2014";
-  el.lobbyWorkspace.dataset.view = "solo";
-}
-
-/** Whether a member's screen is currently arriving. */
-function isLive(id) {
-  const at = liveSince.get(id);
-  return at !== undefined && performance.now() - at < LIVE_TIMEOUT_MS;
-}
-
-/**
- * Notice when somebody's screen stops arriving.
- *
- * Nobody announces that they stopped sharing; they just stop sending. Without
- * this the light stays on and their last frame sits there looking live.
- */
-function expireStaleSharers() {
-  let changed = false;
-  for (const id of [...liveSince.keys()]) {
-    if (!isLive(id)) {
-      liveSince.delete(id);
-      changed = true;
-      if (watching === id) {
-        watching = null;
-        clearWatchedScreen();
-      }
-    }
-  }
-  if (changed && lobby) renderMembers(lobby.members);
-}
-
-function sayLobby(text, tone) {
-  el.lobbyHint.textContent = text;
-  if (tone) {
-    el.lobbyHint.dataset.tone = tone;
-  } else {
-    delete el.lobbyHint.dataset.tone;
-  }
-}
-
-/**
- * The name to offer when joining.
- *
- * Only used on a server with no accounts. When there are accounts the server
- * takes the name from the session and ignores this entirely — a member's name
- * is not something the browser gets to choose, for the same reason it does not
- * get to choose who owns a save.
- */
-function lobbyName() {
-  return recall("lobbyName") || "guest";
-}
-
-function renderMembers(members) {
-  el.lobbyMembers.replaceChildren(
-    ...members.map((member) => {
-      const item = document.createElement("li");
-      item.className = "lobby__member";
-      if (lobby && member.id === lobby.you) item.classList.add("is-you");
-
-      const live = isLive(member.id);
-      if (live) {
-        item.classList.add("is-live");
-        item.append(span("lobby__live", ""));
-        // Clicking a member who is sharing switches to watching them.
-        item.addEventListener("click", () => watchMember(member.id));
-      }
-      if (watching === member.id) item.classList.add("is-watched");
-
-      item.append(span("lobby__name", member.name));
-      if (member.host) item.append(span("lobby__host", "host"));
-      item.append(
-        span("lobby__playing", member.playing ? member.playing : "nothing loaded"),
-      );
-      return item;
-    }),
-  );
-  el.lobbyNote.textContent = `${members.length} here`;
-
-  // Only the host can lock the room, so only the host is offered the button.
-  const you = members.find((m) => lobby && m.id === lobby.you);
-  el.lock.hidden = !you?.host;
-}
-
-/** Start showing a member's screen, or stop if they are already shown. */
-function onMembersChanged(members) {
-  renderMembers(members);
-  // Somebody arriving or leaving changes who is on the cable and where.
-  reseatCable();
-}
-
-/** Start showing a member's screen, or stop if they are already shown. */
-function watchMember(id) {
-  const next = watching === id ? null : id;
-  // A frame belongs to the old selection until the newly selected member sends
-  // one. Clear it now so their name is never attached to somebody else's game.
-  if (next !== watching) clearWatchedScreen();
-  watching = next;
-  if (lobby) renderMembers(lobby.members);
-}
-
-/** Show a frame that has just arrived, if it is from whoever we are watching. */
-function showFrame(from, frame) {
-  const wasLive = isLive(from);
-  liveSince.set(from, performance.now());
-
-  // The first frame from anyone changes the list: their row becomes a target.
-  if (!wasLive && lobby) renderMembers(lobby.members);
-
-  // Nobody chosen yet? Watch the first person who shares, so that turning it
-  // on at the other end is enough to see something.
-  if (!watching) {
-    watching = from;
-    if (lobby) renderMembers(lobby.members);
-  }
-  if (from !== watching) return;
-
-  el.lobbyWatch.hidden = false;
-  el.lobbyScreen.src = frame;
-  const member = lobby?.members.find((m) => m.id === from);
-  el.lobbyScreen.alt = member
-    ? `${member.name}'s shared game screen`
-    : "Shared game screen";
-  el.lobbyCaption.textContent = member
-    ? `${member.name}${member.playing ? ` · ${member.playing}` : ""}`
-    : "watching";
-  el.lobbyWorkspace.dataset.view = "shared";
-}
-
-/** Send a picture of our screen, if anyone is there to see it. */
-function shareFrame(now) {
-  if (!el.share.checked || !lobby?.connected) return;
-  // Nobody else in the room: the bandwidth would go nowhere.
-  if (lobby.members.length < 2) return;
-  if (now - lastFrameAt < FRAME_INTERVAL_MS) return;
-
-  lastFrameAt = now;
-  // JPEG rather than PNG: a tenth of the size at this scale, and the artefacts
-  // are invisible once the picture is a thumbnail in someone's sidebar.
-  lobby.publishFrame(frameCanvas.toDataURL("image/jpeg", FRAME_QUALITY));
-}
-
-el.share.addEventListener("change", () => {
-  remember("share", el.share.checked ? "1" : "0");
-  if (!el.share.checked) lastFrameAt = 0;
-});
-
-$("btn-link-retry").addEventListener("click", () => {
-  endSession();
-  reseatCable();
-  offerConsole();
-});
-
-el.link.addEventListener("change", () => {
-  remember("link", el.link.checked ? "1" : "0");
-  reseatCable();
-});
-
-async function joinRoom(code) {
-  const room = code.trim();
-  if (!room) {
-    sayLobby("Enter a room code, or start a room.", "bad");
-    return;
-  }
-
-  leaveRoom();
-  sayLobby("Connecting…");
-
-  lobby = new LobbyConnection({
-    room,
-    name: lobbyName(),
-    onMembers: onMembersChanged,
-    onRefused: (message) => {
-      // A bad code, a full room, or a locked one. All final, all worth saying
-      // plainly rather than leaving the panel spinning.
-      lobby = null;
-      el.lobbyOut.hidden = false;
-      el.lobbyIn.hidden = true;
-      el.lobbyNote.textContent = "";
-  paintLobbyBadge();
-      el.lock.hidden = true;
-      sayLobby(message, "bad");
-    },
-    onLocked: (locked) => {
-      el.lock.textContent = locked ? "unlock" : "lock";
-      el.lobbyNote.textContent = locked ? "locked" : `${lobby?.members.length ?? 0} here`;
-      paintLobbyBadge();
-    },
-    onSnapshot: () => {
-      // Somebody else's read-out. What it is for — showing a room-mate's party
-      // in the overlay — is still to come; the picture is the useful half.
-    },
-    onFrame: showFrame,
-
-    onLinkTick: (frame) => {
-      if (isParent()) return;
-      grantedFrame = frame;
-      lastTickAt = performance.now();
-    },
-
-    // The parent hears its own announcement back. That is deliberate: it is
-    // one message defining one transfer, so nobody has to agree separately on
-    // when it began.
-    onLinkStart: (seq, frame, offset) => {
-      if (!emu?.linkConnected || isParent()) return;
-
-      // Do not sample SIOMLT_SEND until this game has reached the instruction
-      // where the parent began the transfer. Network latency otherwise leaves
-      // the child answering one protocol word behind.
-      // A console that cannot take this transfer says so rather than going
-      // quiet. Silence reaches the same conclusion, but only after the
-      // parent's timeout — and the parent's game is frozen for the whole of
-      // it, so a run of missed transfers turned into a run of stalls. That is
-      // what a game sees as a link that has stopped responding.
-      //
-      // Answering with a halfword would be worse than either: the parent would
-      // hand back data this console cannot receive.
-      if (!catchUpToLinkStart(frame, offset)) {
-        linkTally.couldNotJoin++;
-        lobby.publishLinkSkip(seq);
-        return;
-      }
-
-      if (!emu.linkJoin()) {
-        linkTally.couldNotJoin++;
-        lobby.publishLinkSkip(seq);
-        return;
-      }
-      childSeq = seq;
-      childDeadline = performance.now() + LINK_TIMEOUT_MS;
-      lobby.publishLinkValue(seq, emu.linkSendValue);
-    },
-
-    onLinkSkip: (from, seq) => {
-      if (!isParent() || linkPhase !== "collecting" || seq !== linkSeq) return;
-
-      // Counted as answered, with nothing on the wire. On hardware a console
-      // that does not drive its slot reads as 0xFFFF, which is exactly what a
-      // game expects from a seat that is not there — and it arrives now rather
-      // than after a timeout the parent spends frozen.
-      linkAnswers.set(from, 0xffff);
-      linkTally.skipped++;
-      if (everyoneAnswered()) settleLink();
-    },
-
-    onLinkValue: (from, seq, value) => {
-      if (!isParent() || linkPhase !== "collecting" || seq !== linkSeq) return;
-      linkAnswers.set(from, value);
-      linkTally.answered++;
-
-      // Settle here, the moment the last console answers, rather than leaving
-      // it to the next animation frame. A linked game asks for a transfer
-      // every frame and the console is frozen for the whole of each one, so
-      // waiting for the frame clock added up to 16ms to every transfer — which
-      // is most of where the speed went.
-      if (everyoneAnswered()) settleLink();
-    },
-
-    onLinkData: (seq, values, cycles) => {
-      // The parent already handed these to its own console; delivering twice
-      // would start a second transfer that nobody asked for.
-      if (isParent()) return;
-
-      // Taken whenever this console is waiting, whatever the sequence number
-      // says. Refusing data it is waiting for left it frozen with no way back:
-      // one slipped number and the game sat on "Awaiting linkup" for good.
-      // Messages arrive in the order they were sent, so a stale one cannot
-      // overtake a live one anyway, and `linkDeliver` refuses anything that
-      // arrives when this console is not waiting.
-      childSeq = -1;
-      if (emu.linkDeliver(values, cycles)) linkTally.settled++;
-      else linkTally.refusedDelivery++;
-      resumeAfterTransfer();
-    },
-
-    // --- lockstep ---------------------------------------------------------
-
-    onLinkHello: (from, message) => {
-      if (!LOCKSTEP) return;
-      acceptHello(from, message);
-    },
-
-    onLinkBegin: (message) => {
-      if (!LOCKSTEP) return;
-      beginSession(message);
-    },
-
-    onLinkInput: (from, id, frame, keys) => {
-      if (sessionPhase === "opening" && id === openingSessionId) {
-        const seat = seatOf(from);
-        if (seat !== null && pendingInputs.length < 1024) pendingInputs.push({ seat, frame, keys });
-        return;
-      }
-      if (!session || id !== session.id) return;
-      const seat = seatOf(from);
-      if (seat === null) return;
-      if (!session.acceptInput(seat, frame, keys)) {
-        // A mask for a frame already run, or one further ahead than the ring
-        // holds. Either way the two browsers are further apart than the buffer
-        // covers, and carrying on would run a frame on input that is not the
-        // input the other browser used.
-        failSession("the two consoles drifted too far apart");
-      }
-    },
-
-    onLinkHash: (from, id, frame, hash) => {
-      if (!session || id !== session.id) return;
-      if (session.acceptHash(frame, hash) !== null) {
-        failSession("the two consoles computed different states");
-      }
-    },
-
-    onLinkBye: (from, id) => {
-      if ((!session || id !== session.id) && id !== openingSessionId) return;
-      // Said on purpose, so this is not a failure — the other player closed
-      // the cable rather than fell off it.
-      endSession();
-      sessionPhase = "failed";
-      sessionNote = "The other player disconnected the cable. Reconnect when both players are ready.";
-      say("The other player left the link.");
-      renderLinkNote();
-    },
-    onStatus: (status) => {
-      if (status === "connected") {
-        el.lobbyOut.hidden = true;
-        el.lobbyIn.hidden = false;
-        el.lobbyRoom.textContent = lobby.room;
-        // The "Connecting…" line has done its job; the member count says the
-        // rest, and a stale status is worse than none.
-        sayLobby("");
-        remember("room", lobby.room);
-        // Tell the room what is already loaded, rather than waiting for the
-        // next cartridge change.
-        lobby.setPlaying(romName || null, gameCode || null);
-      } else if (status !== "closed") {
-        if (status === "reconnecting") {
-          endSession();
-          cableShape = "none";
-          renderLinkNote();
-        }
-        // "closed" is something we did on purpose, and follows a refusal we
-        // have already explained; reporting it would overwrite the reason.
-        el.lobbyNote.textContent = status;
-      }
-    },
-  });
-}
-
-function leaveRoom() {
-  endSession();
-  lobby?.close();
-  lobby = null;
-  el.lobbyOut.hidden = false;
-  el.lobbyIn.hidden = true;
-  el.lobbyNote.textContent = "";
-  paintLobbyBadge();
-  el.lock.hidden = true;
-  el.lock.textContent = "lock";
-  el.lobbyMembers.replaceChildren();
-  watching = null;
-  liveSince.clear();
-  clearWatchedScreen();
-
-  // The cable goes with the room. `lobby` is already null, so reseating
-  // unplugs, and the shape is cleared so rejoining is seen as a change.
-  cableShape = "none";
-  emu?.linkDisconnect();
-  linkPhase = "idle";
-  childSeq = -1;
-  renderLinkNote();
-}
-
-el.join.addEventListener("click", () => joinRoom(el.lobbyCode.value));
-
-el.lobbyCode.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    joinRoom(el.lobbyCode.value);
-  }
-});
-
-el.lock.addEventListener("click", () => {
-  if (!lobby) return;
-  lobby.setLocked(!lobby.locked);
-});
-
-el.host.addEventListener("click", async () => {
-  el.host.disabled = true;
-  try {
-    const response = await fetch("/api/lobby", { method: "POST" });
-    const body = await response.json();
-    // 401 here means accounts are on and nobody is signed in, which is a
-    // different problem from the server being busy.
-    if (response.status === 401) {
-      sayLobby("Sign in to start a room.", "bad");
-      return;
-    }
-    if (!response.ok || !body.room) throw new Error(body.error ?? `${response.status}`);
-    el.lobbyCode.value = body.room;
-    await joinRoom(body.room);
-  } catch (error) {
-    sayLobby(`Could not start a room: ${error.message}`, "bad");
-  } finally {
-    el.host.disabled = false;
-  }
-});
-
-el.leave.addEventListener("click", () => {
-  leaveRoom();
-  say("Left the room");
-});
-
-el.copyCode.addEventListener("click", async () => {
-  try {
-    await navigator.clipboard.writeText(el.lobbyRoom.textContent);
-    el.copyCode.textContent = "copied";
-    setTimeout(() => (el.copyCode.textContent = "copy"), 2000);
-  } catch {
-    // Clipboard access can be refused; the code is on screen to read.
-  }
-});
-
-// --- lobby dialog -------------------------------------------------------
-//
-// Hosting or joining is a thing you do once at the start of a session, so it
-// lives behind a button rather than in a third of a rail. What lasts — someone
-// else's screen, and whether the cable is live — stays on the page: the badge
-// on the key says you are in a room, and the watched screen sits under your
-// own.
-
-// Multiplayer opens through the shared anchored popup handler.
-
-/** Keep the deck key in step with the room, since the panel is usually shut. */
-function paintLobbyBadge() {
-  const inRoom = Boolean(lobby?.connected);
-  el.lobbyBadge.hidden = !inRoom;
-  el.lobbyBadge.textContent = emu?.linkConnected ? "link" : "in";
-  el.lobbyOpen.title = inRoom
-    ? "You are in a room. Open the lobby to leave or share your screen."
-    : "Host or join a room and play alongside other people";
-}
-
 // --- controls dialog ----------------------------------------------------
 
 el.controlsOpen.addEventListener("click", openControls);
@@ -4181,897 +2378,6 @@ window.addEventListener("gamepadconnected", () => {
 
 paintShortcuts();
 refreshPadPresence();
-refreshShots();
-
-// --- account ------------------------------------------------------------
-//
-// The menu itself is account.js, shared with every other page. What is left
-// here is the part only this page has: saves and screenshots belong to whoever
-// is signed in, so a change of identity has to reload them.
-
-/** The account menu, once startup has built it. */
-let accounts = null;
-
-/**
- * The one button this page adds to the menu.
- *
- * Built here rather than in the shared markup: claiming saves means nothing on
- * a page with no saves on it.
- */
-const claimButton = document.createElement("button");
-claimButton.className = "key key--slim";
-claimButton.type = "button";
-claimButton.hidden = true;
-
-/** Whether the first read of who-we-are has landed. */
-let accountKnown = false;
-
-/**
- * React to a change of identity.
- *
- * The first call is startup asking; everything after it is a real change, and
- * a real change means the vault on screen belongs to the wrong person.
- */
-function onAccountChange(user) {
-  if (accountKnown && recoveryOwner(user) !== recoveryOwner(addonUser)) {
-    checkpointRecovery();
-    recoveryGameOwner = null;
-  }
-  savesGeneration++;
-  showSaves(false);
-  el.savesList.replaceChildren();
-  shotsGeneration++;
-  showShots(false);
-  addonUser = user;
-  $('recovery-status').textContent = '';
-  refreshRecovery();
-  applyVaultPanels();
-  playInstalledAddons = [];
-  $('play-addon-message').textContent = '';
-  if ($('addon-menu').matches(':popover-open')) renderPlayAddons();
-  setAddonAccount(user);
-  addonGeneration++;
-  activeManifests = [];
-  if (emu) {
-    applyBuiltinPreferences();
-    emu.installManifests([]);
-    renderSnapshot(emu.snapshot());
-    installManifests();
-  }
-  offerClaim();
-  if (!accountKnown) {
-    accountKnown = true;
-    return;
-  }
-  // Deliberately not "signed in as <address>": the status line is the one part
-  // of the page always on screen, and putting the address there undoes the
-  // reason the menu hides it.
-  say(user ? "Signed in" : "Signed out");
-  // Shots as well as saves: leaving the last account's screenshots on screen
-  // would outlive the session that was allowed to see them.
-  refreshVault();
-}
-
-/**
- * Offer to take over saves stored before accounts existed.
- *
- * Only shown when there is something to take: a button that does nothing is
- * worse than no button.
- */
-async function offerClaim() {
-  claimButton.hidden = true;
-  if (!accounts?.user) return;
-  try {
-    const response = await fetch("/api/saves?legacy=1");
-    if (!response.ok) return;
-    const body = await response.json();
-    claimButton.hidden = (body.legacy ?? 0) === 0;
-    if (!claimButton.hidden) {
-      claimButton.textContent = `Claim ${body.legacy} old save${body.legacy === 1 ? "" : "s"}`;
-    }
-  } catch {
-    // Nothing to offer; the button stays hidden.
-  }
-}
-
-claimButton.addEventListener("click", async () => {
-  claimButton.disabled = true;
-  say("Claiming saves…");
-  try {
-    const response = await fetch("/api/saves/claim", { method: "POST" });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error ?? `${response.status}`);
-    say(`Claimed ${body.claimed} save${body.claimed === 1 ? "" : "s"}`, "good");
-    if (body.failed?.length) console.warn("could not claim:", body.failed);
-    await refreshSaves();
-    await offerClaim();
-  } catch (error) {
-    say(`Could not claim those saves: ${error.message}`, "bad");
-  } finally {
-    claimButton.disabled = false;
-  }
-});
-
-// --- cloud saves --------------------------------------------------------
-
-/** A PNG of the current screen, for identifying a save at a glance. */
-async function captureThumbnail() {
-  const blob = await new Promise((resolve) => frameCanvas.toBlob(resolve, "image/png"));
-  if (!blob) return null;
-  return new Uint8Array(await blob.arrayBuffer());
-}
-
-/**
- * Store the current state against the loaded cartridge.
- *
- * The server files it under the game code and prunes that game's oldest beyond
- * the limit, so the list stays bounded without the player managing it.
- */
-el.cloud.addEventListener("click", () => storeSave());
-
-/**
- * Pack the current state and send it to the vault.
- *
- * `replace` overwrites an existing slot, keeping its label so the row still
- * reads as the same slot. The server only removes the old save once the new one
- * has landed, so a failed overwrite costs nothing.
- */
-async function storeSave(replace = null) {
-  if (!gameCode) {
-    say("Load a game before saving to the vault.", "bad");
-    return false;
-  }
-
-  let state;
-  try {
-    state = emu.saveState();
-  } catch (error) {
-    say(error.message, "bad");
-    return false;
-  }
-
-  el.cloud.disabled = true;
-  say(`Compressing ${formatSize(state.byteLength)}…`);
-
-  let packed;
-  try {
-    const thumbnail = await captureThumbnail();
-    const battery = emu.hasBattery ? emu.batterySave() : null;
-    const compressed = await gzip(state);
-    packed = packSave(compressed.bytes, compressed.gzipped, thumbnail, battery);
-  } catch (error) {
-    say(`Could not prepare the save: ${error.message}`, "bad");
-    el.cloud.disabled = false;
-    return false;
-  }
-
-  say(`Uploading ${formatSize(packed.byteLength)}…`);
-
-  const form = new FormData();
-  form.append("file", new Blob([packed], { type: "application/octet-stream" }), "save.bin");
-  form.append("game", gameCode);
-  form.append("label", replace?.label || baseName(romName).slice(0, 16));
-  if (replace) form.append("replace", replace.id);
-
-  try {
-    const response = await fetch("/api/saves", { method: "POST", body: form });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error ?? `${response.status}`);
-    say(
-      `${replace ? "Overwrote" : "Saved to the vault"} · ` +
-        `${formatSize(packed.byteLength)} (from ${formatSize(state.byteLength)})`,
-      "good",
-    );
-    await refreshSaves();
-    return true;
-  } catch (error) {
-    say(`Could not save: ${error.message}`, "bad");
-    return false;
-  } finally {
-    el.cloud.disabled = false;
-  }
-}
-
-/**
- * Show either the saves list or the line explaining why there is not one.
- *
- * The saves panel used to simply hide itself, which was fine when it was one
- * box in a stack. Inside a tab it cannot: a tab you can select and that then
- * shows nothing at all reads as broken, so the empty case has to say something.
- */
-function showSaves(visible) {
-  el.savesPanel.hidden = !visible;
-  el.savesOff.hidden = visible;
-  if (!visible) setSavesCount("");
-}
-
-/**
- * The line under the Saves tab.
- *
- * The count used to be an element inside a fixed panel. The tabs are generated
- * now, so it is state rather than a node, and setting it redraws the rail that
- * happens to be holding saves.
- */
-// The saves used to be a card to scroll to, which meant leaving Cinema first
-// and hoping the card was on screen. There is a modal for them now, and it
-// opens over whatever view you are in.
-$('btn-vault-saves').addEventListener('click', () => openVault('saves'));
-
-/**
- * The rail cards Play can put away, and the card each one owns.
- *
- * A function rather than a const: applyVaultPanels runs from onAccountChange,
- * which startup calls well before this point in the file is reached, and a
- * `const` read that early throws before it is initialised.
- */
-function vaultPanels() {
-  return [
-    { id: 'saves', name: 'Vault saves', note: 'Sidebar tab · also in the Vault' },
-    { id: 'shots', name: 'Screenshots', note: 'Sidebar tab · also in the Vault' },
-  ];
-}
-
-/**
- * Show or put away the two rail cards.
- *
- * Only the cards: the Vault modal keeps both tabs either way, so turning a
- * card off tidies the rail rather than taking the feature away. A card being
- * hidden while the modal holds its contents is fine — they go back into a
- * hidden card and stay there until it is turned on again.
- */
-function applyVaultPanels() {
-  // The rails read hiddenPanels themselves; all this has to do is ask for the
-  // redraw that will notice the change.
-  renderRails(lastSections);
-  fitScreen();
-}
-
-function setSavesCount(text) {
-  if (savesCount === text) return;
-  savesCount = text;
-  // The pane's own note, so the tab strip carries it and no card header has to.
-  renderRails(lastSections);
-}
-
-// --- screenshots --------------------------------------------------------
-//
-// Taking one already worked; looking at one did not. The vault holds them as
-// ordinary images, so listing them is a filter on the same call the library
-// already makes, and the only new work is showing them at a size worth looking
-// at — a 240x160 picture in a 60px thumbnail is a reminder that a screenshot
-// exists rather than a way to see it.
-
-/** The count drawn on the Shots tab. */
-
-
-function paintGallery() {
-  const shot = galleryShots[galleryIndex];
-  $('gallery-stage').hidden = !shot;
-  el.shotOpen.hidden = !shot;
-  $('shot-prev').disabled = !shot || galleryIndex === 0;
-  $('shot-next').disabled = !shot || galleryIndex === galleryShots.length - 1;
-  $('shot-position').textContent = shot ? `${galleryIndex + 1} of ${galleryShots.length}` : '';
-  el.shotWhen.textContent = shot?.taken_at_ms ? formatWhen(shot.taken_at_ms) : '';
-  if (shot) {
-    el.shotFull.src = shot.url;
-    el.shotFull.alt = shot.game_code ? `Screenshot of ${shot.game_code}` : 'Game screenshot';
-    el.shotOpen.href = shot.url;
-  } else {
-    el.shotFull.removeAttribute('src'); el.shotOpen.removeAttribute('href');
-  }
-  [...el.shotsList.querySelectorAll('button')].forEach((button, index) => {
-    button.setAttribute('aria-current', String(index === galleryIndex));
-  });
-}
-function stepGallery(delta) {
-  galleryIndex = Math.max(0, Math.min(galleryShots.length - 1, galleryIndex + delta));
-  paintGallery();
-}
-$('shot-prev').addEventListener('click', () => stepGallery(-1));
-$('shot-next').addEventListener('click', () => stepGallery(1));
-el.vaultModal.addEventListener('keydown', event => {
-  if (event.target.closest('[data-vault-tab], input, textarea, select') || $('vault-panel-shots').hidden) return;
-  if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-  event.preventDefault(); event.stopPropagation(); stepGallery(event.key === 'ArrowLeft' ? -1 : 1);
-});
-// --- the vault ------------------------------------------------------------
-//
-// Saves and screenshots each keep a card in the companion rail and a tab in
-// here. Rather than render either of them twice, the live nodes move: opening
-// the modal lifts them out of their cards, closing puts them back. One list,
-// one set of ids, and every render path already written keeps working
-// untouched, whichever place the nodes happen to be sitting in.
-
-/** [pane body, the tab panel it visits while the modal is open]. */
-function vaultHomes() {
-  return [
-    ['pane-saves', 'vault-panel-saves'],
-    ['pane-shots', 'vault-panel-shots'],
-  ];
-}
-
-/** True while the modal is holding the pane bodies, so a rail redraw leaves
- *  them alone instead of pulling them back out from under it. */
-function vaultHoldsPanes() {
-  return el.vaultModal.open;
-}
-
-/**
- * Lend the two pane bodies to the modal, or ask the rails to take them back.
- *
- * Going back is a redraw rather than an append: the rails decide where these
- * live now, and which tab is showing may well have changed while the modal was
- * up. Handing the node to a stale container would put it somewhere the rail no
- * longer draws.
- */
-function moveVaultContent(intoModal) {
-  if (!intoModal) {
-    renderRails(lastSections);
-    return;
-  }
-  for (const [nodeId, panelId] of vaultHomes()) {
-    const node = railNode(nodeId);
-    const target = $(panelId);
-    // Appending a node already in place would still move it, and moving a
-    // focused control loses the focus, so only when it is somewhere else.
-    if (node && target && node.parentElement !== target) target.append(node);
-  }
-}
-
-function selectVaultTab(which) {
-  if (!['saves', 'shots'].includes(which)) which = 'saves';
-  for (const tab of document.querySelectorAll('[data-vault-tab]')) {
-    const on = tab.dataset.vaultTab === which;
-    tab.setAttribute('aria-selected', String(on));
-    tab.tabIndex = on ? 0 : -1;
-    $(`vault-panel-${tab.dataset.vaultTab}`).hidden = !on;
-  }
-  remember('vault-tab', which);
-}
-
-function openVault(which = recall('vault-tab') || 'saves') {
-  closeToolSheets();
-  moveVaultContent(true);
-  selectVaultTab(which);
-  if (!el.vaultModal.open) el.vaultModal.showModal();
-  paintGallery();
-  refreshShots();
-  refreshSaves();
-}
-
-for (const tab of document.querySelectorAll('[data-vault-tab]')) {
-  tab.addEventListener('click', () => selectVaultTab(tab.dataset.vaultTab));
-  tab.addEventListener('keydown', event => {
-    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-    event.preventDefault(); event.stopPropagation();
-    const next = event.key === 'Home' ? 'saves' : event.key === 'End' ? 'shots'
-      : tab.dataset.vaultTab === 'saves' ? 'shots' : 'saves';
-    selectVaultTab(next); $(`vault-tab-${next}`).focus();
-  });
-}
-// Closing covers Escape and the backdrop as well as the Close button, which is
-// why the cards are refilled from here rather than from a click handler.
-el.vaultModal.addEventListener('close', () => moveVaultContent(false));
-
-$('btn-vault').addEventListener('click', () => openVault());
-$('btn-gallery').addEventListener('click', () => openVault('shots'));
-
-/**
- * The screenshots in the vault, newest first.
- *
- * Names carry the millisecond they were taken, which is the only ordering the
- * vault gives us — it lists by whatever order it likes.
- */
-async function refreshShots() {
-  const generation = ++shotsGeneration;
-  let shots = [];
-  try {
-    // Scoped to this account by the server. Asking for the whole vault and
-    // filtering here would make privacy a setting anyone could turn off in the
-    // developer tools.
-    const response = await fetch("/api/shots");
-    if (generation !== shotsGeneration) return;
-    if (response.status === 401) {
-      accounts?.noticeSignedOut();
-      el.shotsOff.textContent = "Sign in to keep screenshots.";
-      showShots(false);
-
-      return;
-    }
-    const body = await response.json();
-    if (generation !== shotsGeneration) return;
-    if (!response.ok) throw new Error(body.error ?? 'Could not load screenshots.');
-    if (!body.configured) {
-      el.shotsOff.textContent =
-        "Screenshot storage is not available on this server.";
-      showShots(false);
-      return;
-    }
-    shots = body.shots ?? [];
-  } catch {
-    if (generation !== shotsGeneration) return;
-    el.shotsOff.textContent = 'Could not load screenshots. Reopen the gallery to try again.';
-    showShots(false);
-    return;
-  }
-
-  if (shots.length === 0) {
-    el.shotsOff.textContent = 'No screenshots yet. Use the camera on the game screen to take one.';
-    showShots(false);
-
-    return;
-  }
-
-  const selected = galleryShots[galleryIndex]?.url;
-  galleryShots = [...shots].sort((a, b) => (b.taken_at_ms ?? 0) - (a.taken_at_ms ?? 0));
-  galleryIndex = Math.max(0, galleryShots.findIndex(shot => shot.url === selected));
-  showShots(true);
-
-  el.shotsList.replaceChildren(...galleryShots.map(renderShot));
-  paintGallery();
-}
-
-function showShots(visible) {
-  if (!visible) {
-    galleryShots = []; galleryIndex = 0;
-    el.shotsList.replaceChildren();
-  }
-  el.shotsList.hidden = !visible;
-  el.shotsOff.hidden = visible;
-  // Shown on the tab, the way the saves count is.
-  const next = visible && galleryShots.length ? `${galleryShots.length} saved` : '';
-  if (next !== shotsCount) {
-    shotsCount = next;
-    renderRails(lastSections);
-  }
-  paintGallery();
-}
-
-function renderShot(shot) {
-  const item = document.createElement("li");
-
-  const open = document.createElement("button");
-  open.type = "button";
-  open.className = "shots__item";
-  open.title = shot.game_code ? `${shot.game_code} screenshot` : "Screenshot";
-
-  const image = document.createElement("img");
-  image.className = "shots__thumb";
-  image.src = shot.url;
-  image.alt = "";
-  image.loading = "lazy";
-  open.append(image);
-
-  if (shot.taken_at_ms) open.append(span("shots__when", formatWhen(shot.taken_at_ms)));
-
-  open.addEventListener("click", () => showShot(shot, shot.taken_at_ms));
-  item.append(open);
-  return item;
-}
-
-function showShot(asset, when) {
-  galleryIndex = Math.max(0, galleryShots.findIndex(shot => shot.url === asset.url));
-  moveVaultContent(true);
-  selectVaultTab('shots');
-  paintGallery();
-  if (!el.vaultModal.open) el.vaultModal.showModal();
-}
-
-/**
- * Reload everything the vault keeps per account.
- *
- * Saves and screenshots are both scoped to whoever is signed in, so both have
- * to be re-asked for when that changes. Only saves were, which is why a
- * screenshot taken before a sign-out reappeared only after the next one was
- * taken — the list was right on the server and stale on the page.
- */
-async function refreshVault() {
-  await Promise.all([refreshSaves(), refreshShots()]);
-}
-
-/** Reload the saves list for the current cartridge. */
-async function refreshSaves() {
-  const generation = ++savesGeneration;
-  const requestedGame = gameCode;
-  if (!gameCode) {
-    showSaves(false);
-    el.savesOff.textContent = 'Load a cartridge to see its vault saves.';
-    return;
-  }
-
-  let listing;
-  try {
-    const response = await fetch(`/api/saves?game=${encodeURIComponent(gameCode)}`);
-    if (generation !== savesGeneration || requestedGame !== gameCode) return;
-    if (response.status === 401) {
-      // Accounts are on and nobody is signed in. Say so where the saves would
-      // be, rather than hiding the panel as though the vault were off.
-      accounts?.noticeSignedOut();
-      showSaves(true);
-      setSavesCount("signed out");
-      el.savesList.replaceChildren(savesNote("Sign in to keep saves in the vault."));
-      return;
-    }
-    listing = await response.json();
-    if (generation !== savesGeneration || requestedGame !== gameCode) return;
-    if (!response.ok) throw new Error(listing.error ?? 'Could not load vault saves.');
-  } catch {
-    if (generation !== savesGeneration || requestedGame !== gameCode) return;
-    showSaves(false);
-    el.savesOff.textContent = 'Could not load vault saves. Reopen the Vault to try again.';
-    return;
-  }
-
-  if (!listing.configured) {
-    showSaves(false);
-    el.savesOff.textContent = "The vault is not configured on this server.";
-    return;
-  }
-
-  showSaves(true);
-
-  if (listing.error) {
-    setSavesCount("error");
-    el.savesList.replaceChildren(savesNote(listing.error));
-    return;
-  }
-
-  // "private" is worth showing: it is the difference between a save on a
-  // signed, owner-scoped URL and one on a public one.
-  const where = listing.backend === "private" ? "private" : "public";
-  setSavesCount(`${where} \u00b7 ${listing.saves.length} / ${listing.limit}`);
-
-  if (listing.saves.length === 0) {
-    el.savesList.replaceChildren(
-      savesNote("None yet. Save to vault keeps the last few here."),
-    );
-    return;
-  }
-
-  el.savesList.replaceChildren(...listing.saves.map(renderSaveRow));
-}
-
-function renderSaveRow(save) {
-  const item = document.createElement("li");
-  item.className = "saves__item";
-
-  const shot = document.createElement("img");
-  shot.className = "saves__shot";
-  shot.alt = "";
-  shot.width = 96;
-  shot.height = 64;
-  // Pull only the container prefix; the rest of the save stays on the CDN
-  // until someone actually loads it.
-  loadThumbnail(save, shot);
-
-  const meta = document.createElement("div");
-  meta.className = "saves__meta";
-
-  // Drawn from what we already have, so cancelling a rename costs nothing and
-  // a finished one is repainted by the refresh that follows it.
-  const paintMeta = () => {
-    const name = span("saves__name", save.label || "Unnamed");
-    if (!save.label) name.dataset.empty = "on";
-
-    // Renaming belongs beside the name, not in a row of verbs: it is the one
-    // action here that acts on a word rather than on the save.
-    const pencil = document.createElement("button");
-    pencil.type = "button";
-    pencil.className = "saves__pencil";
-    pencil.textContent = "✎";
-    pencil.title = "Rename this save";
-    pencil.setAttribute("aria-label", "Rename this save");
-    pencil.addEventListener("click", () => beginRename(save, meta, paintMeta));
-
-    const line = document.createElement("div");
-    line.className = "saves__nameline";
-    line.append(name, pencil);
-
-    const when = span("saves__when", formatWhenShort(save.saved_at_ms));
-    // The parts that got cut: the full date, and a size that is the same 220KB
-    // on every row and so tells you nothing by being on all of them.
-    when.title = `${formatWhen(save.saved_at_ms)} · ${formatSize(save.size)}`;
-
-    meta.replaceChildren(line, when);
-  };
-  paintMeta();
-
-  const actions = document.createElement("div");
-  actions.className = "saves__actions";
-
-  // Loading throws away the run in progress, and a button that says "load"
-  // does not say that. So it arms first, like the two that destroy the save
-  // itself: what is at risk is different, the misclick is the same.
-  const load = arming({
-    label: "load",
-    armed: "confirm?",
-    className: "saves__act saves__act--go",
-    title: "Load this save, discarding the game in progress",
-    run: () => loadSaveFromVault(save),
-  });
-
-  // Overwriting throws away what is in the slot, so it arms first, exactly like
-  // delete.
-  const overwrite = arming({
-    label: "overwrite",
-    armed: "replace?",
-    className: "saves__act saves__act--danger",
-    title: "Replace this save with the game as it is now",
-    run: () => storeSave(save),
-  });
-
-  const fetchToDisk = document.createElement("button");
-  fetchToDisk.type = "button";
-  fetchToDisk.className = "saves__act";
-  fetchToDisk.textContent = "download";
-  fetchToDisk.title = "Download this save as a .state file";
-  fetchToDisk.addEventListener("click", () => downloadSave(save, fetchToDisk));
-
-  const remove = arming({
-    label: "delete",
-    armed: "sure?",
-    className: "saves__act saves__act--danger",
-    title: "Delete this save",
-    run: () => deleteSave(save),
-  });
-
-  actions.append(load, overwrite, fetchToDisk, remove);
-  item.append(shot, meta, actions);
-  return item;
-}
-
-/** Longest name the vault keeps. The rest would be trimmed off the filename. */
-const SAVE_LABEL_MAX = 24;
-
-/**
- * Rename a save, in the row it sits in.
- *
- * The name lives in the stored filename, so what a name may contain is what a
- * filename may contain: letters, numbers and hyphens. Trimming as it is typed
- * says that once and immediately, rather than letting someone finish a name
- * the server then quietly reduces to something else.
- */
-function beginRename(save, meta, paintMeta) {
-  const form = document.createElement("form");
-  form.className = "saves__rename";
-
-  const input = document.createElement("input");
-  input.className = "saves__name-input";
-  input.value = save.label ?? "";
-  input.maxLength = SAVE_LABEL_MAX;
-  input.placeholder = "letters, numbers, hyphens";
-  input.setAttribute("aria-label", "Save name");
-  input.addEventListener("input", () => {
-    const clean = input.value.replace(/[^A-Za-z0-9-]/g, "").slice(0, SAVE_LABEL_MAX);
-    if (clean !== input.value) input.value = clean;
-  });
-
-  const keep = document.createElement("button");
-  keep.type = "submit";
-  keep.className = "saves__act saves__act--go";
-  keep.textContent = "save";
-
-  const cancel = document.createElement("button");
-  cancel.type = "button";
-  cancel.className = "saves__act";
-  cancel.textContent = "cancel";
-  cancel.addEventListener("click", paintMeta);
-
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    keep.disabled = true;
-    renameSave(save, input.value);
-  });
-  // Escape belongs to the field while the field is open. Without this it
-  // reaches the page's own handler and leaves focus mode instead.
-  form.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape") return;
-    event.stopPropagation();
-    paintMeta();
-  });
-
-  form.append(input, keep, cancel);
-  meta.replaceChildren(form);
-  input.focus();
-  input.select();
-}
-
-async function renameSave(save, label) {
-  if (label === (save.label ?? "")) {
-    await refreshSaves();
-    return;
-  }
-
-  say("Renaming…");
-  try {
-    // The name is part of the object's key in the vault, so the server has to
-    // restore it under a new one; there is no field to edit in place.
-    const response = await fetch(`/api/saves/${encodeURIComponent(save.id)}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ label }),
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error ?? `${response.status}`);
-    say(label ? `Renamed to ${label}` : "Name cleared", "good");
-  } catch (error) {
-    say(`Could not rename: ${error.message}`, "bad");
-  }
-  await refreshSaves();
-}
-
-/**
- * A button that has to be clicked twice.
- *
- * A stored save is the only copy of that progress and there is no undo, so
- * every action that destroys one asks first. The armed state lapses on its own
- * rather than staying hot, so a forgotten click cannot be completed later by
- * someone aiming at the button next to it.
- */
-function arming({ label, armed, className, title, run }) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = className;
-  button.textContent = label;
-  button.title = title;
-  // The armed state is a colour and a changed word. Neither reaches a screen
-  // reader on its own, and "click again" is the whole contract of the control.
-  button.setAttribute("aria-label", title);
-
-  let timer = 0;
-  const disarm = () => {
-    clearTimeout(timer);
-    button.dataset.confirm = "false";
-    button.textContent = label;
-    button.title = title;
-    button.setAttribute("aria-label", title);
-  };
-
-  button.addEventListener("click", async () => {
-    if (button.dataset.confirm !== "true") {
-      button.dataset.confirm = "true";
-      button.textContent = armed;
-      button.title = `${title} - click again to confirm`;
-      button.setAttribute("aria-label", button.title);
-      timer = setTimeout(disarm, 4000);
-      return;
-    }
-    disarm();
-    await run();
-  });
-  return button;
-}
-
-/**
- * Save a stored slot to disk as a plain `.state`.
- *
- * Unpacked on the way out rather than handed over as the container: the desktop
- * build reads save states, not this page's wrapper, and a file you cannot open
- * in the other half of the project is not much of a download.
- */
-async function downloadSave(save, button) {
-  button.disabled = true;
-  const previous = button.textContent;
-  button.textContent = "…";
-  try {
-    const response = await fetchStorage(save.url);
-    if (!response.ok) throw new Error(`${response.status}`);
-
-    const name = `${baseName(save.original_name)}.state`;
-    download(await unpackSave(await response.arrayBuffer()), name);
-    say(`Downloaded ${name}`, "good");
-  } catch (error) {
-    say(`Could not download that save: ${error.message}`, "bad");
-  } finally {
-    button.textContent = previous;
-    button.disabled = false;
-  }
-}
-
-/**
- * Fill a save row's thumbnail using a ranged request.
- *
- * Purely decorative, so every failure path just leaves the placeholder: a
- * missing screenshot must never stop a save from being loadable.
- */
-async function loadThumbnail(save, image) {
-  try {
-    const response = await fetch(save.url, {
-      headers: { Range: `bytes=0-${THUMBNAIL_PREFIX_BYTES - 1}` },
-    });
-    if (!response.ok) return;
-
-    const thumbnail = readThumbnail(await response.arrayBuffer());
-    if (!thumbnail) return;
-
-    const url = URL.createObjectURL(new Blob([thumbnail], { type: "image/png" }));
-    image.addEventListener("load", () => URL.revokeObjectURL(url), { once: true });
-    image.src = url;
-    image.classList.add("is-loaded");
-  } catch {
-    // No thumbnail; the row still works.
-  }
-}
-
-async function loadSaveFromVault(save) {
-  // The vault list is filed per cartridge, so a slot shown here belongs to the
-  // game that was loaded when it was shown. That is not the same as a game
-  // being loaded *now* — the list survives an eject.
-  if (!requireCartridge("load a save state")) return;
-  closeToolSheets();
-  say("Fetching save…");
-  try {
-    const response = await fetchStorage(save.url);
-    if (!response.ok) throw new Error(`${response.status}`);
-    const buffer = await response.arrayBuffer();
-    emu.loadState(await unpackSave(buffer));
-    // The cartridge save goes back too. Restoring the machine without it
-    // leaves the game believing in a save file that is no longer there.
-    applyBattery(readBattery(buffer), gameCode);
-    running = true;
-    el.play.textContent = "Pause";
-    present();
-    say(`Loaded save from ${formatWhen(save.saved_at_ms)}`, "good");
-  } catch (error) {
-    say(`Could not load that save: ${error.message}`, "bad");
-  }
-}
-
-async function deleteSave(save) {
-  try {
-    const response = await fetch(`/api/saves/${encodeURIComponent(save.id)}`, {
-      method: "DELETE",
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new Error(body.error ?? `${response.status}`);
-    }
-    say("Save deleted");
-    await refreshSaves();
-  } catch (error) {
-    say(`Could not delete: ${error.message}`, "bad");
-  }
-}
-
-function savesNote(text) {
-  const item = document.createElement("li");
-  item.className = "saves__empty";
-  item.textContent = text;
-  return item;
-}
-
-/** A short, local, human timestamp. */
-/**
- * The same moment as `formatWhen`, in as few characters as still tell two
- * saves apart.
- *
- * A save row has about 170px beside its thumbnail, and "8/27/2026 01:05 AM"
- * wrapped onto a second line there — spending most of a line on a year that is
- * nearly always this one. Today keeps only the time, this year keeps the day
- * and the month, and only a save old enough for the year to matter pays for
- * it. The full date and the size stay in the row's tooltip.
- */
-function formatWhenShort(ms) {
-  const when = new Date(ms);
-  if (Number.isNaN(when.getTime())) return "unknown";
-  const now = new Date();
-  const time = when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  if (when.toDateString() === now.toDateString()) return `Today ${time}`;
-
-  const day = when.toLocaleDateString([], { day: "numeric", month: "short" });
-  return when.getFullYear() === now.getFullYear()
-    ? `${day} ${time}`
-    : `${day} ${when.getFullYear()}`;
-}
-
-function formatWhen(ms) {
-  const when = new Date(ms);
-  if (Number.isNaN(when.getTime())) return "unknown";
-  const today = new Date();
-  const sameDay = when.toDateString() === today.toDateString();
-  const time = when.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return sameDay ? `Today ${time}` : `${when.toLocaleDateString()} ${time}`;
-}
 
 // --- embedded overlay ---------------------------------------------------
 
@@ -5162,9 +2468,8 @@ async function loadBios() {
     }
     const response = await fetch("/bios");
     if (!response.ok) return false;
-    // Kept, because a lockstep session builds a second console in this browser
-    // and it has to be given the same BIOS as the first. Two consoles running
-    // different BIOS images agree on nothing for long.
+    // Kept, because the recovery checkpoint records which BIOS a state was
+    // saved against and refuses to restore it against another.
     biosBytes = new Uint8Array(await response.arrayBuffer());
     emu.loadBios(biosBytes);
     return true;
@@ -5188,63 +2493,25 @@ $('file-bios').addEventListener('change', async event => {
   } catch (error) { say(error.message, 'bad'); }
 });
 
-// --- vault --------------------------------------------------------------
+// --- library ------------------------------------------------------------
 
-function markVaultSelection(name) {
+function markLibrarySelection(name) {
   for (const button of el.vaultList.querySelectorAll(".vault__item")) {
     button.setAttribute("aria-current", String(button.dataset.name === name));
   }
 }
 
-/**
- * Fill the library from both sources.
- *
- * The vault needs a key and gives shareable CDN links; the local folder needs
- * nothing and works offline. Showing them in one list, tagged, means the page
- * is useful before any storage is configured.
- */
+/** List the ROMs in the server's local folder. */
 async function loadLibrary() {
-  const [vault, local] = await Promise.all([fetchVault(), fetchLocal()]);
-  const entries = [...vault.assets, ...local];
-
-  el.vaultNote.textContent = vault.note === "error" || vault.note === "unreachable"
-    ? "The game library is unavailable. You can still open a local game." : "";
-
-  el.vaultList.hidden = entries.length === 0;
-  if (entries.length === 0) {
-    el.vaultList.replaceChildren();
-    return;
-  }
-
-  el.vaultList.replaceChildren(...entries.map(renderLibraryRow));
-}
-
-async function fetchVault() {
-  try {
-    const response = await fetch("/api/library");
-    const body = await response.json();
-    if (!body.configured) return { assets: [], configured: false, note: "local only" };
-    if (body.error) return { assets: [], configured: true, note: "error" };
-    return {
-      configured: true,
-      note: body.vault,
-      assets: body.assets
-        .filter((asset) => /\.(gba|bin|agb)$/i.test(asset.name))
-        .map((asset) => ({ ...asset, source: "vault" })),
-    };
-  } catch {
-    return { assets: [], configured: false, note: "unreachable" };
-  }
-}
-
-async function fetchLocal() {
+  let entries = [];
   try {
     const response = await fetch("/api/local");
-    const body = await response.json();
-    return body.assets ?? [];
+    entries = (await response.json()).assets ?? [];
   } catch {
-    return [];
+    el.vaultNote.textContent = "The ROM folder could not be read. You can still open a game from disk.";
   }
+  el.vaultList.hidden = entries.length === 0;
+  el.vaultList.replaceChildren(...entries.map(renderLibraryRow));
 }
 
 function renderLibraryRow(asset) {
@@ -5253,8 +2520,6 @@ function renderLibraryRow(asset) {
   button.type = "button";
   button.className = "vault__item";
   button.dataset.name = asset.name;
-  button.dataset.source = asset.source;
-  button.append(span("vault__tag", asset.source));
   button.append(span("vault__name", asset.name));
   if (asset.size) button.append(span("vault__size", formatSize(asset.size)));
   button.addEventListener("click", () => loadFromUrl(asset.url, asset.name));
@@ -5281,9 +2546,6 @@ el.save.addEventListener("click", () => {
   }
 });
 
-// The media host accepts images, audio, and video, and sniffs the contents to
-// confirm the declared type — so a save state cannot go there, but a
-// screenshot is exactly what it is for. States stay local downloads.
 el.store.addEventListener("click", async () => {
   const blob = await new Promise((resolve) =>
     frameCanvas.toBlob(resolve, "image/png"),
@@ -5292,36 +2554,9 @@ el.store.addEventListener("click", async () => {
     say("The screen could not be captured.", "bad");
     return;
   }
-
-  if (document.documentElement.dataset.deployment === 'local') {
-    download(new Uint8Array(await blob.arrayBuffer()), `${baseName(romName)}.png`);
-    say('Screenshot downloaded.', 'good');
-    return;
-  }
-
-  say(`Uploading ${formatSize(blob.size)}…`);
-
-  // `/api/shots` rather than the general vault upload: the server names the
-  // file, and the owner is part of that name. A name the browser chose would
-  // let anyone file a picture under someone else's account, or read theirs.
-  const form = new FormData();
-  form.append("game", gameCode ?? "");
-  form.append("file", blob, "screenshot.png");
-
-  try {
-    const response = await fetch("/api/shots", { method: "POST", body: form });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error ?? `${response.status}`);
-    say("Screenshot saved", "good");
-    // Straight into the gallery, so the picture is there when you look.
-    refreshShots();
-    lastUploadUrl = body.url ?? null;
-  } catch (error) {
-    say(`Screenshot failed: ${error.message}`, "bad");
-  }
+  download(new Uint8Array(await blob.arrayBuffer()), `${baseName(romName)}.png`);
+  say("Screenshot downloaded.", "good");
 });
-
-let lastUploadUrl = null;
 
 el.fileState.addEventListener("change", async (event) => {
   const [file] = event.target.files;
@@ -5332,7 +2567,8 @@ el.fileState.addEventListener("change", async (event) => {
     return;
   }
   try {
-    // A file downloaded from the vault is a container; a local one is raw.
+    // A state saved by the hosted site's vault is a container; a local one is
+    // raw. unpackSave accepts both.
     emu.loadState(await unpackSave(await file.arrayBuffer()));
     running = true;
     present();
@@ -5480,27 +2716,16 @@ window.addEventListener("drop", async (event) => {
 
 // --- boot ---------------------------------------------------------------
 
-/**
- * Addon manifests, fetched before anything reads a snapshot.
- *
- * The browser has no filesystem, so the server hands them over as one array.
- * Failing is not worth interrupting a boot for: the compiled addons are still
- * there, and a page with no manifests is how this worked until recently.
- */
-/** How many manifest addons loaded at boot, for the devtools handle. */
+/** How many manifest addons are installed, for the devtools handle. */
 let manifestsInstalled = 0;
-let addonUser = null;
-let playInstalledAddons = [];
 let playAddonBusy = false;
 
-// Use the same account-scoped preferences as the catalog, without navigating
-// away from the game or giving community content access to executable code.
+// The same preferences as the add-ons page, toggled without leaving the game.
 function renderPlayAddons() {
   const list = $('play-addon-list');
   const focused = document.activeElement?.dataset.addonToggle;
   list.replaceChildren();
-  const owner = addonUser;
-  function row(key, name, description, enabled, available, change) {
+  function row(key, name, description, enabled, change) {
     const label = document.createElement('label');
     label.className = 'addon-switch';
     const text = document.createElement('span');
@@ -5510,20 +2735,18 @@ function renderPlayAddons() {
     const input = document.createElement('input');
     input.type = 'checkbox'; input.checked = enabled;
     input.dataset.addonToggle = key;
-    input.disabled = !available || playAddonBusy;
+    input.disabled = playAddonBusy;
     input.addEventListener('change', async () => {
-      if (owner?.id !== addonUser?.id) { renderPlayAddons(); return; }
       const next = input.checked;
       playAddonBusy = true;
       for (const toggle of list.querySelectorAll('input')) toggle.disabled = true;
       $('play-addon-message').textContent = '';
       try {
         await change(next);
-        if (owner?.id !== addonUser?.id) return;
         await installManifests();
         addonChannel?.postMessage({ type: 'changed' });
       } catch (error) {
-        if (owner?.id === addonUser?.id) $('play-addon-message').textContent = error.message;
+        $('play-addon-message').textContent = error.message;
       } finally {
         playAddonBusy = false;
         renderPlayAddons();
@@ -5534,30 +2757,17 @@ function renderPlayAddons() {
     });
     label.append(text, input); list.append(label);
   }
-  for (const panel of vaultPanels()) {
-    row(`panel:${panel.id}`, panel.name, panel.note,
-      !hiddenPanels(owner).includes(panel.id), true, enabled => {
-        const next = new Set(hiddenPanels(owner));
-        if (enabled) next.delete(panel.id); else next.add(panel.id);
-        saveHiddenPanels(owner, [...next]);
-        applyVaultPanels();
-      });
-  }
-  const disabled = disabledBuiltins(owner);
+  const disabled = disabledBuiltins();
   for (const info of emu?.snapshot().builtin_addons ?? []) {
-    row(`builtin:${info.addon_id}`, info.display_name, 'Built-in', !disabled.includes(info.addon_id), true, enabled => {
-      const next = new Set(disabledBuiltins(owner));
+    row(`builtin:${info.addon_id}`, info.display_name, 'Built-in', !disabled.includes(info.addon_id), enabled => {
+      const next = new Set(disabledBuiltins());
       if (enabled) next.delete(info.addon_id); else next.add(info.addon_id);
-      saveDisabledBuiltins(owner, [...next]);
+      saveDisabledBuiltins([...next]);
     });
   }
-  for (const item of playInstalledAddons) {
-    row(`installed:${item.id}`, item.name, item.available ? `Installed · release ${item.release}` : 'Unavailable',
-      item.enabled, item.available, enabled => addonApi(`/${item.id}/installation`, 'PUT', { release: item.release, enabled }));
-  }
-  for (const item of localAddons(owner)) {
-    row(`local:${item.manifest.addon_id}`, item.manifest.display_name, 'Local', item.enabled, true, enabled => {
-      saveLocalAddons(owner, localAddons(owner).map(other => other.manifest.addon_id === item.manifest.addon_id ? { ...other, enabled } : other));
+  for (const item of localAddons()) {
+    row(`local:${item.manifest.addon_id}`, item.manifest.display_name, 'Local', item.enabled, enabled => {
+      saveLocalAddons(localAddons().map(other => other.manifest.addon_id === item.manifest.addon_id ? { ...other, enabled } : other));
     });
   }
   if (!list.childElementCount) list.textContent = emu ? 'No add-ons installed.' : 'Loading add-ons…';
@@ -5581,7 +2791,7 @@ try {
   addonChannel.addEventListener('message', event => {
     const request = event.data;
     if (request?.type === 'changed') { installManifests(); return; }
-    if (request?.type !== 'preview' || request.owner !== (addonUser?.id ?? null) || !emu?.hasRom) return;
+    if (request?.type !== 'preview' || !emu?.hasRom) return;
     try {
       const manifest = { ...request.manifest, addon_id: 'preview.reader' };
       emu.installManifests([manifest]);
@@ -5595,19 +2805,20 @@ try {
   });
 } catch {}
 window.addEventListener('storage', event => { if (event.key?.startsWith('tinybird:local-addons:') && !event.key.endsWith(':draft')) installManifests(); });
-window.addEventListener('focus', async () => { await accounts?.refresh(); if (emu) installManifests(); });
-// Picks up moderation and account installation changes made on other devices.
-setInterval(() => { if (emu && !document.hidden) installManifests(); }, 30000);
+window.addEventListener('focus', () => { if (emu) installManifests(); });
 
+/**
+ * Install this browser's enabled local add-ons beside the compiled ones.
+ *
+ * Failing is not worth interrupting a boot for: the compiled addons are still
+ * there.
+ */
 async function installManifests() {
   if (!emu) return;
   const generation = ++addonGeneration;
   try {
     applyBuiltinPreferences();
-    const result = addonUser ? await addonApi('/installed') : { installed: [] };
-    if (generation !== addonGeneration) return;
-    playInstalledAddons = result.installed;
-    const manifests = enabledManifests(result.installed, localAddons(addonUser));
+    const manifests = enabledManifests(localAddons());
     const installed = emu.installManifests(manifests);
     activeManifests = manifests;
     manifestsInstalled = installed;
@@ -5618,10 +2829,6 @@ async function installManifests() {
     if ($('addon-menu').matches(':popover-open')) renderPlayAddons();
   } catch (error) {
     if (generation === addonGeneration) {
-      if (error.status === 401 || error.status === 409) {
-        activeManifests = []; emu.installManifests([]); renderSnapshot(emu.snapshot());
-        accounts?.refresh();
-      }
       $('addon-runtime-status').textContent = `Add-ons: ${error.message}`;
       $('play-addon-message').textContent = `Could not refresh add-ons: ${error.message}`;
     }
@@ -5630,14 +2837,14 @@ async function installManifests() {
 
 function applyBuiltinPreferences() {
   const known = new Set((emu.snapshot().builtin_addons ?? []).map(info => info.addon_id));
-  emu.setDisabledBuiltins(disabledBuiltins(addonUser).filter(id => known.has(id)));
+  emu.setDisabledBuiltins(disabledBuiltins().filter(id => known.has(id)));
 }
 
 function paintAddonStatus(snapshot) {
   const statuses = snapshot?.community_addons ?? [];
   const status = statuses.length
     ? statuses.map(item => `${item.display_name}: ${item.error ?? item.status}`).join(' · ')
-    : manifestsInstalled ? 'Load a game to activate your add-ons.' : 'Add community readers to your game.';
+    : manifestsInstalled ? 'Load a game to activate your add-ons.' : 'Build readers on the Add-ons page.';
   if ($('addon-runtime-status').textContent !== status) $('addon-runtime-status').textContent = status;
 }
 
@@ -5646,9 +2853,9 @@ async function boot() {
     emu = await TinyBird.load();
     // Before the first snapshot: the registry is built on first read.
     await installManifests();
-    // A handle for devtools. Everything the page does goes through these two
-    // objects, so a session can be inspected — or a register read out while a
-    // link misbehaves — without instrumenting the page to find out.
+    // A handle for devtools and for the Workshop's embedded player. Everything
+    // the page does goes through the emulator, so a session can be inspected
+    // without instrumenting the page to find out.
     window.tinybird = {
       previewAddon: previewWorkshop,
       showAddonPreview(result) {
@@ -5661,15 +2868,10 @@ async function boot() {
         if (workshopReadout.parentElement !== host) host.replaceChildren(workshopReadout);
       },
       refreshAddons: installManifests,
-      refreshAccount: () => accounts?.refresh(),
-      get addonOwner() { return addonUser?.id ?? null; },
       get emu() {
         return emu;
       },
-      get lobby() {
-        return lobby;
-      },
-      /** Addon manifests installed at boot, beyond the compiled addons. */
+      /** Addon manifests installed, beyond the compiled addons. */
       get manifests() {
         return manifestsInstalled;
       },
@@ -5685,25 +2887,6 @@ async function boot() {
           bindings: controls.bindings,
         };
       },
-      get link() {
-        return {
-          ...linkTally,
-          sessionPhase,
-          sessionFrame: session?.frame ?? null,
-          sessionTransfers: session?.transfers ?? 0,
-          lastVerifiedFrame: session?.lastVerifiedFrame ?? 0,
-          sessionId: session?.id ?? null,
-          sessionNote,
-          bufferedFrames: session?.bufferedFrames ?? null,
-          frame: linkFrame,
-          granted: grantedFrame,
-          phase: linkPhase,
-          seat: mySeat(),
-          cable: cableShape,
-          sending: emu ? emu.linkSendValue.toString(16).padStart(4, "0") : null,
-          recent: [...linkRecent],
-        };
-      },
     };
   } catch (error) {
     setLink("error", "emulator unavailable");
@@ -5713,6 +2896,7 @@ async function boot() {
         : "The emulator module could not be loaded.",
       "bad",
     );
+    el.vaultList.hidden = false;
     el.vaultList.replaceChildren(note("Build the emulator module to play here."));
     return;
   }
@@ -5734,21 +2918,17 @@ async function boot() {
     biosLoaded ? "" : "bad",
   );
 
-  // A ?rom= link makes a vault asset shareable: open the URL and it boots.
-  const requested = new URLSearchParams(location.search).get("rom");
   requestAnimationFrame((now) => {
     fpsWindowStart = now;
     tick(now);
   });
 
-  // Before the library, because a ?rom= link boots straight into a game and
-  // that immediately asks for its saves. Mounted here rather than at load, so
-  // the first answer arrives in step with the rest of startup.
-  accounts = mountAccount({ onChange: onAccountChange });
-  accounts?.extras.append(claimButton);
-  await accounts?.refresh();
+  await refreshRecovery();
   await loadLibrary();
 
+  // A ?rom= link boots straight into a game, from the library or any URL the
+  // browser can fetch.
+  const requested = new URLSearchParams(location.search).get("rom");
   if (requested) {
     const label =
       new URLSearchParams(location.search).get("name") ??

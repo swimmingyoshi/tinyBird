@@ -17,10 +17,10 @@ try {
       <main class="addons-page"><details class="workshop" id="workshop" open></details></main><script type="module">
       import { mountWorkshop } from '/workshop.js';
       const ram = new Uint8Array(0x40000); new DataView(ram.buffer).setUint16(4, 99, true);
-      window.user = null; window.rom = { game_code: 'TBST', revision: 2, title: 'Synthetic test' };
+      window.rom = { game_code: 'TBST', revision: 2, title: 'Synthetic test' };
       window.emu = { hasRom: true, frameCount: 0, snapshot: () => ({rom}), readMemory: (address, length) => ram.slice(address - 0x02000000, address - 0x02000000 + length) };
       window.workshop = mountWorkshop({ root: document.getElementById('workshop'), getEmulator: () => emu,
-        getUser: () => user, preview: () => ({status:'active',sections:[]}), installed: () => {}, focusGame: () => {} });
+        preview: () => ({status:'active',sections:[]}), installed: () => {}, focusGame: () => {} });
       </script></body></html>` });
     if (path === '/console.css') return route.fulfill({ contentType: 'text/css', body: (await Promise.all(['console.css', 'site.css', 'playroom.css'].map(file => readFile(`crates/tinybird-web/src/assets/${file}`, 'utf8')))).join('\n') });
     if (/^\/[\w.-]+\.(js|css)$/.test(path)) {
@@ -47,14 +47,10 @@ try {
   await $('observations').scrollIntoViewIfNeeded();
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await page.screenshot({path:resolve(output,'workshop-export-mobile.png')});
-  // Check reload persistence and game/account separation.
+  // Check reload persistence and per-game separation.
   await page.reload(); await page.waitForFunction(() => window.workshop);
   await $('observations').locator('summary').click();
   assert.equal(await $('observation-count').textContent(), '1');
-  await page.evaluate(() => { window.user = {id:'other-account'}; });
-  await page.waitForFunction(() => document.querySelector('[data-observation-count]').textContent === '0');
-  await page.evaluate(() => { window.user = null; });
-  await page.waitForFunction(() => document.querySelector('[data-observation-count]').textContent === '1');
   await page.evaluate(() => { window.rom = {...rom,revision:3}; });
   await page.waitForFunction(() => document.querySelector('[data-observation-count]').textContent === '0');
   await $('observation-import').setInputFiles(configPath);

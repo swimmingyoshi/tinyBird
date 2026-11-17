@@ -22,21 +22,14 @@
           tinyBird
         </a>
         <nav class="bar__nav" aria-label="Main navigation">
-          <a href="/">Home</a>
+          <a href="/">Start</a>
           <a class="is-current" aria-current="page" href="/play">Play</a>
           <a href="/addons">Add-ons</a>
-          <a href="/info">Info</a>
-          <a href="/contact">Contact</a>
         </nav>
         <p class="bar__state" id="link-state" data-state="idle">
           <span class="dot" aria-hidden="true"></span><span id="link-label">no cartridge</span>
         </p>
 
-        <!-- Account. In the bar rather than the rail: it is checked rarely
-             and read never, so it should cost no vertical space and should
-             not leave an email address on screen while someone is streaming.
-             The menu itself is built by account.js, which every page uses. -->
-        <div class="account" id="account" hidden></div>
       </header>
 
       <!-- Frame rate and the last thing that happened. Above the deck rather
@@ -54,11 +47,7 @@
       <main class="deck">
         <!-- Screen ----------------------------------------------------- -->
         <section class="screen-col">
-          <!-- The second slot appears only while another player is being
-               watched. Keeping both pictures in one grid makes a shared lobby
-               read as one play space instead of putting the remote game below
-               the controls, far away from the local game it accompanies. -->
-          <div class="screens" id="lobby-workspace" data-view="solo">
+          <div class="screens" data-view="solo">
             <figure class="screens__player screens__player--local">
               <div class="screen" id="screen" data-mode="empty" data-grid="off">
                 <!-- Sized by script to a whole multiple of 240x160 so the picture
@@ -116,21 +105,8 @@
                   <p class="empty-help">Already have a save state? Open your game first, then use Save &amp; load.</p>
                 </div>
               </div>
-              <figcaption class="lobby__caption screens__local-caption">
-                Your game
-              </figcaption>
             </figure>
 
-            <figure class="lobby__watch" id="lobby-watch" hidden>
-              <img
-                class="lobby__screen"
-                id="lobby-screen"
-                alt="Shared game screen"
-                width="240"
-                height="160"
-              />
-              <figcaption class="lobby__caption" id="lobby-caption">&mdash;</figcaption>
-            </figure>
           </div>
 
           <!-- Playback stays visible; secondary tools open from the game menu. -->
@@ -169,22 +145,12 @@
             </div>
             <div class="transport__actions">
               <button type="button" class="key" aria-expanded="false" aria-controls="sheet-saves" data-tool="saves" data-popup="sheet-saves">Save &amp; load</button>
-              <button type="button" class="key" id="btn-vault" aria-haspopup="dialog" title="Vault saves and screenshots for this game">Vault</button>
               <button class="key" id="btn-game-menu" type="button" popovertarget="game-menu" aria-controls="game-menu" aria-expanded="false"><span aria-hidden="true">&#9776;</span> Menu</button>
             </div>
             <div id="game-menu" class="game-menu" popover="auto" aria-label="Game menu">
               <div class="game-menu__group" role="group" aria-label="Game">
                 <p class="game-menu__label">Game</p>
-                <button class="key" id="btn-gallery" type="button" aria-haspopup="dialog">Screenshots</button>
                 <button type="button" class="key" aria-expanded="false" aria-controls="sheet-cartridge" data-tool="cartridge" data-popup="sheet-cartridge">Cartridge</button>
-                <button
-                  class="key"
-                  id="btn-lobby" data-popup="lobby-sheet" aria-controls="lobby-sheet" aria-expanded="false"
-                  type="button"
-                  title="Host or join a room and play alongside other people"
-                >
-                  Multiplayer / Link cable<span class="key__badge" id="lobby-badge" hidden>in</span>
-                </button>
               </div>
               <div class="game-menu__group" role="group" aria-label="Preferences">
                 <p class="game-menu__label">Preferences</p>
@@ -245,7 +211,7 @@
           <p class="rail-note" id="addon-empty">Your game at a glance.<br /><br />Load a game to see supported live details here: your party, health, location and progress.</p>
         </aside>
 
-        <!-- Cartridge, saves, library ----------------------------------- -->
+        <!-- Cartridge and the second add-on column ------------------------ -->
         <aside class="readout readout--info">
           <!-- The cartridge, as a strip rather than a panel.
 
@@ -269,22 +235,6 @@
             <span class="cartstrip__addon" id="cart-addon">—</span>
           </div>
 
-          <!-- Bodies for the two built-in panes, Saves and Screenshots.
-               They start here and are moved into a rail slot, or lent to the
-               Vault modal, as needed — this holder is only ever where they
-               begin, never anything the player sees. Keeping one copy of each
-               is what lets the same list appear in the sidebar and the modal
-               without a second set of ids or a second render path. -->
-          <div id="rail-parts" hidden>
-            <div id="pane-saves">
-              <div id="saves-panel" hidden><ul class="saves__list" id="saves-list"></ul></div>
-              <p class="rail-note" id="saves-off">Load a cartridge to see its vault saves.</p>
-            </div>
-            <div id="pane-shots">
-              <ul class="shots gallery-thumbnails" id="shots-list" aria-label="Screenshot thumbnails" hidden></ul>
-              <p class="rail-note" id="shots-off">Take a screenshot using the camera on the game screen.</p>
-            </div>
-          </div>
           <section class="panel deckpanel" id="info-panel">
             <div class="tabs__pane" id="right-pane"></div>
           </section>
@@ -323,20 +273,10 @@
                 </label>
                 <button
                   class="key"
-                  id="btn-cloud"
-                  type="button"
-                  disabled
-                  title="Keep a save state in your account, reachable from any browser"
-                >
-                  Save to vault
-                </button>
-                <button class="key" id="btn-vault-saves" type="button">Browse vault saves</button>
-                <button
-                  class="key"
                   id="btn-store"
                   type="button"
                   disabled
-                  title="Keep a picture of the screen in your account"
+                  title="Download a picture of the screen"
                 >
                   Screenshot
                 </button>
@@ -371,67 +311,8 @@
               </div>
       </div>
 
-      <div class="game-menu game-menu--lobby" popover="auto" id="lobby-sheet" aria-label="Lobby and link cable">
-        <div class="popup-heading"><strong>Multiplayer <span id="lobby-note"></span></strong><button type="button" class="popup-close" data-close-popup aria-label="Close multiplayer">&#215;</button></div>
-
-        <div class="sheet__body">
-          <div id="lobby-out">
-            <p class="popup-note">Start a room or join a friend.</p>
-            <p class="lobby-step">Join with a room code</p>
-            <div class="lobby__row">
-              <input
-                type="text"
-                id="lobby-code"
-                placeholder="Room code"
-                aria-label="Room code"
-                maxlength="16"
-                autocomplete="off"
-                spellcheck="false"
-              />
-              <button class="key key--slim" id="btn-join" type="button">Join</button>
-            </div>
-            <div class="lobby-divider"><span>or host your own</span></div>
-            <button class="key key--slim key--wide" id="btn-host" type="button">
-              Start a room
-            </button>
-            <p class="lobby__hint" id="lobby-hint">
-              Load a game on each device. Start a room, share its code, then
-              enable Link cable on both screens to play together.
-            </p>
-          </div>
-
-          <div id="lobby-in" hidden>
-            <p class="lobby-step">Your room code <span>Share this with your friend</span></p>
-            <p class="lobby__code">
-              <span id="lobby-room">—</span>
-              <button class="saves__act" id="btn-copy-code" type="button">copy</button>
-              <button class="saves__act" id="btn-lock" type="button" hidden>lock</button>
-              <button class="saves__act saves__act--danger" id="btn-leave" type="button">
-                leave
-              </button>
-            </p>
-            <label class="toggle lobby__share">
-              <input type="checkbox" id="opt-share" />
-              <span>Share my screen</span>
-            </label>
-
-            <label class="toggle lobby__share">
-              <input type="checkbox" id="opt-link" />
-              <span>Link cable</span>
-            </label>
-            <p class="lobby__hint" id="lobby-link-note" role="status" aria-live="polite">
-              Off. Games will not see each other.
-            </p>
-
-            <button class="key key--slim" id="btn-link-retry" type="button" hidden>Reconnect cable</button>
-            <p class="lobby__hint">Each browser needs both cartridges when playing different games.
-              Keep both tabs running during a trade or battle. Use the multiplayer
-              area inside each game once the cable says Connected.</p>
-            <ul class="lobby__list" id="lobby-members"></ul>
-          </div>
-        </div>
-      </div>
-
+           and applied by theme.js on every page, so this one panel dresses the
+           whole site, not just the playroom. -->
       <!-- Appearance. The theme and the background are stored on the device
            and applied by theme.js on every page, so this one panel dresses the
            whole site, not just the playroom. -->
@@ -479,7 +360,7 @@
         </section>
         <section class="game-menu__group settings-group">
           <h3 class="game-menu__label">Read-outs</h3>
-          <label class="toggle" title="The frame rate and sign-in line above the game, and the key hints below it">
+          <label class="toggle" title="The frame rate above the game, and the key hints below it">
             <input type="checkbox" id="opt-hide-readouts" />
             <span>Hide fps and hints</span>
           </label>
@@ -547,25 +428,6 @@
         <div class="popup-heading"><strong id="pane-layout-title">Arrange pane</strong><button type="button" class="popup-close" data-close-popup aria-label="Close">&#215;</button></div>
         <div class="popup-actions" id="pane-layout-actions"></div>
       </div>
-      <dialog class="sheet screenshot-gallery" id="vault-modal" aria-label="Vault">
-        <form method="dialog" class="sheet__head">
-          <div><h2>Vault</h2><p id="shot-when"></p></div>
-          <button class="key key--slim" type="submit">Close</button>
-        </form>
-        <div class="vault-tabs" role="tablist" aria-label="Vault sections">
-          <button type="button" class="vault-tab" role="tab" id="vault-tab-saves" aria-controls="vault-panel-saves" aria-selected="true" data-vault-tab="saves">Saves</button>
-          <button type="button" class="vault-tab" role="tab" id="vault-tab-shots" aria-controls="vault-panel-shots" aria-selected="false" data-vault-tab="shots">Screenshots</button>
-        </div>
-        <div class="vault-panel" id="vault-panel-saves" role="tabpanel" aria-labelledby="vault-tab-saves"></div>
-        <div class="vault-panel" id="vault-panel-shots" role="tabpanel" aria-labelledby="vault-tab-shots" hidden>
-        <div class="gallery-stage" id="gallery-stage" hidden>
-          <button type="button" class="gallery-arrow" id="shot-prev" aria-label="Previous screenshot" title="Previous screenshot (Left arrow)">&#10094;</button>
-          <img class="shot__full" id="shot-full" alt="" />
-          <button type="button" class="gallery-arrow" id="shot-next" aria-label="Next screenshot" title="Next screenshot (Right arrow)">&#10095;</button>
-        </div>
-        <div class="gallery-footer"><span id="shot-position" role="status"></span><a id="shot-open" href="#" target="_blank" rel="noreferrer" hidden>Open original &#8599;</a></div>
-        </div>
-      </dialog>
 
       <!-- Controls.
 

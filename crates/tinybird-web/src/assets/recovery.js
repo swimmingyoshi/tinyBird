@@ -1,6 +1,9 @@
-// One automatic checkpoint per account in this browser. Named vault saves are separate.
+// One automatic checkpoint in this browser, kept in IndexedDB.
 export const RECOVERY_INTERVAL = 30_000;
-export const recoveryOwner = user => String(user?.id ?? 'guest');
+// The key the checkpoint is stored under. Checkpoints used to be kept per
+// account, and "guest" was the signed-out one; keeping the name means a
+// checkpoint written before still restores.
+export const RECOVERY_OWNER = 'guest';
 export const observationKey = (owner, game) => `tinybird:observations:${owner}:${game.game_code}:${game.revision}`;
 
 export async function fingerprint(bytes) {

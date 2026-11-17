@@ -1,4 +1,4 @@
-// Browser regression for add-on panes and the Vault gallery.
+// Browser regression for add-on panes: splitting, resizing and mobile fit.
 // Uses the same Playwright installation as browser_workshop_ui.mjs.
 // Run from the repository root; TINYBIRD_TEST_BASE defaults to localhost:8877.
 import { chromium } from '../target/workshop-ui-check/node_modules/playwright/index.mjs';
@@ -10,9 +10,6 @@ try {
  const page=await browser.newPage({viewport:{width:1440,height:1000}}); const errors=[]; page.on('pageerror',e=>errors.push(e.message));
  await page.route('**/*',async route=>{
   const path=new URL(route.request().url()).pathname;
-  if(path==='/api/shots') return route.fulfill({json:{configured:true,shots:[1,2,3].map(i=>({url:`https://fixture.invalid/${i}.svg`,game_code:'BPRE',taken_at_ms:i*10000000}))}});
-  if(path.startsWith('/api/saves')) return route.fulfill({json:{configured:true,backend:'private',limit:5,saves:[]}});
-  if(new URL(route.request().url()).host==='fixture.invalid') return route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160"><rect width="240" height="160" fill="teal"/></svg>'});
   if(path==='/console.css') return route.fulfill({contentType:'text/css',body:(await Promise.all(['console.css','site.css','playroom.css'].map(n=>readFile('crates/tinybird-web/src/assets/'+n,'utf8')))).join('\n')});
   if(path==='/play'|| /\.(js|css)$/.test(path)) {
    try {return route.fulfill({contentType:path==='/play'?'text/html':path.endsWith('.js')?'text/javascript':'text/css',body:await readFile('crates/tinybird-web/src/assets/'+(path==='/play'?'play.html':path.slice(1)),'utf8')});}catch{}
@@ -29,20 +26,11 @@ try {
  assert.equal(await page.locator('#left-pane').getAttribute('data-split'),'true');
  await page.locator('.rail-divider').first().focus(); await page.keyboard.press('ArrowDown');
  assert.equal(await page.locator('.rail-divider').first().getAttribute('aria-valuenow'),'55');
- await page.locator('#btn-vault').click(); await page.locator('#vault-tab-shots').click();
- await page.waitForFunction(()=>document.querySelector('#shot-position').textContent==='1 of 3');
- await page.locator('#shot-next').click(); assert.equal(await page.locator('#shot-position').textContent(),'2 of 3');
- await page.locator('#vault-tab-saves').focus(); await page.keyboard.press('ArrowRight');
- assert.equal(await page.locator('#vault-tab-shots').getAttribute('aria-selected'),'true');
- assert.equal(await page.locator('#shot-position').textContent(),'2 of 3');
- await page.locator('#shot-next').focus();await page.keyboard.press('ArrowRight');
- assert.equal(await page.locator('#shot-position').textContent(),'3 of 3');
- await page.screenshot({path:'target/browser-play-ui/vault-final.png'});
+ await page.screenshot({path:'target/browser-play-ui/panes-final.png'});
  await page.setViewportSize({width:390,height:844});
- assert.equal(await page.locator('#vault-modal').evaluate(e=>e.scrollWidth>e.clientWidth),false);
- await page.keyboard.press('Escape');
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
  await page.reload();await page.waitForFunction(()=>window.tinybird?.emu);
  await page.goto(BASE+'/play?embed=workshop');await page.waitForFunction(()=>window.tinybird?.emu);
  assert.equal(errors.length,0,errors.join('\n'));
- console.log('PASS: current shared-workspace UI boots, split resizing, Vault gallery, tab/gallery keyboard separation, mobile fit, reload and embedded Workshop; no page errors.');
+ console.log('PASS: play UI boots, pane split and resizing, mobile fit, reload and embedded Workshop; no page errors.');
 } finally {await browser.close();}
