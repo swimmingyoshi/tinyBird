@@ -814,7 +814,15 @@ fn wasm_is_behind(wasm_path: &FsPath) -> Option<String> {
 /// still builds for anyone who has not installed the `wasm32` target.
 async fn wasm_module(State(state): State<AppState>) -> Response {
     match tokio::fs::read(&state.wasm_path).await {
-        Ok(bytes) => binary(StatusCode::OK, bytes, "application/wasm"),
+        Ok(bytes) => {
+            // Half a megabyte, and the same half a megabyte until it is
+            // rebuilt. Tagged by content rather than by modification time, so
+            // a rebuild that changes nothing costs the browser nothing either.
+            let tag = content_tag(&bytes);
+            let mut response = binary(StatusCode::OK, bytes, "application/wasm");
+            revalidate_with(&mut response, tag);
+            response
+        }
         Err(_) => json_error(
             StatusCode::NOT_FOUND,
             &format!(
@@ -2435,13 +2443,32 @@ async fn ffta_job_png(Path(job): Path<String>) -> Response {
     response
 }
 
+/// An asset compiled into the binary.
+///
+/// The URL is stable and the content changes when the server is rebuilt, so the
+/// browser is told to ask every time (`no-cache`) and given a tag to ask with.
+/// `deployment::guard` turns a matching `If-None-Match` into an empty 304.
 fn static_text(body: &'static str, content_type: &'static str) -> Response {
     let mut response = text(StatusCode::OK, body.to_string(), content_type);
-    // These stable asset URLs change when the server is rebuilt.
+    revalidate_with(&mut response, content_tag(body.as_bytes()));
     response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    response
+}
+
+/// Mark a response as "check with me first", identified by `tag`.
+fn revalidate_with(response: &mut Response, tag: u64) {
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    if let Ok(etag) = HeaderValue::from_str(&format!("\"{tag:016x}\"")) {
+        headers.insert(header::ETAG, etag);
+    }
+}
+
+/// FNV-1a over the content. It identifies a version of a file to a browser
+/// that already has one; nothing depends on it being hard to forge.
+fn content_tag(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 fn text(status: StatusCode, body: String, content_type: &'static str) -> Response {

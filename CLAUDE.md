@@ -1,7 +1,8 @@
 # tinyBird
 
 A GBA emulator in Rust: a native core, a desktop runner, a WebAssembly build, a
-browser site, and a JSON addon system that reads live game state.
+browser site, a headless runtime for automation, and a JSON addon system that
+reads live game state.
 
 Orientation lives in [`PROGRESS.md`](PROGRESS.md), with the long versions in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (emulator internals),
@@ -89,7 +90,7 @@ cargo build -p tinybird-wasm --target wasm32-unknown-unknown --release
 
 ## Testing
 
-Roughly 650 Rust tests and 72 browser-module tests. CI builds and tests the
+Roughly 760 Rust tests and 110 browser-module tests. CI builds and tests the
 non-windowing crates, runs the GBA accuracy suite as a gate, and builds the
 WebAssembly module.
 
