@@ -355,7 +355,29 @@ impl Ppu {
     }
 
     /// Step the PPU by multiple cycles, stopping only at timing boundaries.
-    pub fn step_cycles(&mut self, mut cycles: u32) -> PpuEvents {
+    ///
+    /// Called after every instruction, and almost every call crosses nothing:
+    /// a scanline has two boundaries in 1232 cycles. Those calls take the
+    /// inlined path here. The full loop is kept out of line on purpose. With
+    /// the scanline renderer inlined into it, the compiler set up some forty
+    /// field addresses at its entry, and paying for that on every instruction
+    /// was about 8% of a frame.
+    #[inline(always)]
+    pub fn step_cycles(&mut self, cycles: u32) -> PpuEvents {
+        let boundary = if self.cycle < HBLANK_START {
+            HBLANK_START
+        } else {
+            CYCLES_PER_SCANLINE
+        };
+        if self.cycle + cycles < boundary {
+            self.cycle += cycles;
+            return PpuEvents::default();
+        }
+        self.step_cycles_across_boundaries(cycles)
+    }
+
+    #[inline(never)]
+    fn step_cycles_across_boundaries(&mut self, mut cycles: u32) -> PpuEvents {
         let mut events = PpuEvents::default();
 
         while cycles != 0 {
