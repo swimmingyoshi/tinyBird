@@ -47,7 +47,8 @@ python examples/python/train.py "your-mario.gba" examples/python/tasks/mario-ax4
 ```
 
 No ROM, BIOS, state, or trained model is committed. Use a raw **Save to file**
-state, not a compressed Vault container. If your baseline needs a BIOS, supply
+state, not one downloaded from the hosted site's vault (those are wrapped in a
+compressed container). If your baseline needs a BIOS, supply
 `--bios`. The tested baseline rendered correctly without an additional BIOS
 argument; that does not establish BIOS-free compatibility with other baselines.
 

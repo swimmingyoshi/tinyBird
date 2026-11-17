@@ -1,19 +1,14 @@
 # tinyBird — where things stand
 
-Last updated: 16 November 2026.
-
-This file is also the source for the site's `/info` page
-([`crates/tinybird-web/src/assets/info.html`](crates/tinybird-web/src/assets/info.html)),
-which is hand-kept in step with it — change one, change the other.
+Last updated: 17 November 2026.
 
 This is the short version. The long versions live in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (emulator internals),
-[`docs/WEB.md`](docs/WEB.md) (the browser build and the site),
+[`docs/WEB.md`](docs/WEB.md) (the browser build and the local server),
 [`ADDONS.md`](ADDONS.md) (the addon contract), and
 [`docs/ADDON_DEVELOPMENT.md`](docs/ADDON_DEVELOPMENT.md) (how to write one).
 Newer ground has its own pages:
-[`docs/deployment-modes.md`](docs/deployment-modes.md) (local, development and
-production), [`docs/automation.md`](docs/automation.md) (headless control),
+[`docs/automation.md`](docs/automation.md) (headless control),
 [`docs/local-training.md`](docs/local-training.md) (reinforcement learning),
 and [`docs/session-recovery.md`](docs/session-recovery.md).
 
@@ -23,17 +18,17 @@ and [`docs/session-recovery.md`](docs/session-recovery.md).
 |---|---|
 | `tinybird-core` | CPU, bus, BIOS HLE, DMA, timers, PPU, APU, save types, savestates, link cable. Five commercial ROMs boot, render, and save. |
 | `tinybird-desktop` | Windowed runner: audio, keyboard and gamepad, battery saves, quicksave, stream overlay, addon dashboard. |
-| `tinybird-web` | Axum server: the browser build, save vault, accounts, rooms, the addon Workshop and community addons. Runs in one of three modes — `local` (the default, loopback only, no cloud services), `development`, or `production`. |
+| `tinybird-web` | Local server, loopback only: the browser player, automatic recovery, the add-on Workshop, local ROMs and BIOS, and the OBS overlay. The hosted site built on it as a proof of concept now lives in a separate private repository. |
 | `tinybird-wasm` | The core as a WebAssembly module with a plain C ABI. No `wasm-bindgen`. |
-| `tinybird-addons` | The addon contract: schema, memory view, registry, and manifests — addons written as JSON, loaded from `addons/` on the desktop and over `/api/addons` in the browser. |
+| `tinybird-addons` | The addon contract: schema, memory view, registry, and manifests — addons written as JSON, loaded from `addons/` on the desktop and kept in browser storage on the web. |
 | `tinybird-games` | Shipped addons: FireRed/LeafGreen, FFTA, and a cartridge fallback. |
 | `tinybird-probe` | The address-finding tool: diffing, scanning, text search. |
 | `tinybird-runtime` | The core without a window: `tinybird-headless` takes JSON commands on stdin and answers with frames and named memory observations. The Python client and the optional Gymnasium training tools in `examples/python` drive it. |
 
-Roughly 760 Rust tests and 110 browser-module tests. CI builds and tests the
-non-windowing crates, runs the GBA accuracy suite as a gate, and builds the
-WebAssembly module. `cargo fmt --check`, `cargo clippy -D warnings` and
-`cargo audit` are gates too.
+Roughly 610 Rust tests and 90 browser-module tests. CI builds and tests the
+non-windowing crates, runs the GBA accuracy suite as a gate, builds the
+WebAssembly module and smoke-tests the local server. `cargo fmt --check`,
+`cargo clippy -D warnings` and `cargo audit` are gates too.
 
 ## Known gaps
 
@@ -50,14 +45,9 @@ Each of these is written up where it belongs; this is the index.
   export rather than the emulator in the page beside it, so on a server run by
   itself it shows a snapshot that never changes. `TINYBIRD_WEB_OVERLAY=1`
   re-enables it. ([WEB.md](docs/WEB.md))
-- **Screenshots cannot be deleted from the page.** The `Shots` pane lists your
-  own and opens one full size; removing one means removing it from the vault by
-  hand.
-- **A vault URL is unlisted, not protected.** Listings are scoped to the
-  signed-in account, but anyone given a screenshot's CDN URL can open it. The
-  private-backend path `/api/saves` can use has no equivalent for pictures yet.
-  Screenshots taken before ownership existed carry no owner and appear in no
-  listing, but are still on public URLs.
+- **No two-player mode in the browser.** The link cable works in the core and
+  between two wasm instances (`link.js`, tested), but carrying input between
+  browsers needed the hosted lobby. Two consoles in one tab would need no server.
 - **Frame throughput is the ceiling on fast forward.** A frame cost ~11.8ms in
   the browser against a 16.74ms budget, so fast forward topped out near 1.4x.
   A profile-driven fix to the PPU's per-instruction entry has since taken about
@@ -77,7 +67,7 @@ Each of these is written up where it belongs; this is the index.
 
 ```bash
 cargo run                       # desktop
-cargo run -p tinybird-web       # the site, on http://127.0.0.1:8877
+cargo run -p tinybird-web       # the browser player, on http://127.0.0.1:8877
 
 # the browser build needs the module first
 rustup target add wasm32-unknown-unknown
