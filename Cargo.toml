@@ -49,8 +49,9 @@ opt-level = 2
 # about 14.5. It did not: frame time was unchanged inside measurement noise, so
 # the cost is in the interpreter itself and not in what the linker can see.
 #
-# What it does buy is a wasm module about 14% smaller (610KB to 523KB), which
-# is worth having on a page someone loads over a network. The trade is a
+# What it does buy is a wasm module about 14% smaller (610KB to 523KB when it
+# was measured; about 910KB now, after save states and addons), which is worth
+# having on a page someone loads over a network. The trade is a
 # release build that takes roughly ten times as long; dev builds are untouched.
 #
 # `panic = "abort"` is deliberately *not* set here: it would break

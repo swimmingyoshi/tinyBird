@@ -1505,7 +1505,8 @@ console.log("round trip:", back.equals(raw));
 
 ### Where the frame time goes
 
-Measured in the browser with FireRed running, all figures per call:
+Measured in the browser with FireRed running, all figures per call, before the
+November 2026 PPU change described below took about 14% off `runFrame`:
 
 | | ms |
 |---|---|
@@ -1555,23 +1556,78 @@ landing somewhere different each time, is not a bug worth leaving lying around.
 
 **Cross-crate inlining: no effect on speed, kept for size.** A release profile
 with `lto = "fat"` and `codegen-units = 1` left frame time unchanged inside
-noise. It does make the wasm module 14% smaller (610KB to 523KB), which is
-worth having on a page loaded over a network, so it stayed for that reason and
-the comment in `Cargo.toml` says so.
+noise. It made the wasm module 14% smaller at the time (610KB to 523KB), which
+is worth having on a page loaded over a network, so it stayed for that reason
+and the comment in `Cargo.toml` says so. The module has since grown to about
+910KB with save states, addons and game readers, 291KB gzipped. 143KB of that
+is the function-name section; stripping it would save only 20KB after
+compression and cost readable stack traces when the module traps, so it stays.
+
+**Audio was never a third of the frame.** An earlier note here put audio at
+2.7ms of an 8.5ms native frame. The "audio off" measurement booted the
+cartridge cold and timed the intro, while the "audio on" one restored an
+overworld save state, so the gap was mostly two different workloads. On the
+same scene the two are indistinguishable inside noise, and a profile puts the
+whole APU under 2% of a frame. `tests/throughput.rs` now runs both from the
+same state.
+
+**The PPU's per-instruction entry: kept, about 11% native and 14% in the
+browser.** The first real profile (November 2026) found 8% of all samples in a
+block of about forty address computations at the top of `Ppu::step_cycles`.
+With the scanline renderer inlined into it, the compiler set those up on entry,
+and `step_cycles` runs after every instruction while only a few hundred calls a
+frame cross a boundary. It now has an inlined fast path that just advances the
+cycle counter, and the loop that renders lives out of line. Native went from
+about 10.3ms to 9.0ms on the FireRed overworld scene; Node, as a stand-in for
+the browser, from 14.3ms to 12.3ms.
+
+**The timer prescaler divide: kept, small.** The hottest single instruction in
+that profile was a hardware `div` in `TimerController::tick`, dividing by a
+prescaler read from a table. The prescalers are powers of two, so it is a shift
+and a mask now. The effect is below what this machine can measure, but it is
+strictly less work for the same result.
+
+Both changes were checked by running the old and new core side by side from the
+same state for 1,000–1,500 frames on FireRed, Emerald, The Minish Cap and FFTA
+and comparing a hash of every frame and every audio sample: identical.
+
+#### How to profile
+
+On Windows without an elevated shell, ETW-based profilers (WPR, xperf, samply)
+are not available. What worked: a small harness that runs frames on one thread
+while a second thread suspends it about every half millisecond, reads the
+instruction pointer with `GetThreadContext`, and resumes it. Build with
+`debug = "line-tables-only"`, then resolve the addresses afterwards with
+`llvm-symbolizer --inlining` against the PDB. Attribute samples to source lines
+rather than functions: fat LTO inlines nearly everything into `Gba::step`, so a
+function-level view says almost nothing.
+
+Frame-time A/B tests need interleaved runs and the best of several, and even
+then a busy desktop swings 10% between rounds. Thread CPU time
+(`GetThreadTimes`) is steadier than wall time.
 
 #### What is left
 
-Audio still costs about 2.7ms of a frame natively (8.5ms with, 5.8ms without),
-and that remainder is real signal processing rather than call overhead —
-`generate_sample` and the channel loops do the same work however they are
-batched. The rest is the CPU and PPU.
+FireRed in the overworld runs about 85,000 instructions a frame and never
+halts, so the cost is per instruction: roughly 100ns each natively. From the
+profile, in rough order:
 
-The next thing worth doing is finding out where inside a frame the time goes:
-CPU dispatch, the PPU scanline renderer, or bus reads. `step()` is a good place
-to start looking — it does a lot of bookkeeping per instruction, including a
-full bus read of the current opcode in `current_hle_swi_comment` purely to see
-whether it is an SWI, on every instruction, when the result is only used if a
-HALT follows.
+- **The CPU** (about 35%): decoding into an `Instruction` on every execution,
+  and register access going through a mode-to-bank lookup on every read and
+  write (`mode_to_bank_index` alone is about 1.7%). An active register array
+  swapped on mode change would remove the lookup, but `Registers` is part of the
+  save state, so it needs a migration.
+- **Timers** (about 6%): every instruction loops over four timers and writes
+  each enabled counter back into the I/O mirror. Settling them lazily (when one
+  is due to overflow, when the game writes a timer register, or when something
+  reads one) would remove nearly all of it. The I/O mirror's `TMxCNT_L` slots
+  hold both the written reload value and the copied counter, which also means
+  a reload written while a timer runs is lost; hardware keeps it for the next
+  overflow.
+- **Bus access timing** (about 6%): `record_cpu_access`, the wait-state lookup
+  and address masking run on every access, through `Cell`s.
+- **`step()` bookkeeping** (about 10%), including the opcode read in
+  `current_hle_swi_comment` on every instruction.
 
 ---
 

@@ -200,10 +200,12 @@
             <li class="track__item" data-state="wip">
               <p class="track__head"><span class="track__tag">In progress</span> Fast forward past 1.4×</p>
               <p class="track__body">
-                A frame costs about 11.8 ms in the browser against a 16.74 ms
-                budget, so fast forward tops out near 1.4×. Batching the APU tick
-                bought 19% of that; the rest is CPU and PPU work that has not
-                been won yet.
+                A frame cost about 11.8 ms in the browser against a 16.74 ms
+                budget, so fast forward topped out near 1.4×. A fix to the
+                PPU's per-instruction work has since taken about 14% off the
+                WebAssembly frame, which should mean roughly 10 ms and 1.6×
+                (an estimate, not yet re-measured in a browser). What is left is
+                mostly the CPU interpreter, timers and bus bookkeeping.
               </p>
             </li>
             <li class="track__item" data-state="wip">
