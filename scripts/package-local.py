@@ -16,9 +16,12 @@ files = {f'tinybird-web{suffix}': args.bin_dir / f'tinybird-web{suffix}',
          'tinybird_wasm.wasm': args.wasm, 'LICENSE': Path('LICENSE'),
          'README.md': Path('docs/local-edition.md'),
          'automation.md': Path('docs/automation.md'),
+         'local-training.md': Path('docs/local-training.md'),
          'session-recovery.md': Path('docs/session-recovery.md')}
-for name in ['tinybird.py', 'run_observations.py']:
+for name in ['tinybird.py', 'run_observations.py', 'tinybird_env.py', 'hybrid_policy.py', 'demonstrations.py', 'train.py', 'advance_stage.py', 'watch_agent.py', 'benchmark_agent.py', 'make_training_demo.py', 'requirements-training.txt']:
     files[f'python/{name}'] = Path('examples/python') / name
+for path in Path('examples/python/tasks').glob('*.json'):
+    files[f'python/tasks/{path.name}'] = path
 for path in Path('addons').glob('*.json'):
     files[f'addons/{path.name}'] = path
 for path in files.values():

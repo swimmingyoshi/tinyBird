@@ -30,3 +30,10 @@ and uncached species artwork may be unavailable offline; system fonts and text
 remain usable. Do not expose this loopback edition through a public tunnel.
 
 See `automation.md` for Python and `session-recovery.md` for recovery details.
+
+Optional local AI training helpers are under `python/`. Install
+`python/requirements-training.txt` into a Python virtual environment and follow
+`local-training.md`. In the downloaded package, replace source paths
+`examples/python/` with `python/` and point `--executable` at the bundled
+`tinybird-headless` (`tinybird-headless.exe` on Windows). Training libraries and
+model weights are not bundled; normal play does not require them.

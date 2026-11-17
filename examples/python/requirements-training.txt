@@ -1,0 +1,4 @@
+# Optional local-only tools; the browser and basic Python client do not need these.
+gymnasium>=1.0,<2
+stable-baselines3>=2.6,<3
+pillow>=10,<13

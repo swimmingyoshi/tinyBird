@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "game": {
+    "code": "AX4P",
+    "revision": 0
+  },
+  "fields": [
+    {
+      "name": "player.world_x_fixed",
+      "address": 50347812,
+      "width": 4
+    },
+    {
+      "name": "player.world_y_fixed",
+      "address": 50347816,
+      "width": 4
+    },
+    {
+      "name": "game.score_tens",
+      "address": 50346068,
+      "width": 4
+    },
+    {
+      "name": "game.music",
+      "address": 50331800,
+      "width": 2
+    },
+    {
+      "name": "game.mode",
+      "address": 50345844,
+      "width": 1
+    },
+    {
+      "name": "player.powerup",
+      "address": 50347867,
+      "width": 1
+    },
+    {
+      "name": "game.level_coins",
+      "address": 50345888,
+      "width": 1
+    }
+  ]
+}

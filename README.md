@@ -11,6 +11,9 @@ For Python control, repeatable frame actions, and named memory observations, see
 [Headless automation](docs/automation.md). The runtime is a separate layer above
 `tinybird-core` and can also be embedded directly in Rust.
 
+For local reinforcement learning, Gymnasium tasks, PPO/DQN training, and Mario
+experiments with a hybrid visual/RAM network, see [Local AI training](docs/local-training.md).
+
 ## Features
 
 - ARM7TDMI CPU core (ARM + Thumb instruction sets)

@@ -1,5 +1,6 @@
 """Dependency-free synchronous client for tinybird-headless (Python 3.9+)."""
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -13,6 +14,7 @@ class TinyBird:
         self.process = subprocess.Popen(
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             text=True, encoding="utf-8", bufsize=1,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
         )
         if observations is not None:
             try:

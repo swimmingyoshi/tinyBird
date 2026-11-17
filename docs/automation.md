@@ -1,5 +1,8 @@
 # Headless automation
 
+For the optional Gymnasium/PPO adapter and Mario first-screen experiment, see
+[Local AI training](local-training.md).
+
 The browser player also supports [automatic session recovery](session-recovery.md),
 including restoring the observation configuration associated with a checkpoint.
 
@@ -161,8 +164,9 @@ with TinyBird("game.gba", executable="target/release/tinybird-headless") as env:
 
 The client is synchronous; use one client per worker. Reward and termination
 logic belong in the experiment and can consume `observation["memory"]`. This
-client is not yet a Gymnasium environment and does not invent game-specific
-rewards or completion rules.
+client remains dependency-free. The optional `tinybird_env.py` adapter and
+`train.py` runner supply a Gymnasium interface with explicit task rewards and
+completion rules; see the local training guide.
 
 ## Feedback implementation status
 
@@ -176,8 +180,8 @@ configuration consumed directly by the runtime and Python client.
 Further work from the feedback remains separate product features:
 
 - Shared semantic schemas consumed by browser addons, with ROM compatibility.
-- A Workshop training-environment exporter and Gymnasium adapter with explicit
-  action spaces, reward definitions, and termination rules.
+- A Workshop UI for exporting training tasks. The Python Gymnasium adapter now
+  accepts explicit task JSON for actions, rewards and termination rules.
 - Memory-change history connected to a bounded rewind timeline.
 - Higher-level online services such as leaderboards beyond existing lobbies/link.
 - An HTTP API, vectorized worker orchestration, and rendering-free execution.
