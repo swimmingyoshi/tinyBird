@@ -58,10 +58,13 @@ Each of these is written up where it belongs; this is the index.
   private-backend path `/api/saves` can use has no equivalent for pictures yet.
   Screenshots taken before ownership existed carry no owner and appear in no
   listing, but are still on public URLs.
-- **Frame throughput is the ceiling on fast forward.** A frame costs ~11.8ms in
-  the browser against a 16.74ms budget, so fast forward tops out near 1.4x.
-  Batching the APU tick bought 19% of that; the rest is CPU and PPU.
-  The measurements and what has been tried are in
+- **Frame throughput is the ceiling on fast forward.** A frame cost ~11.8ms in
+  the browser against a 16.74ms budget, so fast forward topped out near 1.4x.
+  A profile-driven fix to the PPU's per-instruction entry has since taken about
+  14% off the wasm frame side by side, which should put it near 10ms and 1.6x;
+  that is an estimate, not yet re-measured in a browser. Audio is under 2% of a
+  frame; the rest is the CPU interpreter, timers and bus bookkeeping.
+  The measurements, how to profile, and what is left are in
   [WEB.md](docs/WEB.md). `cargo test --release -p tinybird-core --test
   throughput -- --ignored --nocapture` reproduces them.
 - **PP and catch rates are still compiled tables.** Names are not: moves,
