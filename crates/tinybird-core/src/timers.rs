@@ -18,6 +18,13 @@ const TIMER_ENABLE: u16 = 1 << 7;
 /// Prescaler divider values indexed by the 2-bit prescaler field
 const PRESCALER_DIVIDERS: [u32; 4] = [1, 64, 256, 1024];
 
+/// The same dividers as powers of two: 1, 64, 256 and 1024.
+///
+/// `tick` runs after every instruction, and dividing by a divisor looked up
+/// from a table compiles to a real `div`, which made it the single hottest
+/// instruction in the emulator. A shift and a mask give identical results.
+const PRESCALER_SHIFTS: [u32; 4] = [0, 6, 8, 10];
+
 /// A single hardware timer
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Timer {
@@ -60,6 +67,11 @@ impl Timer {
     /// Get the prescaler divider for this timer
     pub fn prescaler(&self) -> u32 {
         PRESCALER_DIVIDERS[(self.control & PRESCALER_MASK) as usize]
+    }
+
+    /// `prescaler()` as a shift: `1 << prescaler_shift() == prescaler()`.
+    fn prescaler_shift(&self) -> u32 {
+        PRESCALER_SHIFTS[(self.control & PRESCALER_MASK) as usize]
     }
 }
 
@@ -107,10 +119,10 @@ impl TimerController {
             }
 
             // Normal (prescaler-driven) timer
-            let prescaler = self.timers[i].prescaler();
+            let shift = self.timers[i].prescaler_shift();
             self.timers[i].prescaler_counter += cycles;
-            let increments = self.timers[i].prescaler_counter / prescaler;
-            self.timers[i].prescaler_counter %= prescaler;
+            let increments = self.timers[i].prescaler_counter >> shift;
+            self.timers[i].prescaler_counter &= (1 << shift) - 1;
 
             if increments != 0 {
                 overflow_counts[i] = Self::apply_increments(&mut self.timers[i], increments);
@@ -269,6 +281,13 @@ mod tests {
         assert_eq!(ov[0], 1);
         assert_eq!(ov[1], 1);
         assert_eq!(tc.read_counter(1), 0xFFFE); // reloaded
+    }
+
+    #[test]
+    fn prescaler_shifts_match_the_dividers() {
+        for (divider, shift) in PRESCALER_DIVIDERS.iter().zip(PRESCALER_SHIFTS) {
+            assert_eq!(*divider, 1 << shift);
+        }
     }
 
     #[test]
