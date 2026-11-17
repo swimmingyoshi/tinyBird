@@ -45,6 +45,49 @@ export function starterManifest(rom) {
  * because tone is derived from the fraction rather than chosen. So "a health
  * bar that goes red" is not a separate feature, it is a field with a maximum.
  */
+/* -- The decrypted half of a Generation 3 record ---------------------------
+ *
+ * Moves, effort and individual values, nature and the flags all live in a
+ * 48-byte block that is XOR-encrypted and *permuted per Pokemon*, so there is
+ * no offset a person could be asked to type. They pick a name instead, and
+ * `cap` is what that value is normally out of — prefilled so a bar is one
+ * click rather than a trip to a wiki.
+ */
+export const GEN3_FIELDS = {
+  species: { label: 'Species name' },
+  held_item: { label: 'Held item' },
+  nature: { label: 'Nature' },
+  ability_slot: { label: 'Ability slot (0 or 1)', cap: 1 },
+  friendship: { label: 'Friendship', cap: 255 },
+  experience: { label: 'Experience' },
+  move1: { label: 'Move 1' },
+  move2: { label: 'Move 2' },
+  move3: { label: 'Move 3' },
+  move4: { label: 'Move 4' },
+  pp1: { label: 'PP left, move 1' },
+  pp2: { label: 'PP left, move 2' },
+  pp3: { label: 'PP left, move 3' },
+  pp4: { label: 'PP left, move 4' },
+  ev_hp: { label: 'EV — HP', cap: 252 },
+  ev_attack: { label: 'EV — Attack', cap: 252 },
+  ev_defense: { label: 'EV — Defense', cap: 252 },
+  ev_speed: { label: 'EV — Speed', cap: 252 },
+  ev_sp_attack: { label: 'EV — Sp. Atk', cap: 252 },
+  ev_sp_defense: { label: 'EV — Sp. Def', cap: 252 },
+  ev_total: { label: 'EV — total', cap: 510 },
+  iv_hp: { label: 'IV — HP', cap: 31 },
+  iv_attack: { label: 'IV — Attack', cap: 31 },
+  iv_defense: { label: 'IV — Defense', cap: 31 },
+  iv_speed: { label: 'IV — Speed', cap: 31 },
+  iv_sp_attack: { label: 'IV — Sp. Atk', cap: 31 },
+  iv_sp_defense: { label: 'IV — Sp. Def', cap: 31 },
+  iv_total: { label: 'IV — total', cap: 186 },
+  pokerus: { label: 'Pokerus byte' },
+  met_location: { label: 'Met location id' },
+  is_egg: { label: 'Is an egg' },
+  is_shiny: { label: 'Is shiny' },
+};
+
 export const FIELD_KINDS = {
   u8: { label: '8-bit number', address: true },
   u16: { label: '16-bit number', address: true },
@@ -53,13 +96,14 @@ export const FIELD_KINDS = {
   text: { label: 'ASCII text', address: true, length: true },
   gen3_text: { label: 'Pokémon name text (Gen 3 alphabet)', address: true, length: true },
   gen3_species: { label: 'Pokémon species (decrypted)', address: true, record: true },
+  gen3: { label: 'Pokémon detail — moves, EVs, IVs, nature', address: true, record: true, gen3: true, cap: true },
   literal: { label: 'Fixed text', address: false },
   index: { label: 'Slot number', address: false },
 };
 
 /** Bytes a read of this kind touches, for the bounds check. */
 function readWidth(kind, { length = 16, size = 'u16' } = {}) {
-  if (kind === 'gen3_species') return 80;
+  if (kind === 'gen3_species' || kind === 'gen3') return 80;
   if (kind === 'text' || kind === 'gen3_text') return length;
   if (kind === 'bar') return WIDTHS[size];
   return WIDTHS[kind] ?? 0;
@@ -78,7 +122,7 @@ function checkAddress(address, width) {
  * `bar` has no read of its own — it is a numeric read plus a `max`, which
  * [`fieldSpec`] assembles. Everything else maps one to one.
  */
-export function readSpec(kind, { address = 0, length = 16, size = 'u16', literal = '' } = {}) {
+export function readSpec(kind, { address = 0, length = 16, size = 'u16', literal = '', gen3Field = 'species' } = {}) {
   if (kind === 'index') return { index: null };
   if (kind === 'literal') {
     const text = literal.trim();
@@ -92,6 +136,10 @@ export function readSpec(kind, { address = 0, length = 16, size = 'u16', literal
     return { [kind]: { at: hex(address), len: length } };
   }
   if (kind === 'gen3_species') return { gen3_species: hex(address) };
+  if (kind === 'gen3') {
+    if (!GEN3_FIELDS[gen3Field]) throw new Error('Choose which part of the record to read.');
+    return { gen3: { at: hex(address), field: gen3Field } };
+  }
   if (kind === 'bar') return { [size]: hex(address) };
   return { [kind]: hex(address) };
 }
@@ -100,15 +148,24 @@ export function readSpec(kind, { address = 0, length = 16, size = 'u16', literal
  * A complete field, validated. `max` only appears for a bar, which is what
  * earns the field its meter and its colour.
  */
-export function fieldSpec({ label, kind, address = 0, length = 16, size = 'u16', literal = '', max = null, hint = '' }) {
+export function fieldSpec({ label, kind, address = 0, length = 16, size = 'u16', literal = '', max = null, cap = null, gen3Field = 'species', hint = '' }) {
   if (!FIELD_KINDS[kind]) throw new Error('Choose a supported tracker type.');
   if (!label.trim() || label.length > 120) throw new Error('Give your field a label (up to 120 characters).');
   if (hint.length > 256) throw new Error('Keep field notes to 256 characters.');
-  const field = { label: label.trim(), read: readSpec(kind, { address, length, size, literal }) };
+  const field = { label: label.trim(), read: readSpec(kind, { address, length, size, literal, gen3Field }) };
   if (kind === 'bar') {
     if (!Number.isInteger(max)) throw new Error('A bar needs the address that holds its maximum, such as max HP.');
     checkAddress(max, WIDTHS[size]);
     field.max = { [size]: hex(max) };
+  }
+  // An effort value is out of 252 and an individual value out of 31 — rules,
+  // not addresses. `const` is how a bar gets drawn for those.
+  if (cap !== null && cap !== undefined && cap !== '') {
+    const ceiling = Number(cap);
+    if (!Number.isInteger(ceiling) || ceiling < 1 || ceiling > 0xffffffff) {
+      throw new Error('A fixed maximum must be a whole number of at least 1.');
+    }
+    field.max = { const: ceiling };
   }
   if (hint.trim()) field.hint = hint.trim();
   return field;
@@ -121,11 +178,14 @@ export function fieldForm(field) {
   const read = typeof field.read === 'string' ? { [field.read]: null } : field.read;
   const [name, value] = Object.entries(read ?? {})[0] ?? [];
   const at = text => (typeof text === 'string' ? Number(text) : 0);
-  const form = { label: field.label ?? '', hint: field.hint ?? '', kind: name ?? 'u16', address: 0, length: 16, size: 'u16', literal: '', max: null };
+  const form = { label: field.label ?? '', hint: field.hint ?? '', kind: name ?? 'u16', address: 0, length: 16, size: 'u16', literal: '', max: null, cap: null, gen3Field: 'species' };
+  // A fixed maximum belongs to any read; an address maximum only to a number.
+  if (Number.isInteger(field.max?.const)) form.cap = field.max.const;
   if (name === 'literal') form.literal = value ?? '';
   else if (name === 'index') form.kind = 'index';
   else if (name === 'text' || name === 'gen3_text') { form.address = at(value?.at); form.length = value?.len ?? 16; }
   else if (name === 'gen3_species') form.address = at(value);
+  else if (name === 'gen3') { form.address = at(value?.at); form.gen3Field = value?.field ?? 'species'; }
   else if (WIDTHS[name]) {
     form.address = at(value);
     // A numeric read carrying a maximum *is* a bar; the editor should open it
@@ -156,6 +216,14 @@ function slug(title, taken) {
 export function addSection(manifest, { title, kind = 'key_value', count = 6, stride = 100 }) {
   if (!title.trim() || title.length > 120) throw new Error('Give the category a name (up to 120 characters).');
   const copy = structuredClone(manifest);
+  // A brand new draft carries one empty "Stats" section as scaffolding. If the
+  // first thing someone does is make a category of their own, that scaffolding
+  // is not content — and leaving it behind makes the reader invalid, because a
+  // section with no fields cannot be evaluated.
+  if (copy.sections.length === 1 && copy.sections[0].id === 'stats'
+      && copy.sections[0].kind === 'key_value' && !(copy.sections[0].fields ?? []).length) {
+    copy.sections.pop();
+  }
   if (copy.sections.length >= MAX_SECTIONS) throw new Error(`A reader holds at most ${MAX_SECTIONS} categories.`);
   const id = slug(title, copy.sections.map(section => section.id));
   if (kind === 'cards') {

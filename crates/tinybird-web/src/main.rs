@@ -15,6 +15,7 @@ mod auth;
 mod community_addons;
 mod contact;
 mod dotenv;
+mod deployment;
 mod lobby;
 mod media;
 mod sprites;
@@ -79,6 +80,7 @@ const PACING_JS: &str = include_str!("assets/pacing.js");
 const LOBBY_JS: &str = include_str!("assets/lobby.js");
 const LINK_JS: &str = include_str!("assets/link.js");
 const CONTROLS_JS: &str = include_str!("assets/controls.js");
+const THEME_JS: &str = include_str!("assets/theme.js");
 const STYLES_CSS: &str = include_str!("assets/styles.css");
 const CONSOLE_CSS: &str = concat!(
     include_str!("assets/console.css"),
@@ -170,13 +172,20 @@ struct AppState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load `.env` before reading any configuration so a fresh checkout works
-    // with `cp .env.example .env` and nothing else.
-    dotenv::load(".env");
-
-    let config = Config::from_env_and_args(env::args().skip(1).collect());
-    let media = MediaConfig::from_env();
-    let contact = ContactConfig::from_env();
+    let args: Vec<String> = env::args().skip(1).collect();
+    let mode = deployment::Mode::from_args(&args)?;
+    if mode == deployment::Mode::Development { dotenv::load(".env.development"); }
+    let config = Config::from_env_and_args(args);
+    let deployment = deployment::Deployment::new(mode, config.host, env::var("TINYBIRD_PUBLIC_ORIGIN").ok())?;
+    let mut media = MediaConfig::from_env();
+    let mut contact = ContactConfig::from_env();
+    let mut auth = AuthConfig::from_env();
+    if mode == deployment::Mode::Local {
+        media = media.without_credentials(); contact = contact.without_credentials(); auth = auth.without_credentials();
+    }
+    if mode == deployment::Mode::Production && (media.is_configured() || contact.is_configured()) && !auth.is_configured() {
+        return Err("Production media/contact services require configured accounts; shared-owner fallback is local development only.".into());
+    }
     let contact_configured = contact.is_configured();
     let contact_label = contact.base_url.clone();
     let storage_configured = media.is_configured();
@@ -189,23 +198,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         community_addons: community_addons::Store::open(&PathBuf::from(
-            env::var("TINYBIRD_ADDON_DB")
-                .unwrap_or_else(|_| "stream-data/community-addons.sqlite3".into()),
+            if mode == deployment::Mode::Local { ":memory:".into() } else { env::var("TINYBIRD_ADDON_DB")
+                .unwrap_or_else(|_| "stream-data/community-addons.sqlite3".into()) },
         ))?,
         snapshot_path: config.snapshot_path,
         sprite_dir: config.sprite_dir,
-        overlay_enabled: config.overlay_enabled,
+        overlay_enabled: mode != deployment::Mode::Production && config.overlay_enabled,
         addon_dir: config.addon_dir,
         wasm_path: config.wasm_path.clone(),
         rom_dir: config.rom_dir,
         bios_path: config.bios_path,
         media,
-        auth: AuthConfig::from_env(),
+        auth,
         contact,
         contact_throttle: Arc::new(contact::Throttle::new()),
         sessions: Arc::new(Sessions::new()),
         lobby: Arc::new(Lobby::new()),
-        serve_local_roms: local_roms_enabled(),
+        serve_local_roms: mode != deployment::Mode::Production && local_roms_enabled(),
     };
     let app = Router::new()
         .route("/memory-sheets.js", get(|| async { static_text(include_str!("assets/memory-sheets.js"), "text/javascript; charset=utf-8") }))
@@ -224,6 +233,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/workshop.js", get(|| async { static_text(include_str!("assets/workshop.js"), "text/javascript; charset=utf-8") }))
         .route("/workshop-model.js", get(|| async { static_text(include_str!("assets/workshop-model.js"), "text/javascript; charset=utf-8") }))
+        .route("/workshop-observations.js", get(|| async { static_text(include_str!("assets/workshop-observations.js"), "text/javascript; charset=utf-8") }))
+        .route("/recovery.js", get(|| async { static_text(include_str!("assets/recovery.js"), "text/javascript; charset=utf-8") }))
+        .route("/deployment.js", get(|| async { static_text(include_str!("assets/deployment.js"), "text/javascript; charset=utf-8") }))
         .route("/workshop.css", get(|| async { static_text(include_str!("assets/workshop.css"), "text/css; charset=utf-8") }))
         .route(
             "/addon-client.js",
@@ -293,6 +305,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/lobby.js", get(lobby_js))
         .route("/link.js", get(link_js))
         .route("/controls.js", get(controls_js))
+        .route("/theme.js", get(theme_js))
         .route("/console.css", get(console_css))
         .route("/tinybird.wasm", get(wasm_module))
         .route("/bios", get(bios_image))
@@ -346,7 +359,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/sprites/{species_id}", get(sprite_png))
         .route("/ffta/races/{race}", get(ffta_race_png))
         .route("/ffta/jobs/{job}", get(ffta_job_png))
-        .with_state(state);
+        .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(deployment, deployment::guard));
 
     let addr = SocketAddr::new(config.host, config.port);
     // A port clash is the single most common way this fails to start, usually
@@ -372,6 +386,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("tinyBird web listening on http://{addr}");
+    println!("  mode:       {}", mode.name());
     println!("  home:       http://{addr}/");
     println!("  play:       http://{addr}/play");
     println!("  full:       http://{addr}/overlay/full");
@@ -612,6 +627,10 @@ async fn pacing_js() -> Response {
 
 async fn controls_js() -> Response {
     static_text(CONTROLS_JS, "application/javascript; charset=utf-8")
+}
+
+async fn theme_js() -> Response {
+    static_text(THEME_JS, "application/javascript; charset=utf-8")
 }
 
 async fn lobby_js() -> Response {
@@ -1227,14 +1246,32 @@ async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderMap) 
     {
         Ok(user) => text(
             StatusCode::OK,
-            serde_json::json!({ "configured": true, "user": user }).to_string(),
+            // `tickets` says whether the support portal has anything behind
+            // it, so the account menu can offer the way to it rather than
+            // linking somewhere that would only apologise. It needs a contact
+            // key to name the project and accounts to have a sender at all;
+            // being signed in is implied by there being a user here.
+            serde_json::json!({
+                "configured": true,
+                "user": user,
+                "tickets": state.contact.is_configured(),
+            })
+            .to_string(),
             "application/json; charset=utf-8",
         ),
         // Not being signed in is an ordinary answer here, not an error: the
         // page needs to know so it can show the sign-in panel.
         Err(AuthError::NoSession) => text(
             StatusCode::OK,
-            serde_json::json!({ "configured": true, "user": null }).to_string(),
+            // Reported signed out as well as signed in: it describes the
+            // server, not the person, and the menu reads it once on load
+            // rather than again on the way through the sign-in form.
+            serde_json::json!({
+                "configured": true,
+                "user": null,
+                "tickets": state.contact.is_configured(),
+            })
+            .to_string(),
             "application/json; charset=utf-8",
         ),
         Err(err) => auth_error(&err),

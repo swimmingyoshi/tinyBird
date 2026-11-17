@@ -1,7 +1,7 @@
 /* Only loaded inside the dedicated workshop's test frame. */
 body[data-workshop-player] { background: #0c131d; }
 body[data-workshop-player] .rig { padding: 12px; min-height: 0; }
-body[data-workshop-player] :is(.bar, .play-toolbar, .companion, #manage-addons, #btn-lobby, #btn-full, #deck-hint) { display: none !important; }
+body[data-workshop-player] :is(.bar, .transport__view, .companion, #manage-addons, #btn-lobby, #btn-full, #deck-hint) { display: none !important; }
 body[data-workshop-player] .rig .deck { display: block; }
 body[data-workshop-player] .rig .screen-col { width: 100%; max-width: none; }
 body[data-workshop-player] .transport { flex-wrap: wrap; }
@@ -20,23 +20,18 @@ body[data-workshop-player] .empty-cartridge { display: none; }
 .workshop-vault { margin-top: 18px; padding-top: 16px; border-top: 1px solid #344052; }
 .workshop-vault > .panel__eyebrow { display: block; margin-bottom: 12px; }
 
-/* Opening a drawer must not push the game off the top of the frame.
+/* Opening a tool must not push the game off the top of the frame.
 
-   The tools sit under the screen, so "Save & load" used to add several hundred
-   pixels between them and the top of the frame — and since the frame is a
-   fixed height, that meant scrolling the emulator away to reach the very
-   controls that act on it. You cannot pick a save state by its screenshot
-   while the game you are picking it for is off-screen.
+   Save & load and Cartridge are sheets now, so they float over the frame and
+   cost it no height at all — which is most of what this comment used to be
+   about. Audio & video is still a drawer, because its controls are judged by
+   looking at the running picture, so the screen stays pinned to the top of the
+   frame and the drawer scrolls inside itself rather than growing without limit.
 
-   Two halves to the fix. The screen sticks to the top of the frame, so it is
-   still there whatever is open below it; and an open drawer scrolls inside
-   itself rather than growing without limit, so the scroll it costs is bounded
-   by what the drawer holds rather than by how many saves are in the vault.
-
-   The transport is deliberately *not* pinned as well. Pinning a second strip
+   The transport is deliberately not pinned as well. Pinning a second strip
    means knowing how tall the first one is, which is a measured offset and a
    resize observer to keep it honest — and the thing that has to stay in view
-   while you pick a save state is the picture, not the pause button. */
+   is the picture, not the pause button. */
 body[data-workshop-player] .screens {
   position: sticky;
   top: 0;
@@ -51,4 +46,11 @@ body[data-workshop-player] .tool-body {
   overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: #40566b transparent;
+}
+
+/* The frame is a few hundred pixels wide, so a sheet sized for the full page
+   would be all margin. It takes what the frame has. */
+body[data-workshop-player] .sheet--tool {
+  width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
 }

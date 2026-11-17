@@ -93,8 +93,13 @@ test('a tracker type becomes the manifest read it stands for, and reads back', (
 
 test('categories nest fields, and a repeating one describes a party once', () => {
   let draft = starterManifest({ game_code: 'BPRE', revision: 0 });
+  // A new draft carries one empty "Stats" section as scaffolding. Making a
+  // category before using it takes the scaffolding away, because a section
+  // with no fields is not a section the reader can evaluate.
+  assert.deepEqual(draft.sections.map(s => s.id), ['stats']);
   draft = addSection(draft, { title: 'Party', kind: 'cards', count: 6, stride: 100 });
-  const party = 1;
+  assert.deepEqual(draft.sections.map(s => s.id), ['party']);
+  const party = 0;
   assert.deepEqual(draft.sections[party].repeat, { count: 6, stride: 100 });
   assert.equal(draft.sections[party].id, 'party');
 
@@ -140,9 +145,12 @@ test('categories nest fields, and a repeating one describes a party once', () =>
 
 test('fields move between categories, and an impossible drop changes nothing', () => {
   let draft = starterManifest({ game_code: 'BPRE', revision: 0 });
-  draft = addSection(draft, { title: 'Party', kind: 'cards' });
+  // Put something in the starter section first, so it is content rather than
+  // scaffolding and survives the next category being added.
   draft = addField(draft, 0, { label: 'Money', kind: 'u32', address: 0x02000100 });
   draft = addField(draft, 0, { label: 'Badges', kind: 'u8', address: 0x02000110 });
+  draft = addSection(draft, { title: 'Party', kind: 'cards' });
+  assert.deepEqual(draft.sections.map(s => s.id), ['stats', 'party']);
 
   const moved = moveField(draft, { section: 0, field: 0 }, { section: 1, field: 0 });
   assert.deepEqual(sectionFields(moved.sections[0]).map(f => f.label), ['Badges']);

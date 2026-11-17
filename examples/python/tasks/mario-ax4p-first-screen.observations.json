@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "game": { "code": "AX4P", "revision": 0 },
+  "fields": [
+    { "name": "player.world_x_fixed", "address": 50347812, "width": 4 },
+    { "name": "player.world_y_fixed", "address": 50347816, "width": 4 }
+  ]
+}

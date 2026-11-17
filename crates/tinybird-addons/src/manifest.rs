@@ -124,8 +124,14 @@ impl Manifest {
             }
             match &section.body {
                 SectionBody::KeyValue { fields } => {
-                    if fields.is_empty() || fields.len() > 32 {
-                        return Err("Use 1–32 fields per section.".into());
+                    // Naming the section matters: a reader under construction
+                    // has several, and "use 1-32 fields" sends the author
+                    // hunting through all of them for the one that is empty.
+                    if fields.is_empty() {
+                        return Err(format!("\"{}\" has no fields yet.", section.title));
+                    }
+                    if fields.len() > 32 {
+                        return Err(format!("\"{}\" has more than 32 fields.", section.title));
                     }
                     work += fields.len() * 2;
                     for field in fields {
@@ -192,19 +198,24 @@ impl Manifest {
     /// host does it once, before evaluating, and only when a manifest actually
     /// asks for a name — see [`prepare`](Self::prepare).
     pub fn needs_cartridge_names(&self) -> bool {
+        fn named(value: &Value) -> bool {
+            match value {
+                Value::Gen3Species(_) => true,
+                Value::Gen3 { field, .. } => field.needs_names(),
+                _ => false,
+            }
+        }
         self.sections.iter().any(|section| match &section.body {
-            SectionBody::KeyValue { fields } => fields
-                .iter()
-                .any(|field| matches!(field.read, Value::Gen3Species(_))),
+            SectionBody::KeyValue { fields } => fields.iter().any(|field| named(&field.read)),
             SectionBody::Cards { card, .. } => {
                 card.image.is_some()
-                    || matches!(card.title, Value::Gen3Species(_))
-                    || matches!(card.subtitle, Some(Value::Gen3Species(_)))
+                    || named(&card.title)
+                    || card.subtitle.as_ref().is_some_and(named)
                     || card
                         .fields
                         .iter()
                         .chain(card.lead.iter())
-                        .any(|field| matches!(field.read, Value::Gen3Species(_)))
+                        .any(|field| named(&field.read))
             }
         })
     }
@@ -230,6 +241,7 @@ impl Manifest {
         let memory = BoundedMemory {
             inner: memory,
             remaining: std::cell::Cell::new(16384),
+            decrypted: std::cell::RefCell::new(None),
         };
         if self.when.as_ref().is_some_and(|condition| {
             condition.read.read(&memory, 0, 0).number != Some(condition.equals)
@@ -261,9 +273,35 @@ fn readable(addr: u32, len: u32) -> bool {
     .any(|&(start, end)| addr >= start && addr.checked_add(len).is_some_and(|last| last <= end))
 }
 
+/// The read budget, plus a memo for the one read that is expensive.
+///
+/// Every field of a card names the same record address, and decrypting that
+/// record costs twelve word reads and a checksum. A party card showing four
+/// moves, six effort values and six individual values would pay for that
+/// sixteen times if each field decrypted for itself — which is most of the
+/// budget spent re-deriving a value that cannot have changed. Cards are built
+/// one at a time and every field in a card shares an address, so a single slot
+/// keyed by address catches all of it.
 struct BoundedMemory<'a> {
     inner: &'a dyn MemoryView,
     remaining: std::cell::Cell<usize>,
+    decrypted: std::cell::RefCell<Option<(u32, Option<std::rc::Rc<crate::gen3::Boxed>>)>>,
+}
+
+impl BoundedMemory<'_> {
+    /// The decrypted record at `at`, decrypting only if this is not the record
+    /// the last field asked about. A miss caches too, so six empty party slots
+    /// cost one failed decrypt each rather than one per field.
+    fn boxed(&self, at: u32) -> Option<std::rc::Rc<crate::gen3::Boxed>> {
+        if let Some((cached, value)) = self.decrypted.borrow().as_ref() {
+            if *cached == at {
+                return value.clone();
+            }
+        }
+        let value = crate::gen3::Boxed::read(self, at).map(std::rc::Rc::new);
+        *self.decrypted.borrow_mut() = Some((at, value.clone()));
+        value
+    }
 }
 impl MemoryView for BoundedMemory<'_> {
     fn read_u8(&self, addr: u32) -> u8 {
@@ -299,7 +337,9 @@ fn validate_value(value: &Value) -> Result<(), String> {
             }
             at
         }
-        Value::Gen3Species(at) => at,
+        Value::Gen3Species(at) | Value::Gen3 { at, .. } => at,
+        // A constant reads nothing, so there is no address to bound.
+        Value::Const(_) => return Ok(()),
         Value::Literal(text) => {
             return if text.len() <= 256 {
                 Ok(())
@@ -327,7 +367,7 @@ fn validate_value(value: &Value) -> Result<(), String> {
             Value::U16(_) => 2,
             Value::Text { len, .. } | Value::Gen3Text { len, .. } => *len,
             // Decrypting a record means reading all of the boxed part of it.
-            Value::Gen3Species(_) => crate::gen3::BOXED_BYTES,
+            Value::Gen3Species(_) | Value::Gen3 { .. } => crate::gen3::BOXED_BYTES,
             _ => 4,
         }
     };
@@ -463,6 +503,21 @@ pub enum Value {
         at: Address,
         len: u32,
     },
+    /// A fixed number, for the other half of a gauge whose maximum is a rule
+    /// rather than a memory location — 31 for an individual value, 252 for an
+    /// effort value, 255 for friendship.
+    Const(u32),
+    /// One named field out of the encrypted part of a Generation 3 record.
+    ///
+    /// `at` is the start of the record, the same as [`Value::Gen3Species`],
+    /// because everything in here needs the whole record decrypted before any
+    /// of it can be read. The field is named rather than offset, so nobody
+    /// writing a manifest has to know that Attacks might be the third
+    /// substructure this time and the first one next time.
+    Gen3 {
+        at: Address,
+        field: Gen3Field,
+    },
     /// The species of the Pokémon whose record starts here.
     ///
     /// Reads as the species *name* when the cartridge's name table has been
@@ -472,6 +527,146 @@ pub enum Value {
     /// the species field: the species is encrypted and permuted, and undoing
     /// that needs the whole record.
     Gen3Species(Address),
+}
+
+/// What [`Value::Gen3`] can pull out of a decrypted record.
+///
+/// Deliberately a closed list of *named* fields rather than an offset into the
+/// decrypted block. The whole difficulty of this format is that the block is
+/// permuted per Pokémon, so an offset is not a stable way to name anything —
+/// and a person building a reader in the browser should never have to learn
+/// that in the first place.
+///
+/// Fields that index a table read as the name and carry the index as their
+/// number, so a manifest gets "Leer" on a cartridge whose tables were found
+/// and `#43` on one where they were not.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Gen3Field {
+    Species,
+    HeldItem,
+    Experience,
+    Friendship,
+    Move1,
+    Move2,
+    Move3,
+    Move4,
+    Pp1,
+    Pp2,
+    Pp3,
+    Pp4,
+    EvHp,
+    EvAttack,
+    EvDefense,
+    EvSpeed,
+    EvSpAttack,
+    EvSpDefense,
+    EvTotal,
+    IvHp,
+    IvAttack,
+    IvDefense,
+    IvSpeed,
+    IvSpAttack,
+    IvSpDefense,
+    IvTotal,
+    Nature,
+    AbilitySlot,
+    Pokerus,
+    MetLocation,
+    IsEgg,
+    IsShiny,
+}
+
+impl Gen3Field {
+    /// Whether this field reads as a name out of the cartridge's own tables.
+    fn needs_names(self) -> bool {
+        matches!(self, Gen3Field::Species | Gen3Field::HeldItem)
+            || self.move_slot().is_some()
+    }
+
+    fn move_slot(self) -> Option<usize> {
+        Some(match self {
+            Gen3Field::Move1 => 0,
+            Gen3Field::Move2 => 1,
+            Gen3Field::Move3 => 2,
+            Gen3Field::Move4 => 3,
+            _ => return None,
+        })
+    }
+
+    /// The value, and the words for it when it has any of its own.
+    fn read(self, boxed: &crate::gen3::Boxed) -> (u32, Option<String>) {
+        use crate::gen3::Stat;
+        if let Some(slot) = self.move_slot() {
+            let id = boxed.move_id(slot);
+            // An empty move slot is a real state — most Pokémon have fewer
+            // than four — so it says so rather than reading as "#0".
+            let name = if id == 0 {
+                "—".to_string()
+            } else {
+                crate::gen3_names::move_name(id).unwrap_or_else(|| format!("#{id}"))
+            };
+            return (u32::from(id), Some(name));
+        }
+        match self {
+            Gen3Field::Species => {
+                let id = boxed.species();
+                (
+                    u32::from(id),
+                    Some(crate::gen3_names::species(id).unwrap_or_else(|| format!("#{id}"))),
+                )
+            }
+            Gen3Field::HeldItem => {
+                let id = boxed.held_item();
+                let name = if id == 0 {
+                    "—".to_string()
+                } else {
+                    crate::gen3_names::item(id).unwrap_or_else(|| format!("#{id}"))
+                };
+                (u32::from(id), Some(name))
+            }
+            Gen3Field::Experience => (boxed.experience(), None),
+            Gen3Field::Friendship => (boxed.friendship(), None),
+            Gen3Field::Pp1 => (boxed.pp(0), None),
+            Gen3Field::Pp2 => (boxed.pp(1), None),
+            Gen3Field::Pp3 => (boxed.pp(2), None),
+            Gen3Field::Pp4 => (boxed.pp(3), None),
+            Gen3Field::EvHp => (boxed.ev(Stat::Hp), None),
+            Gen3Field::EvAttack => (boxed.ev(Stat::Attack), None),
+            Gen3Field::EvDefense => (boxed.ev(Stat::Defense), None),
+            Gen3Field::EvSpeed => (boxed.ev(Stat::Speed), None),
+            Gen3Field::EvSpAttack => (boxed.ev(Stat::SpAttack), None),
+            Gen3Field::EvSpDefense => (boxed.ev(Stat::SpDefense), None),
+            Gen3Field::EvTotal => (boxed.ev_total(), None),
+            Gen3Field::IvHp => (boxed.iv(Stat::Hp), None),
+            Gen3Field::IvAttack => (boxed.iv(Stat::Attack), None),
+            Gen3Field::IvDefense => (boxed.iv(Stat::Defense), None),
+            Gen3Field::IvSpeed => (boxed.iv(Stat::Speed), None),
+            Gen3Field::IvSpAttack => (boxed.iv(Stat::SpAttack), None),
+            Gen3Field::IvSpDefense => (boxed.iv(Stat::SpDefense), None),
+            Gen3Field::IvTotal => (boxed.iv_total(), None),
+            Gen3Field::Nature => {
+                let index = boxed.nature();
+                (index, Some(crate::gen3::NATURES[index as usize].to_string()))
+            }
+            Gen3Field::AbilitySlot => (boxed.ability_slot(), None),
+            Gen3Field::Pokerus => (boxed.pokerus(), None),
+            Gen3Field::MetLocation => (boxed.met_location(), None),
+            Gen3Field::IsEgg => yes_no(boxed.is_egg()),
+            Gen3Field::IsShiny => yes_no(boxed.is_shiny()),
+            // Handled above, but the compiler cannot see that.
+            Gen3Field::Move1 | Gen3Field::Move2 | Gen3Field::Move3 | Gen3Field::Move4 => (0, None),
+        }
+    }
+}
+
+/// A flag reads as a word, so a panel does not show a bare 1 and leave the
+/// reader to guess what it was true about.
+fn yes_no(value: bool) -> (u32, Option<String>) {
+    (
+        u32::from(value),
+        Some(if value { "Yes" } else { "No" }.to_string()),
+    )
 }
 
 /// A picture for a card. One variant today; a tagged enum so adding the next
@@ -558,7 +753,7 @@ struct Read {
 }
 
 impl Value {
-    fn read(&self, memory: &dyn MemoryView, step: u32, index: u32) -> Read {
+    fn read(&self, memory: &BoundedMemory<'_>, step: u32, index: u32) -> Read {
         match self {
             Value::Literal(text) => Read {
                 text: text.clone(),
@@ -626,6 +821,30 @@ impl Value {
                     live,
                 }
             }
+            Value::Const(number) => Read {
+                text: number.to_string(),
+                number: Some(*number),
+                live: true,
+            },
+            Value::Gen3 { at, field } => {
+                let Some(address) = at.resolve(memory, step) else {
+                    return Read::dead();
+                };
+                if !readable(address, crate::gen3::BOXED_BYTES) {
+                    return Read::dead();
+                }
+                // An empty party slot is the normal state of slots two to six,
+                // so it reads as dead and the card for it is simply not drawn.
+                let Some(boxed) = memory.boxed(address) else {
+                    return Read::dead();
+                };
+                let (number, name) = field.read(&boxed);
+                Read {
+                    text: name.unwrap_or_else(|| number.to_string()),
+                    number: Some(number),
+                    live: true,
+                }
+            }
             Value::Gen3Species(at) => {
                 let Some(address) = at.resolve(memory, step) else {
                     return Read::dead();
@@ -635,7 +854,7 @@ impl Value {
                 }
                 // An empty party slot is the normal state of slots two to six,
                 // so it reads as dead and the card for it is simply not drawn.
-                let Some(species) = crate::gen3::party_species(memory, address) else {
+                let Some(species) = memory.boxed(address).map(|boxed| boxed.species()) else {
                     return Read::dead();
                 };
                 Read {
@@ -655,14 +874,14 @@ impl Value {
 impl ImageSpec {
     /// Where a consumer can find this picture, or `None` when there is not one
     /// to name — an empty slot, or a species with no National Dex number.
-    fn resolve(&self, memory: &dyn MemoryView, step: u32) -> Option<AddonImage> {
+    fn resolve(&self, memory: &BoundedMemory<'_>, step: u32) -> Option<AddonImage> {
         match self {
             ImageSpec::Gen3SpeciesSprite(at) => {
                 let address = at.resolve(memory, step)?;
                 if !readable(address, crate::gen3::BOXED_BYTES) {
                     return None;
                 }
-                let species = crate::gen3::party_species(memory, address)?;
+                let species = memory.boxed(address)?.species();
                 let dex = crate::gen3::national_dex_number(species)?;
                 let image = AddonImage::new(format!("/sprites/{dex}"));
                 Some(match crate::gen3_names::species(species) {
@@ -808,7 +1027,7 @@ impl<T: Default> GameAddon<T> for ManifestAddon {
     }
 }
 
-fn build_section(spec: &SectionSpec, memory: &dyn MemoryView) -> Option<AddonSection> {
+fn build_section(spec: &SectionSpec, memory: &BoundedMemory<'_>) -> Option<AddonSection> {
     let id = spec.id.clone();
 
     let section = match &spec.body {
@@ -841,7 +1060,7 @@ fn build_section(spec: &SectionSpec, memory: &dyn MemoryView) -> Option<AddonSec
 
 fn build_card(
     spec: &CardSpec,
-    memory: &dyn MemoryView,
+    memory: &BoundedMemory<'_>,
     step: u32,
     index: u32,
 ) -> Option<AddonCard> {
@@ -881,7 +1100,7 @@ fn build_card(
 
 fn build_field(
     spec: &FieldSpec,
-    memory: &dyn MemoryView,
+    memory: &BoundedMemory<'_>,
     step: u32,
     index: u32,
 ) -> Option<AddonField> {
@@ -992,6 +1211,202 @@ mod tests {
         raw[86..88].copy_from_slice(&53u16.to_le_bytes());
         raw[88..90].copy_from_slice(&53u16.to_le_bytes());
         raw
+    }
+
+    /// The encrypted half of a record, which is the half worth having: moves,
+    /// effort and individual values, nature, and the flags. None of it can be
+    /// reached by an offset, because the block is permuted per Pokémon.
+    #[test]
+    fn a_card_reads_the_encrypted_half_of_a_record_by_name() {
+        const BASE: u32 = 0x0202_4284;
+        // personality 7 puts the substructures in one order; 19 in another.
+        // Both must answer the same questions with the same numbers.
+        for personality in [7u32, 19, 23] {
+            let memory = SparseMemory::new().with(
+                BASE,
+                loaded_record(personality, 0x1234_5678, 21, &[0xCD, 0xFF]),
+            );
+            let reader = addon(&format!(
+                r#"{{
+                  "manifest_version": 2,
+                  "addon_id": "custom.detail",
+                  "display_name": "Detail",
+                  "matches": {{ "game_code": ["BPRE"], "revision": [0] }},
+                  "sections": [{{
+                    "id": "party", "title": "Party", "kind": "cards",
+                    "repeat": {{ "count": 1, "stride": 100 }},
+                    "card": {{
+                      "title": {{ "gen3": {{ "at": "0x02024284", "field": "species" }} }},
+                      "fields": [
+                        {{ "label": "Move 1", "read": {{ "gen3": {{ "at": "0x02024284", "field": "move1" }} }} }},
+                        {{ "label": "Move 2", "read": {{ "gen3": {{ "at": "0x02024284", "field": "move2" }} }} }},
+                        {{ "label": "PP 1", "read": {{ "gen3": {{ "at": "0x02024284", "field": "pp1" }} }} }},
+                        {{ "label": "HP EV", "read": {{ "gen3": {{ "at": "0x02024284", "field": "ev_hp" }} }},
+                          "max": {{ "const": 252 }} }},
+                        {{ "label": "EV total", "read": {{ "gen3": {{ "at": "0x02024284", "field": "ev_total" }} }},
+                          "max": {{ "const": 510 }} }},
+                        {{ "label": "Atk IV", "read": {{ "gen3": {{ "at": "0x02024284", "field": "iv_attack" }} }},
+                          "max": {{ "const": 31 }} }},
+                        {{ "label": "Nature", "read": {{ "gen3": {{ "at": "0x02024284", "field": "nature" }} }} }},
+                        {{ "label": "Friendship", "read": {{ "gen3": {{ "at": "0x02024284", "field": "friendship" }} }} }},
+                        {{ "label": "Egg", "read": {{ "gen3": {{ "at": "0x02024284", "field": "is_egg" }} }} }}
+                      ]
+                    }}
+                  }}]
+                }}"#
+            ));
+
+            let snapshot = read_of(&reader, &memory).expect("detail should report");
+            let AddonSectionContent::Cards(cards) = &snapshot.sections[0].content else {
+                panic!("expected cards");
+            };
+            let field = |label: &str| {
+                cards[0]
+                    .fields
+                    .iter()
+                    .find(|field| field.label == label)
+                    .unwrap_or_else(|| panic!("{label} missing"))
+            };
+
+            assert_eq!(field("Move 1").value, "#43", "personality {personality}");
+            // An empty move slot is a state, not a zero to be shown as "#0".
+            assert_eq!(field("Move 2").value, "—");
+            assert_eq!(field("PP 1").value, "35");
+            assert_eq!(field("HP EV").value, "4/252");
+            assert_eq!(field("EV total").value, "10/510");
+            assert_eq!(field("Atk IV").value, "6/31");
+            // Nature is not stored; it is the personality, mod 25.
+            assert_eq!(
+                field("Nature").value,
+                crate::gen3::NATURES[(personality % 25) as usize]
+            );
+            assert_eq!(field("Friendship").value, "70");
+            assert_eq!(field("Egg").value, "No");
+
+            // A constant maximum gives a bar to a value whose ceiling is a
+            // rule rather than a memory location.
+            assert_eq!(field("HP EV").meter, Some(AddonMeter::new(4, 252)));
+            assert_eq!(field("Atk IV").meter, Some(AddonMeter::new(6, 31)));
+        }
+    }
+
+    /// Sixteen decrypted fields on one card must cost one decrypt, not sixteen.
+    #[test]
+    fn every_field_of_a_card_shares_one_decrypt() {
+        const BASE: u32 = 0x0202_4284;
+        let memory = SparseMemory::new()
+            .with(BASE, loaded_record(7, 0x1234_5678, 21, &[0xCD, 0xFF]))
+            .with(BASE + 100, loaded_record(19, 0x1234_5678, 25, &[0xFF]));
+
+        let fields: String = (1..=4)
+            .map(|n| {
+                format!(
+                    r#"{{ "label": "Move {n}", "read": {{ "gen3": {{ "at": "0x02024284", "field": "move{n}" }} }} }},
+                       {{ "label": "PP {n}", "read": {{ "gen3": {{ "at": "0x02024284", "field": "pp{n}" }} }} }}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let reader = addon(&format!(
+            r#"{{
+              "manifest_version": 2, "addon_id": "custom.many", "display_name": "Many",
+              "matches": {{ "game_code": ["BPRE"], "revision": [0] }},
+              "sections": [{{
+                "id": "party", "title": "Party", "kind": "cards",
+                "repeat": {{ "count": 6, "stride": 100 }},
+                "card": {{ "title": {{ "gen3": {{ "at": "0x02024284", "field": "species" }} }},
+                           "fields": [{fields}] }}
+              }}]
+            }}"#
+        ));
+
+        let counted = CountingMemory {
+            inner: &memory,
+            reads: std::cell::Cell::new(0),
+        };
+        let snapshot = read_of(&reader, &counted).expect("should report");
+        let AddonSectionContent::Cards(cards) = &snapshot.sections[0].content else {
+            panic!("expected cards");
+        };
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].fields.len(), 8);
+
+        // One decrypt is ~58 byte reads. Nine fields per card over six slots
+        // without the memo would be several thousand; with it, well under.
+        assert!(
+            counted.reads.get() < 700,
+            "expected one decrypt per record, saw {} byte reads",
+            counted.reads.get()
+        );
+    }
+
+    /// A record carrying the things the encrypted block is for, so the tests
+    /// above are checking a decode rather than a pile of zeroes.
+    fn loaded_record(personality: u32, ot_id: u32, species: u16, nickname: &[u8]) -> Vec<u8> {
+        let mut raw = party_record(personality, ot_id, species, nickname);
+
+        let mut plain = [0u8; 48];
+        let growth = crate::gen3::growth_offset(personality);
+        plain[growth..growth + 2].copy_from_slice(&species.to_le_bytes());
+        plain[growth + 9] = 70; // friendship
+
+        // The substructure order names where Attacks, EVs and Misc landed.
+        let order = substruct_order(personality);
+        let attacks = order[1] * 12;
+        plain[attacks..attacks + 2].copy_from_slice(&43u16.to_le_bytes()); // move 1
+        plain[attacks + 8] = 35; // pp 1
+
+        let evs = order[2] * 12;
+        plain[evs] = 4; // HP EV
+        plain[evs + 1] = 6; // Attack EV, so the total is not just one number
+
+        let misc = order[3] * 12;
+        // IVs: HP 3, Attack 6, the rest zero. Five bits each, from the bottom.
+        let iv_word: u32 = 3 | (6 << 5);
+        plain[misc + 4..misc + 8].copy_from_slice(&iv_word.to_le_bytes());
+
+        let checksum = plain
+            .chunks_exact(2)
+            .map(|pair| u32::from(u16::from_le_bytes([pair[0], pair[1]])))
+            .sum::<u32>() as u16;
+        raw[28..30].copy_from_slice(&checksum.to_le_bytes());
+
+        let key = personality ^ ot_id;
+        for (block, chunk) in plain.chunks_exact(4).enumerate() {
+            let word = u32::from_le_bytes(chunk.try_into().unwrap()) ^ key;
+            raw[32 + block * 4..36 + block * 4].copy_from_slice(&word.to_le_bytes());
+        }
+        raw
+    }
+
+    /// The permutation, rebuilt from the one offset `gen3` exposes, so the
+    /// tests do not carry a second copy of the twenty-four orders.
+    fn substruct_order(personality: u32) -> [usize; 4] {
+        const ORDERS: [[usize; 4]; 24] = [
+            [0, 1, 2, 3], [0, 1, 3, 2], [0, 2, 1, 3], [0, 3, 1, 2], [0, 2, 3, 1], [0, 3, 2, 1],
+            [1, 0, 2, 3], [1, 0, 3, 2], [2, 0, 1, 3], [3, 0, 1, 2], [2, 0, 3, 1], [3, 0, 2, 1],
+            [1, 2, 0, 3], [1, 3, 0, 2], [2, 1, 0, 3], [3, 1, 0, 2], [2, 3, 0, 1], [3, 2, 0, 1],
+            [1, 2, 3, 0], [1, 3, 2, 0], [2, 1, 3, 0], [3, 1, 2, 0], [2, 3, 1, 0], [3, 2, 1, 0],
+        ];
+        ORDERS[(personality % 24) as usize]
+    }
+
+    /// Counts byte reads, so "decrypt once per record" is a measurement rather
+    /// than a claim.
+    struct CountingMemory<'a> {
+        inner: &'a dyn MemoryView,
+        reads: std::cell::Cell<usize>,
+    }
+    impl MemoryView for CountingMemory<'_> {
+        fn read_u8(&self, addr: u32) -> u8 {
+            // Only the party block. The other reads are the one-off pass over
+            // the cartridge that finds the name tables, which happens once per
+            // ROM and is not what this test is measuring.
+            if (0x0202_4284..0x0202_44AC).contains(&addr) {
+                self.reads.set(self.reads.get() + 1);
+            }
+            self.inner.read_u8(addr)
+        }
     }
 
     /// The whole point of the Generation 3 reads: a party card that says

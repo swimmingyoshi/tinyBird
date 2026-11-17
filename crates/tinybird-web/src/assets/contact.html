@@ -27,9 +27,9 @@
         <nav class="bar__nav" aria-label="Main navigation">
           <a href="/">Home</a>
           <a href="/play">Play</a>
+          <a href="/addons">Add-ons</a>
           <a href="/info">Info</a>
-          <a class="is-current" href="/contact" aria-current="page">Contact</a>
-        <a href="/addons">Add-ons</a>
+          <a class="is-current" aria-current="page" href="/contact">Contact</a>
         </nav>
         <p class="bar__state" id="link-state" data-state="idle">
           <span class="dot" aria-hidden="true"></span><span id="link-label">checking</span>
@@ -67,10 +67,14 @@
           <!-- The way to what was sent before. Hidden unless there is
                something behind it: no key, no accounts, or nobody signed in
                all mean the link would lead to a panel saying so. -->
-          <p class="contact__tickets" id="contact-tickets" hidden>
-            <a href="/support/tickets">Messages you have already sent</a>, and
-            whatever came back.
-          </p>
+          <div class="contact__tickets" id="contact-tickets" hidden>
+            <a class="key key--slim contact__tickets-go" href="/support/tickets">
+              View your tickets
+            </a>
+            <span class="contact__tickets-note">
+              Messages you have already sent, and whatever came back.
+            </span>
+          </div>
 
           <!-- Shown instead of the form when accounts are configured and
                nobody is signed in. Said up front rather than on submit:

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "from_stage": 34,
+  "to_stage": 75,
+  "stage_field": {"name": "game.sublevel", "address": 50346760, "width": 2},
+  "mode_field": "game.mode",
+  "playing_mode": 26,
+  "map_mode": 17,
+  "start_field": "player.world_x_fixed",
+  "max_start_value": 16384,
+  "map_timeout_frames": 1800,
+  "sequence": [
+    {"buttons": [], "frames": 120},
+    {"buttons": ["RIGHT"], "frames": 60},
+    {"buttons": [], "frames": 30},
+    {"buttons": ["RIGHT"], "frames": 60},
+    {"buttons": [], "frames": 30},
+    {"buttons": ["A"], "frames": 180},
+    {"buttons": [], "frames": 60}
+  ]
+}

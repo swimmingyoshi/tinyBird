@@ -245,6 +245,33 @@ so match exact game codes/revisions and use an optional `when` readiness conditi
 | `{"index": null}` | Which repeat this is, counting from one. |
 | `{"gen3_text": {"at": "0x…", "len": 10}}` | Text in Generation 3's own alphabet. A nickname sits at `record + 8`. |
 | `{"gen3_species": "0x…"}` | The species of the record starting here — decrypted, un-permuted, and named from the cartridge's own table. Reads as `#21` when the tables were not found. |
+| `{"gen3": {"at": "0x…", "field": "move1"}}` | One named field out of the encrypted block of the record starting at `at`. See the table below. |
+| `{"const": 252}` | A fixed number. Only useful as a field's `max`, for a gauge whose ceiling is a rule rather than an address. |
+
+### The encrypted half of a Generation 3 record
+
+Bytes 32–79 of a 100-byte record are four 12-byte substructures, XOR'd with
+`personality ^ ot_id` and **reordered by `personality % 24`** — so there is no
+offset that names anything stably, and a manifest asks for a field by name
+instead. Every one of these takes the address of the *start of the record*.
+
+| `field` | Reads as |
+|---|---|
+| `species`, `held_item`, `move1`–`move4` | the name from the cartridge's own tables, with the index as the number. An empty move or item slot reads `—` rather than `#0`. |
+| `nature` | the nature name. It is not stored anywhere: it *is* `personality % 25`. |
+| `pp1`–`pp4`, `friendship`, `experience`, `pokerus`, `met_location`, `ability_slot` | the number. |
+| `ev_hp` … `ev_sp_defense`, `ev_total` | effort values. Pair with `"max": {"const": 252}` (or `510` for the total) for a bar. |
+| `iv_hp` … `iv_sp_defense`, `iv_total` | individual values. Pair with `"max": {"const": 31}` (or `186`). |
+| `is_egg`, `is_shiny` | `Yes` or `No`, with `1`/`0` as the number. |
+
+Decrypting is the expensive part, so every field naming the same record shares
+one decrypt per snapshot — a card with four moves, four PP values and twelve
+effort and individual values costs one, not twenty.
+
+The one thing the compiled FireRed reader shows that this cannot is the
+**ability name**: `ability_slot` says which of the species' two abilities it
+has, but turning that into a word needs a species table that lives in
+`tinybird-games`, not here.
 
 Adding `"max"` to a field, in the same shape, turns it into a gauge: the
 renderer draws a bar and colours it from the fraction, which is where `tone`
@@ -263,8 +290,8 @@ the whole ROM — far outside the per-update read budget — so the host calls
 
 | Missing | Why it matters |
 |---|---|
-| Decryption beyond species | `gen3_species` undoes the XOR and the personality permutation, but only for the species field. Moves, IVs and EVs are in the same encrypted block and have no read of their own. |
-| Arithmetic | No totals, no percentages, no derived stats. |
+| Ability names | `gen3` gives `ability_slot`, but the species-to-abilities table is compiled into `tinybird-games` and is not reachable from a manifest. |
+| Arithmetic | No totals, no percentages, no derived stats — beyond the few the decoder computes itself, like `ev_total` and `nature`. |
 | Per-section conditions | A root `when` readiness condition is supported; individual sections do not yet have separate conditions. |
 | Tone and badge rules | A gauge gets a tone from its fraction; nothing can flag itself the way the IV check does. |
 

@@ -15,6 +15,33 @@ pub struct MemoryField {
     pub width: u8,
 }
 
+/// Versioned Workshop export. Game matching uses the cartridge header.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationConfig {
+    pub schema_version: u32,
+    pub game: ObservationGame,
+    pub fields: Vec<MemoryField>,
+}
+
+/// Exact game code (including region) and revision this map was discovered on.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservationGame {
+    pub code: String,
+    pub revision: u8,
+}
+
+fn semantic_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name.split('.').all(|part| {
+            let mut bytes = part.bytes();
+            matches!(bytes.next(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'_'))
+                && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+}
+
 /// One JSON command. A step holds the supplied buttons for the entire action.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -25,6 +52,7 @@ pub enum Command {
     GetFrame,
     GetMemory { address: u32, length: u32 },
     SetObservations { fields: Vec<MemoryField> },
+    ConfigureObservations { config: ObservationConfig },
     SaveState { slot: u8 },
     LoadState { slot: u8 },
 }
@@ -91,6 +119,41 @@ impl Runtime {
     /// Execute one command; invalid arguments are rejected before mutation.
     pub fn execute(&mut self, command: Command) -> Result<Value, String> {
         match command {
+            Command::ConfigureObservations { config } => {
+                if config.schema_version != 1 {
+                    return Err("unsupported observation schema version (expected 1)".into());
+                }
+                if config.game.code.len() != 4
+                    || !config
+                        .game
+                        .code
+                        .bytes()
+                        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+                {
+                    return Err(
+                        "game code must contain four uppercase ASCII letters or digits".into(),
+                    );
+                }
+                if config
+                    .game
+                    .code
+                    .bytes()
+                    .enumerate()
+                    .any(|(i, b)| self.gba.read_u8(0x080000ac + i as u32) != b)
+                    || self.gba.read_u8(0x080000bc) != config.game.revision
+                {
+                    return Err(format!("observation config requires game {} revision {}; loaded cartridge does not match",
+                        config.game.code, config.game.revision));
+                }
+                if config.fields.is_empty() || config.fields.iter().any(|f| !semantic_name(&f.name))
+                {
+                    return Err("config needs at least one field; names must be dot-separated identifiers, at most 128 characters".into());
+                }
+                // Reuse range/width/uniqueness validation; replacement is atomic.
+                self.execute(Command::SetObservations {
+                    fields: config.fields,
+                })
+            }
             Command::GetState => Ok(self.observe()),
             Command::GetFrame => Ok(json!({"width": 240, "height": 160,
                 "format": "rgb888", "pixels": self.pixels})),
@@ -199,6 +262,8 @@ mod tests {
         // ARM branch-to-self: no commercial fixtures needed.
         let mut rom = vec![0; 192];
         rom[..4].copy_from_slice(&0xeafffffeu32.to_le_bytes());
+        rom[0xac..0xb0].copy_from_slice(b"TBST");
+        rom[0xbc] = 2;
         let mut gba = Gba::with_rom(rom);
         gba.start();
         gba.write_u8(0x02000001, 0x34);
@@ -252,5 +317,43 @@ mod tests {
             .is_err());
         assert!(rt.execute(Command::LoadState { slot: 0 }).is_err());
         assert_eq!(rt.gba.save_state_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn workshop_config_matches_cartridge_and_rejects_atomically() {
+        let config: ObservationConfig =
+            serde_json::from_str(include_str!("../../../tests/fixtures/observations.json"))
+                .unwrap();
+        let mut rt = runtime();
+        let applied = rt
+            .execute(Command::ConfigureObservations {
+                config: config.clone(),
+            })
+            .unwrap();
+        assert_eq!(applied["memory"]["player.hp"], 0x1234);
+        for broken in 0..7 {
+            let mut bad = config.clone();
+            match broken {
+                0 => bad.game.code = "NOPE".into(),
+                1 => bad.game.revision = 0,
+                2 => bad.schema_version = 99,
+                3 => bad.fields[0].name = "player..hp".into(),
+                4 => bad.fields.push(bad.fields[0].clone()),
+                5 => bad.fields[0].address = u32::MAX,
+                _ => bad.fields[0].width = 0,
+            }
+            assert!(rt
+                .execute(Command::ConfigureObservations { config: bad })
+                .is_err());
+            assert_eq!(rt.execute(Command::GetState).unwrap(), applied);
+        }
+        rt.execute(Command::SaveState { slot: 0 }).unwrap();
+        rt.execute(Command::Step {
+            frames: 2,
+            buttons: vec![],
+        })
+        .unwrap();
+        assert_eq!(rt.execute(Command::Reset).unwrap(), applied);
+        assert_eq!(rt.execute(Command::LoadState { slot: 0 }).unwrap(), applied);
     }
 }

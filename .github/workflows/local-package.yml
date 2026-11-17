@@ -1,0 +1,29 @@
+name: Package local edition
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cargo test --locked -p tinybird-web -p tinybird-runtime -p tinybird-addons
+      - run: cargo build --locked --release -p tinybird-web -p tinybird-runtime
+      - run: cargo build --locked --release -p tinybird-wasm --target wasm32-unknown-unknown
+      - run: python scripts/package-local.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: local-${{ matrix.os }}
+          path: target/dist/*
+          if-no-files-found: error

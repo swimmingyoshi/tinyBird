@@ -9,6 +9,12 @@ stream-data
 tests/roms
 .env
 .env.*
+deploy/*.env
+**/*.sqlite*
+**/*.db
+**/*.pem
+**/*.key
+**/node_modules
 *.gba
 *.gb
 *.gbc

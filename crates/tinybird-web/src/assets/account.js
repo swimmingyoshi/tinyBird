@@ -31,6 +31,16 @@ const MENU = `
   <div class="account__menu" id="account-menu" hidden>
     <div id="account-in" hidden>
       <p class="account__who" id="account-who">—</p>
+      <!-- Account-scoped places, which is the only kind that belongs here.
+           Tickets in particular had nowhere else to live: it is not in the
+           main nav, so the only way to it was a sentence on the contact
+           page. -->
+      <nav class="account__links" id="account-links" aria-label="Your account">
+        <a class="account__link" id="account-tickets" href="/support/tickets" hidden>
+          <span>Your tickets</span>
+          <span class="account__link-note">Sent messages and replies</span>
+        </a>
+      </nav>
       <div class="account__row">
         <button class="key key--slim" id="btn-signout" type="button">Sign out</button>
       </div>
@@ -111,6 +121,8 @@ export function mountAccount({ onChange } = {}) {
     label: $("account-label"),
     signedIn: $("account-in"),
     who: $("account-who"),
+    links: $("account-links"),
+    tickets: $("account-tickets"),
     extras: $("account-extras"),
     form: $("account-form"),
     email: $("account-email"),
@@ -249,6 +261,10 @@ export function mountAccount({ onChange } = {}) {
         render(null);
         return;
       }
+      // Only drawn when there is something behind it, the same rule the
+      // contact page's own link follows.
+      el.tickets.hidden = !body.tickets;
+      el.links.hidden = !body.tickets;
       render(body.user ?? null);
     } catch {
       el.host.hidden = true;

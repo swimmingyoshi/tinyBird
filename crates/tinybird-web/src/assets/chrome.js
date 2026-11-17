@@ -5,6 +5,8 @@
 // wording for "server up". One copy, one wording.
 
 import { mountAccount } from "/account.js";
+import { mountTheme } from "/theme.js";
+import { mountDeployment } from '/deployment.js';
 
 /**
  * Wire up the bar. Returns the account controller, already refreshed.
@@ -13,6 +15,12 @@ import { mountAccount } from "/account.js";
  * depends on who is signed in.
  */
 export async function mountChrome({ onAccountChange } = {}) {
+  mountDeployment();
+  // First, and deliberately not awaited: the palette is applied synchronously
+  // inside, so it lands before the first paint, and only the background image
+  // has to wait on IndexedDB. Nothing below depends on either.
+  mountTheme();
+
   const state = document.getElementById("link-state");
   const label = document.getElementById("link-label");
 

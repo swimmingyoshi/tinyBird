@@ -19,4 +19,12 @@
 <h2>4. Document what you found</h2><p>Record the meaning, type, game version, when the value is valid, and how you tested it. Include whether a reset or save load changes the address. Unknown starting values, changed/unchanged scans, numeric ranges, and scanning every byte can help narrow candidates. A matching address is a candidate until you test it in different game situations.</p>
 <h2>5. Share the definitions</h2><p>Sheets use the existing manifest format and add <code>"$comment": {"kind":"memory_sheet","memory_sheet_version":1}</code>. Publishing creates an immutable community release with your description and license. It shares definitions and notes, not ROMs, saves, or memory snapshots. Copies retain their source release, author, and license metadata.</p>
 <p>Compatibility is currently game code plus revision. Shared sheets are author-contributed findings; they are not automatically verified for every ROM.</p>
+<h2 id="automation">6. Use discovered values from Python</h2>
+<p>For a plain numeric field, click <b>Use this address for automation</b> in the Workshop. Give it a name such as <code>player.hp</code>, click <b>Add observation</b>, and verify its live value. <b>Automation observations</b> lets you edit, remove, import, and export these definitions independently of your reader.</p>
+<p>The exported configuration includes the loaded game's code and revision. The headless runtime checks both before applying it. Start from the same save state if the address only becomes meaningful after reaching a particular point in the game.</p>
+<p>From a TinyBird source checkout:</p>
+<pre>cargo build -p tinybird-runtime
+python examples/python/run_observations.py game.gba CODE-rN.observations.json --executable target/debug/tinybird-headless --steps 60 --frames 4 --buttons RIGHT</pre>
+<p>On Windows, append <code>.exe</code> to the executable path. Add <code>--state game.state</code> or <code>--bios gba_bios.bin</code> as needed. The Python client in <code>examples/python/tinybird.py</code> accepts <code>observations="CODE-rN.observations.json"</code>; each reset or step returns named values in <code>observation["memory"]</code>.</p>
+<p>This first version supports direct unsigned 8-, 16-, and 32-bit values. Encoded fields and pointer chains need a later observation format. ROM hacks that reuse a game's header still require address verification.</p>
 </section></main></body></html>

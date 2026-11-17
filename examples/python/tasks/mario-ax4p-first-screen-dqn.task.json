@@ -1,0 +1,71 @@
+{
+    "schema_version":  1,
+    "frame_skip":  4,
+    "max_steps":  120,
+    "history":  4,
+    "reset_sequence":  [
+                           {
+                               "buttons":  [
+                                               "A"
+                                           ],
+                               "frames":  180
+                           },
+                           {
+                               "buttons":  [
+
+                                           ],
+                               "frames":  60
+                           }
+                       ],
+    "reset_frames":  1,
+    "reset_choices":  [
+                          [
+
+                          ]
+                      ],
+    "actions":  [
+                    [
+                        "RIGHT"
+                    ],
+                    [
+                        "RIGHT",
+                        "A"
+                    ]
+                ],
+    "features":  [
+                     {
+                         "field":  "player.world_x_fixed",
+                         "min":  0,
+                         "max":  65536
+                     },
+                     {
+                         "field":  "player.world_y_fixed",
+                         "min":  65536,
+                         "max":  114688
+                     }
+                 ],
+    "step_reward":  -0.005,
+    "rewards":  [
+                    {
+                        "field":  "player.world_x_fixed",
+                        "mode":  "progress",
+                        "scale":  0.000022194602272727273
+                    }
+                ],
+    "terminal":  [
+                     {
+                         "field":  "player.world_y_fixed",
+                         "op":  "ge",
+                         "value":  107520,
+                         "outcome":  "failure",
+                         "reward":  -3
+                     },
+                     {
+                         "field":  "player.world_x_fixed",
+                         "op":  "ge",
+                         "value":  51200,
+                         "outcome":  "success",
+                         "reward":  5
+                     }
+                 ]
+}

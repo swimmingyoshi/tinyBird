@@ -10,6 +10,7 @@ services:
       - path: ${TINYBIRD_ENV_FILE:-./deploy/tinybird.env}
         required: true
     environment:
+      TINYBIRD_MODE: production
       TINYBIRD_WEB_HOST: 0.0.0.0
       TINYBIRD_WEB_PORT: 8877
       TINYBIRD_WEB_WASM: /app/tinybird_wasm.wasm

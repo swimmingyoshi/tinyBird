@@ -98,6 +98,64 @@ assert.equal(first.fields.find(field => field.label === 'Level').value,
 assert.ok(partySection.payload.length <= 6);
 assert.deepEqual(emu.saveState(), initialState, 'decrypting a record never alters the machine');
 
+// The encrypted half of a record, against the real cartridge. This is the part
+// no offset can reach: the block is XOR-encrypted and permuted per Pokemon, so
+// a passing assertion here means the decrypt, the permutation and the ROM name
+// tables all agreed with the compiled reader that reads the same bytes.
+const detail = (label, field, extra = {}) => ({ label, read: { gen3: { at: '0x02024284', field } }, ...extra });
+const deep = {
+  manifest_version: 2, addon_id: 'reader.detail', display_name: 'Detail',
+  matches: { game_code: ['BPRE'], revision: [0] },
+  sections: [{
+    id: 'party', title: 'Party', kind: 'cards',
+    repeat: { count: 6, stride: 100 },
+    card: {
+      title: { gen3: { at: '0x02024284', field: 'species' } },
+      fields: [
+        detail('Move 1', 'move1'), detail('Move 2', 'move2'),
+        detail('PP 1', 'pp1'),
+        detail('Nature', 'nature'), detail('Shiny', 'is_shiny'), detail('Held item', 'held_item'),
+        detail('IV total', 'iv_total', { max: { const: 186 } }),
+        detail('EV total', 'ev_total', { max: { const: 510 } }),
+        detail('IV Atk', 'iv_attack', { max: { const: 31 } }),
+        detail('EV Atk', 'ev_attack', { max: { const: 252 } }),
+      ],
+    },
+  }],
+};
+assert.equal(emu.installManifests([deep]), 1);
+const deepSection = emu.snapshot().addon.sections.at(-1);
+const slot = deepSection.payload[0];
+const detailOf = label => slot.fields.find(field => field.label === label);
+
+// Move names come from tables found by scanning the cartridge, so this fails
+// if either the decrypt or the table search regressed.
+assert.equal(detailOf('Move 1').value, 'Leer');
+assert.equal(detailOf('Move 2').value, 'Peck');
+assert.equal(detailOf('PP 1').value, '30');
+// Nature is not stored anywhere; it is the personality mod 25.
+assert.equal(detailOf('Nature').value, 'Adamant');
+// A flag reads as a word rather than as a bare 1.
+assert.equal(detailOf('Shiny').value, 'No');
+// An empty slot is a state, not a zero to be shown as an item called "#0".
+assert.equal(detailOf('Held item').value, '—');
+
+// A constant maximum gives a bar to a value whose ceiling is a rule.
+assert.deepEqual(detailOf('IV total').meter, { value: 91, max: 186 });
+assert.deepEqual(detailOf('EV total').meter, { value: 17, max: 510 });
+assert.deepEqual(detailOf('IV Atk').meter, { value: 6, max: 31 });
+assert.deepEqual(detailOf('EV Atk').meter, { value: 3, max: 252 });
+assert.equal(detailOf('EV Atk').tone, 'warn', 'a quarter-full-or-less bar reads as warn; only an empty one is bad');
+
+// Every card decrypts its own record and no other, so a party of six with ten
+// decrypted fields each still resolves every slot independently.
+assert.equal(deepSection.payload.length, 6);
+assert.deepEqual(deepSection.payload.map(card => card.title),
+  ['Nidoran♂', 'Ivysaur', 'Paras', 'Spearow', 'Clefairy', 'Mankey']);
+assert.equal(deepSection.payload[1].fields.find(f => f.label === 'Move 1').value, 'Tackle');
+assert.deepEqual(emu.saveState(), initialState, 'decrypting a whole party never alters the machine');
+emu.installManifests([]);
+
 // The same reader on a cartridge it does not claim stays quiet rather than
 // reporting whatever those addresses happen to hold.
 const elsewhere = structuredClone(party); elsewhere.matches = { game_code: ['BPEE'], revision: [0] };
@@ -106,4 +164,4 @@ assert.equal(emu.snapshot().community_addons[0].status, 'incompatible');
 
 emu.installManifests([]);
 emu.runFrame(); assert.ok(emu.frameCount > 0);
-console.log('PASS: composition, read-only state, atomic replacement, compatibility, readiness, bounded memory, Gen 3 decoding and removal.');
+console.log('PASS: composition, read-only state, atomic replacement, compatibility, readiness, bounded memory, Gen 3 decoding of the encrypted block, and removal.');
