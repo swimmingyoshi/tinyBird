@@ -25,8 +25,15 @@ fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// The scene both measurements start from, when it is present: a save state
+/// in the overworld, which is what someone playing actually spends time on.
+fn scene() -> Option<PathBuf> {
+    let state = workspace().join("TradeTest1.state");
+    state.is_file().then_some(state)
+}
+
 /// Boot a ROM far enough that it is doing real work, then time it.
-fn timed_frames(rom: &Path, state: Option<&Path>, warmup: u32, frames: u32) -> f64 {
+fn timed_frames(rom: &Path, state: Option<&Path>, audio: bool, warmup: u32, frames: u32) -> f64 {
     let mut gba = Gba::new();
     gba.load_rom(std::fs::read(rom).expect("read ROM"));
 
@@ -34,6 +41,7 @@ fn timed_frames(rom: &Path, state: Option<&Path>, warmup: u32, frames: u32) -> f
         let bytes = std::fs::read(state).expect("read savestate");
         gba.load_state_bytes(&bytes).expect("restore savestate");
     }
+    gba.set_audio_enabled(audio);
 
     // A cold cartridge spends its first frames on logos and static screens,
     // which is not what anybody is trying to make faster.
@@ -57,10 +65,7 @@ fn frame_cost_against_the_frame_budget() {
         return;
     }
 
-    let state = workspace().join("TradeTest1.state");
-    let state = state.is_file().then_some(state);
-
-    let ms = timed_frames(&rom, state.as_deref(), 60, 600);
+    let ms = timed_frames(&rom, scene().as_deref(), true, 60, 600);
     let headroom = FRAME_BUDGET_MS - ms;
 
     eprintln!("--- frame throughput -------------------------------------");
@@ -79,9 +84,10 @@ fn frame_cost_against_the_frame_budget() {
 
 /// The same measurement with audio off.
 ///
-/// `sync_io_to_apu` runs once per *instruction*, not once per frame, so the
-/// gap between these two numbers is how much of a frame goes into keeping the
-/// sound chip's registers in step.
+/// It starts from the same scene as the one above, so the gap between the two
+/// numbers is what the sound chip costs. Until November 2026 this one booted
+/// cold instead and timed the intro, which made audio look like a third of the
+/// frame when much of that gap was the different workload.
 #[test]
 #[ignore = "Measurement, not an assertion; needs a commercial ROM"]
 fn frame_cost_with_audio_disabled() {
@@ -91,18 +97,7 @@ fn frame_cost_with_audio_disabled() {
         return;
     }
 
-    let mut gba = Gba::new();
-    gba.load_rom(std::fs::read(&rom).expect("read ROM"));
-    gba.set_audio_enabled(false);
-    for _ in 0..60 {
-        gba.run_frame();
-    }
-
-    let start = Instant::now();
-    for _ in 0..600 {
-        gba.run_frame();
-    }
-    let ms = start.elapsed().as_secs_f64() * 1000.0 / 600.0;
+    let ms = timed_frames(&rom, scene().as_deref(), false, 60, 600);
 
     eprintln!("  audio off   {ms:.2} ms/frame");
     assert!(ms > 0.0);
