@@ -1,12 +1,12 @@
-import { api, localAddons, localKey, saveLocalAddons, parseManifest } from '/addon-client.js';
+import { localAddons, localKey, saveLocalAddons, parseManifest } from '/addon-client.js';
 import { REGIONS, hex, numberValue, readNumber, scanMemory, starterManifest, searchPattern, scanPattern,
   FIELD_KINDS, GEN3_FIELDS, fieldSpec, fieldForm, addSection, updateSection, removeSection, moveSection,
   addField, updateField, removeField, moveField, setLead, sectionFields, partyTemplate } from '/workshop-model.js';
-import { memorySheet, builtinSheet, describeRead } from '/memory-sheets.js';
+import { builtinSheet, describeRead } from '/memory-sheets.js';
 import { mountObservations } from '/workshop-observations.js';
 
 // These tools are first-party panels. Shared add-ons remain read-only data.
-export function mountWorkshop({ root, getEmulator, getUser, preview, installed, focusGame, onPreview = () => {} }) {
+export function mountWorkshop({ root, getEmulator, preview, installed, focusGame, onPreview = () => {} }) {
   root.innerHTML = `
     <summary>Add-on workshop <span>Build while you play</span></summary>
     <div class="workshop-body">
@@ -19,10 +19,9 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
               <label>Saved readers<select data-saved></select></label><button type="button" data-load>Open reader</button>
               <div class="workshop-actions"><button type="button" data-new>New blank reader</button><button type="button" data-party>Party template</button><button type="button" data-example>Documented example</button></div>
               <label>Import a reader<input data-import type="file" accept=".json,application/json"></label>
-              <a href="/addons?kind=memory_sheet#community" target="_blank" rel="noopener">Browse shared memory sheets</a>
             </div>
           </details>
-          <button type="button" data-finish>Finish &amp; share</button>
+          <button type="button" data-finish>Finish</button>
         </div>
         <p data-game>Load a game in the test player to begin.</p>
       </header>
@@ -95,17 +94,11 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
       <div class="workshop-finish-heading"><div><span class="workshop-eyebrow">FINISH YOUR READER</span><h3 id="workshop-finish-title" data-finish-title>Your reader</h3></div><button type="button" data-back-build>Back to editing</button></div>
       <p data-share-summary></p><p data-finish-status role="status"></p>
       <section class="workshop-delivery"><h4>Use it yourself</h4><p>Your draft is saved in this browser. Enable it beside your game, or download a copy to keep.</p><div class="workshop-actions"><button type="button" data-save>Save &amp; enable</button><button type="button" data-export>Download JSON</button></div></section>
-      <section class="workshop-publish"><h4>Share with the community</h4><p>Test in a few game situations, then describe what works and any limitations.</p>
-        <label>Description<textarea data-description rows="3" maxlength="2000" placeholder="What it shows, where you tested it, and any limitations"></textarea></label>
-        <div class="workshop-grid"><label>License<select data-license><option>MIT</option><option>Apache-2.0</option><option>CC0-1.0</option><option>CC-BY-4.0</option></select></label></div>
-        <label><input data-sheet type="checkbox"> Also list as a public memory sheet</label><p class="workshop-muted">A sheet lets others reuse your addresses and discovery notes.</p>
-        <p data-account></p><button type="button" data-publish>Publish release</button><p data-share></p>
-      </section>
       <p data-finish-message role="status" aria-live="polite"></p>
     </dialog>
 `;
   const $ = name => root.querySelector(`[data-${name}]`);
-  const observations = mountObservations({ root: $('observation-workspace'), getEmulator, getUser });
+  const observations = mountObservations({ root: $('observation-workspace'), getEmulator });
   $('use-observation').addEventListener('click', () => act(() => {
     requireGame();
     const kind = $('field-type').value;
@@ -115,9 +108,9 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
     observations.useAddress(numberValue($('address').value, 'u32'), width);
   }));
   const node = (tag, text) => { const el = document.createElement(tag); el.textContent = text; return el; };
-  let owner, draft = null, previous = null, candidates = null, scanKey = '', gameKey = '', lastFrame = 0, currentEmulator;
+  let draft = null, previous = null, candidates = null, scanKey = '', gameKey = '', lastFrame = 0, currentEmulator;
   let jsonDirty = false, previewKey = '', lastStored = null;
-  let editing = null, dragging = null, categoryEditing = null, categoryCardChanged = false, formBaseline = '', publishing = false;
+  let editing = null, dragging = null, categoryEditing = null, categoryCardChanged = false, formBaseline = '';
   let addressTarget = 'address';
   const searches = new Map();
   const finder = $('finder');
@@ -126,7 +119,7 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
   const formChanged = () => !$('field-editor').hidden && JSON.stringify(rawForm()) !== formBaseline;
   const tell = text => { ($('finish-dialog').open ? $('finish-message') : $('message')).textContent = text; };
   function previewMessage(text) { $('preview').textContent = text; onPreview({ status: 'idle', sections: [], error: text }); previewKey = ''; }
-  const draftKey = () => `${localKey(getUser())}:draft`;
+  const draftKey = () => `${localKey()}:draft`;
   const requireGame = () => { const emu = getEmulator(); if (!emu?.hasRom) throw new Error('Load a game in the test player first.'); return emu; };
   function clearSearch() {
     previous = candidates = null; scanKey = '';
@@ -137,21 +130,20 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
   }
   function persist() {
     try {
-      const serialized = JSON.stringify({ text: $('json').value, description: $('description').value, license: $('license').value,
+      const serialized = JSON.stringify({ text: $('json').value,
         editor: $('field-editor').hidden ? null : { values: rawForm(), editing, baseline: formBaseline }, name: $('name').value });
       localStorage.setItem(draftKey(), serialized); lastStored = serialized;
       $('storage').textContent = formChanged() ? 'Unfinished field saved in draft' : 'Draft saved in this browser';
     } catch { $('storage').textContent = 'Draft could not be saved'; tell('Browser storage is full. Download your reader to keep a copy.'); }
   }
   function listSaved() {
-    $('saved').replaceChildren(...localAddons(getUser()).map(item => { const option = node('option', item.manifest.display_name); option.value = item.manifest.addon_id; return option; }));
+    $('saved').replaceChildren(...localAddons().map(item => { const option = node('option', item.manifest.display_name); option.value = item.manifest.addon_id; return option; }));
     $('load').disabled = !$('saved').options.length;
   }
   function setDraft(manifest) {
     draft = manifest; jsonDirty = false; previewKey = '';
     $('json').value = manifest ? JSON.stringify(manifest, null, 2) : '';
     $('name').value = manifest?.display_name ?? '';
-    $('sheet').checked = manifest?.$comment?.kind === 'memory_sheet';
     const sections = Array.isArray(manifest?.sections) ? manifest.sections : [];
     $('field-count').textContent = String(sections.reduce((count, section) =>
       count + sectionFields(section).length + (section.card?.lead ? 1 : 0), 0));
@@ -263,7 +255,6 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
   });
   function replaceDraft(manifest) {
     stopEditing(); searches.clear(); clearSearch(); setDraft(manifest);
-    $('description').value = ''; $('license').value = 'MIT'; $('share').replaceChildren();
     $('category-editor').hidden = true; $('reader-menu').open = false; persist(); tick();
   }
   const canReplace = () => !($('json').value || formChanged()) || confirm('Replace this draft? Download it from Finish & share first if you want to keep a copy.');
@@ -283,7 +274,7 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
     let status;
     try {
       const result = validate();
-      status = result.status === 'active' ? 'Reader is running in the test game.' : result.status === 'incompatible' ? 'Load a compatible game to test this reader before publishing.' : 'Waiting for the game to reach the reader’s readiness condition.';
+      status = result.status === 'active' ? 'Reader is running in the test game.' : result.status === 'incompatible' ? 'Load a compatible game to test this reader.' : 'Waiting for the game to reach the reader’s readiness condition.';
     } catch (error) { status = error.message; }
     $('finish-status').textContent = status; $('finish-message').textContent = '';
     $('finish-dialog').showModal();
@@ -557,17 +548,13 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
     const result = preview(draft); if (result.error) throw new Error(result.error); return result;
   }
   async function act(action) { try { synchronize(); await action(); } catch (error) { tell(error.message); } }
-  function accountChanged() {
-    if (owner === (getUser()?.id ?? null)) return;
-    owner = getUser()?.id ?? null;
-    $('finish-dialog').close(); stopEditing(); setDraft(null); previewMessage('Load a game and add a field to begin.'); $('share').replaceChildren();
+  function restoreDraft() {
+    $('finish-dialog').close(); stopEditing(); setDraft(null); previewMessage('Load a game and add a field to begin.');
     $('message').textContent = ''; $('storage').textContent = 'Draft saved in this browser';
-    $('description').value = ''; $('license').value = 'MIT';
     try {
       lastStored = localStorage.getItem(draftKey());
       const saved = JSON.parse(lastStored ?? 'null');
       if (saved) {
-        $('description').value = saved.description ?? ''; $('license').value = saved.license ?? 'MIT';
         if (saved.text) {
           try { setDraft(parseManifest(saved.text)); } catch { $('json').value = saved.text; jsonDirty = true; $('advanced').open = true; }
         }
@@ -583,12 +570,10 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
         }
       }
     } catch {}
-    listSaved(); $('publish').disabled = !getUser() || publishing;
+    listSaved();
     updateWorkspace();
-    $('account').textContent = getUser() ? 'Publish a public release under your account. Publishing again updates this reader with a new release.' : 'Sign in using the account menu to publish. You can build and save locally as a guest.';
   }
   function synchronize() {
-    if (owner !== (getUser()?.id ?? null)) accountChanged();
     const emu = getEmulator();
     const header = emu?.hasRom ? Array.from(emu.readMemory(0x080000a0, 32)).join(',') : '';
     if (emu !== currentEmulator || header !== gameKey || (emu && emu.frameCount < lastFrame)) {
@@ -853,7 +838,7 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
     const manifest = starterManifest(identity()); if (canReplace()) replaceDraft(manifest);
   }));
   $('load').addEventListener('click', () => act(() => {
-    const item = localAddons(getUser()).find(item => item.manifest.addon_id === $('saved').value);
+    const item = localAddons().find(item => item.manifest.addon_id === $('saved').value);
     if (item && canReplace()) replaceDraft(structuredClone(item.manifest));
   }));
 
@@ -867,20 +852,13 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
     const file = $('import').files[0]; if (!file) return;
     if (file.size > 65536) throw new Error('Readers must be at most 64 KiB.');
     if (!canReplace()) return;
-    const capturedOwner = owner; const text = await file.text(); if (capturedOwner !== (getUser()?.id ?? null)) return;
+    const text = await file.text();
     const manifest = parseManifest(text); const result = preview(manifest); if (result.error) throw new Error(result.error);
     replaceDraft(manifest);
   }));
-  for (const key of ['description', 'license']) $(key).addEventListener('input', persist);
-  $('sheet').addEventListener('change', () => act(() => {
-    checkJson(); if (!draft) throw new Error('Build a reader first.');
-    if ($('sheet').checked) draft = memorySheet(draft);
-    else if (draft.$comment?.kind === 'memory_sheet') { delete draft.$comment.kind; }
-    setDraft(draft); persist();
-  }));
   $('save').addEventListener('click', () => act(async () => {
-    validate(); const items = localAddons(getUser()), old = items.find(item => item.manifest.addon_id === draft.addon_id);
-    saveLocalAddons(getUser(), [...items.filter(item => item !== old), { id: old?.id ?? crypto.randomUUID(), enabled: true, manifest: structuredClone(draft) }]);
+    validate(); const items = localAddons(), old = items.find(item => item.manifest.addon_id === draft.addon_id);
+    saveLocalAddons([...items.filter(item => item !== old), { id: old?.id ?? crypto.randomUUID(), enabled: true, manifest: structuredClone(draft) }]);
     persist(); listSaved(); await installed(); tell('Saved and enabled. Your reader is now in the game companion.');
   }));
   $('export').addEventListener('click', () => act(() => {
@@ -889,21 +867,9 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
     const a = node('a', ''); a.href = url; a.download = `${draft.addon_id}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
     tell('Reader downloaded. Your browser draft is still available.');
   }));
-  $('publish').addEventListener('click', () => act(async () => {
-    synchronize(); if (!getUser()) throw new Error('Sign in to publish.');
-    const result = validate(); if (result.status === 'incompatible') throw new Error('Load a compatible game and test this reader before publishing.');
-    if (!$('description').value.trim()) throw new Error('Describe what your reader does and where you tested it.');
-    const capturedOwner = owner; publishing = true; $('publish').disabled = true;
-    try {
-      const release = await api('', 'POST', { manifest: structuredClone(draft), description: $('description').value, license: $('license').value });
-      if (capturedOwner !== (getUser()?.id ?? null)) return;
-      const a = node('a', `Release ${release.release} is live — open its community page to share`); a.href = `/addons?id=${encodeURIComponent(release.id)}&release=${release.release}`; a.target = '_blank'; a.rel = 'noopener'; $('share').replaceChildren(a); tell('Published to the community library.');
-    } finally { publishing = false; $('publish').disabled = !getUser(); }
-  }));
   function tick() {
     try {
       observations.update();
-      if (owner !== (getUser()?.id ?? null)) accountChanged();
       if (!root.open || document.hidden || root.closest('[data-addon-view]')?.hidden) return;
       synchronize();
       const emu = getEmulator(); const rom = emu?.hasRom ? identity() : null;
@@ -929,9 +895,9 @@ export function mountWorkshop({ root, getEmulator, getUser, preview, installed, 
   }
   root.addEventListener('toggle', tick);
   if (location.hash === '#workshop') root.open = true;
-  accountChanged(); setInterval(tick, 500);
-  return { accountChanged, reloadDraft() {
-    try { if (owner === (getUser()?.id ?? null) && localStorage.getItem(draftKey()) === lastStored) return; } catch {}
-    owner = undefined; accountChanged();
+  restoreDraft(); setInterval(tick, 500);
+  return { reloadDraft() {
+    try { if (localStorage.getItem(draftKey()) === lastStored) return; } catch {}
+    restoreDraft();
   } };
 }

@@ -15,7 +15,7 @@ including restoring the observation configuration associated with a checkpoint.
 4. Add more values, or edit/remove existing ones, under **Automation observations**.
 5. Click **Export observations** to download `CODE-rN.observations.json`.
 
-Observations are saved locally per account, game code, and revision. They are
+Observations are saved in this browser per game code and revision. They are
 independent of the reader manifest and can be exported without publishing a reader.
 Importing an observation configuration replaces the current observation list;
 an invalid or incompatible import leaves the list intact. The panel also supports
@@ -170,9 +170,8 @@ completion rules; see the local training guide.
 
 ## Feedback implementation status
 
-The Workshop already supports memory discovery, narrowing searches, reader
-authoring/testing, and community publishing. The browser already has lobbies
-and link-cable multiplayer. This change adds the missing reusable runtime and
+The Workshop already supports memory discovery, narrowing searches, and reader
+authoring and testing. This change adds the missing reusable runtime and
 local automation interface, with pixels and named memory observations. The
 Workshop can now author, preview, import, and export the versioned observation
 configuration consumed directly by the runtime and Python client.

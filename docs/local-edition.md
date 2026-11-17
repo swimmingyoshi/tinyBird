@@ -20,10 +20,8 @@ separate, in this browser. Use the same hostname and port to access that browser
 storage on your next launch. Clearing browser data removes recovery, local
 readers, observations, and your browser-stored BIOS.
 
-Cloud Vault, accounts, publishing/moderation, contact/support, and network lobbies
-are disabled in this edition. Local addon JSON import/export still works. The
-same executable contains shared site code; these are enforced runtime boundaries,
-not a claim that hosted code has been removed from the executable.
+The server listens on this machine only and refuses to start on any other
+address. Local addon JSON import/export works without any service.
 
 The emulator and local tools work without hosted services. Optional web fonts
 and uncached species artwork may be unavailable offline; system fonts and text

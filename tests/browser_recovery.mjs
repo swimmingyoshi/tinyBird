@@ -11,7 +11,6 @@ await mkdir('target/browser-recovery', { recursive: true });
 try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   const errors = []; page.on('pageerror', error => errors.push(error.message));
-  let user = null;
   await page.addInitScript(() => {
     // Accelerate the real periodic trigger, leaving emulation clocks intact.
     const interval = window.setInterval;
@@ -21,8 +20,7 @@ try {
     const path = new URL(route.request().url()).pathname;
     if (path === '/tinybird.wasm') return route.fulfill({ contentType: 'application/wasm', body: await readFile('target/wasm32-unknown-unknown/release/tinybird_wasm.wasm') });
     if (path === '/bios') return route.fulfill({ status: 404 });
-    if (path === '/api/auth/me') return route.fulfill({ json: { configured: true, user } });
-    if (path.startsWith('/api/')) return route.fulfill({ json: { configured: false, assets: [], roms: [], installed: [], saves: [], shots: [] } });
+    if (path.startsWith('/api/')) return route.fulfill({ json: { assets: [] } });
     if (path === '/console.css') return route.fulfill({ contentType: 'text/css', body: (await Promise.all(['console.css', 'site.css', 'playroom.css'].map(name => readFile(assets + name, 'utf8')))).join('\n') });
     if (path === '/play' || /^\/[\w.-]+\.(js|css)$/.test(path)) return route.fulfill({ contentType: path === '/play' ? 'text/html' : path.endsWith('.js') ? 'text/javascript' : 'text/css', body: await readFile(assets + (path === '/play' ? 'play.html' : path.slice(1))) });
     return route.abort();
@@ -75,11 +73,6 @@ try {
   assert.equal((await record()).savedAt, savedAt);
   await page.evaluate(() => { IDBObjectStore.prototype.put = window.originalPut; });
   await boot();
-  user = { id: 'other-account', email: 'test@example.invalid' };
-  await page.evaluate(() => tinybird.refreshAccount());
-  await page.waitForTimeout(200);
-  assert.equal(await page.locator('#recovery-card').isVisible(), false);
-  user = null; await page.evaluate(() => tinybird.refreshAccount());
   await page.waitForFunction(() => !document.querySelector('#recovery-card').hidden);
   assert.deepEqual(await page.evaluate(async () => {
     const { readRecovery, validateRecovery } = await import('/recovery.js');
@@ -99,5 +92,5 @@ try {
   await page.waitForFunction(() => document.querySelector('#recovery-status').textContent.includes('damaged'));
   assert.equal(await page.evaluate(() => tinybird.emu.hasRom), false);
   assert.deepEqual(errors, []);
-  console.log('PASS: periodic/pause recovery, real WASM resume, layout and observation restore, account isolation, failed-write preservation, compatibility/corruption rejection and mobile fit.');
+  console.log('PASS: periodic/pause recovery, real WASM resume, layout and observation restore, failed-write preservation, compatibility/corruption rejection and mobile fit.');
 } finally { await browser.close(); }

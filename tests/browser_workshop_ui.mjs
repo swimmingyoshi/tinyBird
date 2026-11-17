@@ -17,15 +17,13 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  let publications = 0;
   await page.route('**/*', async route => {
     const url = new URL(route.request().url());
     if (url.pathname === '/workshop-ui-test') return route.fulfill({ contentType: 'text/html', body: `<!doctype html><html><head><link rel="stylesheet" href="/console.css"><link rel="stylesheet" href="/addons.css"><link rel="stylesheet" href="/workshop.css"></head><body>
       <div class="addons-page"><div class="workshop-layout"><div class="workshop-output">Live reader<div id="test-preview"></div></div><div class="workshop-game">Test game</div><details class="workshop" id="addon-workshop" open></details></div></div>
       <script type="module">
       import { mountWorkshop } from '/workshop.js';
-      import { setAddonAccount } from '/addon-client.js';
-      window.testUser = null; window.installedCount = 0;
+      window.installedCount = 0;
       const ram = new Uint8Array(0x40000), view = new DataView(ram.buffer);
       window.setValue = (offset, value) => view.setUint16(offset, value, true);
       setValue(0, 100); setValue(2, 200); setValue(4, 100);
@@ -36,16 +34,9 @@ try {
       const preview = manifest => ({ status: 'active', sections: manifest.sections.map(section => ({ ...section,
         payload: (section.fields ?? section.card?.fields ?? []).map(field => ({ label: field.label, value: String(read(field.read)) + (field.max ? '/' + read(field.max) : '') })) })) });
       window.testWorkshop = mountWorkshop({ root: document.getElementById('addon-workshop'), getEmulator: () => emu,
-        getUser: () => testUser, preview, installed: () => installedCount++, focusGame: () => {},
+        preview, installed: () => installedCount++, focusGame: () => {},
         onPreview: result => { document.getElementById('test-preview').textContent = JSON.stringify(result); } });
-      window.changeUser = user => { window.testUser = user; setAddonAccount(user); testWorkshop.accountChanged(); };
       </script></body></html>` });
-    if (url.pathname === '/api/community-addons' && route.request().method() === 'POST') {
-      publications++;
-      const release = route.request().postDataJSON();
-      assert.equal(release.description, 'Tested with controlled game values.');
-      return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ id: 'test-reader', release: 1 }) });
-    }
     const asset = ({ '/addons': 'addons.html', '/play': 'play.html' })[url.pathname] ?? url.pathname.slice(1);
     if (/^[\w.-]+\.(js|css|html)$/.test(asset)) {
       try {
@@ -99,7 +90,6 @@ try {
   await $('finish').click(); // Includes the finished in-flight field.
   assert.equal(await $('finish-dialog').isVisible(), true);
   assert.match(await $('share-summary').innerText(), /2 fields/);
-  assert.equal(await $('publish').isDisabled(), true);
   const downloadPromise = page.waitForEvent('download'); await $('export').click();
   const exported = JSON.parse(await readFile(await (await downloadPromise).path(), 'utf8'));
   assert.equal(exported.sections[0].fields.length, 2);
@@ -133,9 +123,7 @@ try {
   assert.equal(sections[1].repeat.count, 6);
   assert.equal(sections[1].repeat.stride, 100);
   await $('new-field').click(); await $('label').fill('Unfinished');
-  await page.evaluate(() => changeUser({ id: 'another-user' }));
-  assert.equal(await $('field-editor').isVisible(), false);
-  await page.evaluate(() => changeUser(null));
+  await page.reload(); await page.waitForFunction(() => window.testWorkshop);
   assert.equal(await $('label').inputValue(), 'Unfinished');
   page.once('dialog', dialog => dialog.accept()); await $('cancel-edit').click();
   await $('finish').click();
@@ -146,14 +134,6 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, `no page overflow at ${width}px`);
     await page.screenshot({ path: resolve(OUTPUT, `workspace-${width}.png`), fullPage: true });
   }
-  // Publish only against the intercepted endpoint, never the community service.
-  await page.evaluate(() => {
-    localStorage.setItem('tinybird:local-addons:publisher:draft', localStorage.getItem('tinybird:local-addons:guest:draft'));
-    changeUser({ id: 'publisher' });
-  });
-  await $('finish').click(); await $('description').fill('Tested with controlled game values.');
-  await $('publish').click();
-  await $('share').locator('a').waitFor(); assert.equal(publications, 1);
   assert.deepEqual(errors, []);
-  console.log('Workshop browser checks passed: search/narrow, independent maxima, live field, add-next, finish/download/install, edit guards, reload/account recovery, categories, responsive layout, mocked publishing.');
+  console.log('Workshop browser checks passed: search/narrow, independent maxima, live field, add-next, finish/download/install, edit guards, reload recovery, categories, responsive layout.');
 } finally { await browser.close(); }

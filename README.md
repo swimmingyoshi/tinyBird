@@ -1,11 +1,6 @@
 # tinyBird
 
-For local downloads, contributor setup, public hosting and release checkpoints,
-see [Deployment modes](docs/deployment-modes.md). The web server now defaults to
-local mode; cloud-enabled development explicitly uses `--mode development` and
-`.env.development`. Production uses injected environment variables.
-
-A programmable Game Boy Advance runtime written in Rust, with browser and desktop play, a plugin workshop, memory research tools, multiplayer, and headless automation.
+A programmable Game Boy Advance runtime written in Rust, with desktop and browser play, a plugin workshop, memory research tools, link-cable emulation, and headless automation.
 
 For Python control, repeatable frame actions, and named memory observations, see
 [Headless automation](docs/automation.md). The runtime is a separate layer above
@@ -28,7 +23,7 @@ experiments with a hybrid visual/RAM network, see [Local AI training](docs/local
 - Pluggable game addons: Pokemon FireRed/LeafGreen, Final Fantasy Tactics Advance, and a cartridge fallback that works for any ROM
 - `tinybird-probe`, a memory research CLI for writing addons for new games
 - Runs in a browser via WebAssembly, with no `wasm-bindgen` and no npm
-- Optional asset vault for ROMs and save states, backed by a public CDN
+- A local browser player with automatic recovery, and an add-on Workshop for building readers beside a running game
 - Desktop frontend with home screen, pause menu, speed controls, color-correction toggle, and game-specific addon exports
 
 ## Requirements
@@ -56,11 +51,7 @@ addon without replaying to the same screen:
 cargo run --release -- roms/game.gba --state roms/game.state
 ```
 
-The local web overlay server runs separately:
-
-```bash
-cargo run -p tinybird-web
-```
+The browser player and add-on tools run from a local server; see [Web](#web).
 
 Startup behavior:
 
@@ -101,80 +92,39 @@ Theme, dashboard layout, panel sizes, window scale, volume, mute, color
 correction, fullscreen, wallpaper, and the recent-ROM list all persist. A
 missing or damaged file falls back to defaults rather than failing to launch.
 
-## Two-player link cable in the web UI
+## Link cable
 
-1. Open `/play` on each device and load each player's game and save.
-2. Open **Lobby**, choose **Start a room**, and share the room code.
-3. The other player enters the code and chooses **Join**.
-4. Enable **Link cable** on both screens. Wait for **Connected**, then enter
-   the multiplayer area in each game to trade or battle.
+The core emulates the GBA link cable, and two consoles can be cabled together in
+one process. The trade regression tests do exactly that with FireRed: they
+select and exchange the first Pokemon, check both parties and their checksums,
+and reboot from the resulting battery saves. They fail if no exchange completes.
 
-For different cartridges, both browsers need access to both ROMs through the
-library. Keep both game tabs open and running during multiplayer. If the cable
-stops, the lobby explains why and offers **Reconnect cable**. Leaving the room
-also disconnects the cable.
+They use `roms/pokemon_fire_red.gba`, `TradeTest1.state` and `TradeTest2.state`,
+which are only read; outputs go under `target/`.
 
-The default link mode runs both consoles in each browser and exchanges inputs.
-This requires more CPU than solo play. Compatibility and performance still
-need checking with the particular games and devices you use.
-
-### Trade regression tests
-
-The full-trade tests use `roms/pokemon_fire_red.gba`, `TradeTest1.state`, and
-`TradeTest2.state`. They select and exchange the first Pokemon, check both
-parties and their checksums, and reboot from the resulting battery saves.
-They fail if no exchange completes; a connected lobby alone is not a pass.
-The original fixtures are only read. Outputs go under `target/`.
+```sh
+cargo test --release -p tinybird-core --test link_trade -- --ignored --nocapture
+cargo build -p tinybird-wasm --target wasm32-unknown-unknown --release
+node tests/wasm_link_trade.mjs
+```
 
 Set `TINYBIRD_TEST_SCENARIO=summary` for the regression that opens Summary on
 both consoles, browses pages, returns, and selects Trade with Player 2 acting
-137 frames later. Both the WASM test and the live browser test support it.
-This catches a core bug where a bulk BIOS graphics operation advanced roughly
-60,000 cycles in one step, dropping a serial interrupt on the child console.
-Bulk BIOS copies and decompression now yield between small pieces of work.
-Save-state version 5 preserves unfinished BIOS work; versions 2?4 remain readable.
+137 frames later. This catches a core bug where a bulk BIOS graphics operation
+advanced roughly 60,000 cycles in one step, dropping a serial interrupt on the
+child console. Bulk BIOS copies and decompression now yield between small pieces
+of work. Save-state version 5 preserves unfinished BIOS work; versions 2-4 remain
+readable.
 
-```sh
-cargo build -p tinybird-wasm --target wasm32-unknown-unknown --release
-cargo build -p tinybird-web
-node --test crates/tinybird-web/src/assets/*.test.mjs
-node tests/wasm_link_trade.mjs
-```
-
-In PowerShell, run the Summary regression with:
-
-```powershell
-$env:TINYBIRD_TEST_SCENARIO = "summary"
-node tests/wasm_link_trade.mjs
-```
-
-For the full web UI test, run the web server on port 8878 and two isolated
-Chromium browser profiles with remote debugging on ports 9223 and 9224:
-
-```sh
-node tests/browser_link_live.mjs
-```
-
-`TINYBIRD_TEST_BASE` and `TINYBIRD_TEST_DEVTOOLS` override those addresses.
-The browser profiles must be able to create a room (sign in if accounts are
-required). Set `TINYBIRD_TEST_INPUT_DELAY_MS=40` to add input latency plus
-periodic 60 ms jitter. The browser test also delays Player 2's emulator setup,
-enables the cable at different times, checks matching state hashes after the
-trade, disconnects/reconnects, and verifies battery-save recovery.
-`TINYBIRD_TEST_ROM`, `TINYBIRD_TEST_STATE_1`, `TINYBIRD_TEST_STATE_2`, and
-`TINYBIRD_TEST_OUTPUT` can override fixture and artifact paths.
-
-After rebuilding the web server, restart it and refresh both browser pages
-before retesting. If a game already shows a link error, reload the original
-trade-counter state before starting a new session.
+The browser player has no two-player mode. The lockstep engine for one,
+`assets/link.js`, is tested against two real wasm instances (`node --test
+crates/tinybird-web/src/assets/link.test.mjs`).
 
 ## Browser play views
 
 Browser fast-forward retains audio and plays it at the accelerated rate, including
 the corresponding pitch increase. Unlimited mode estimates its audio rate from
-achieved emulation speed. Fast-forward and its speed selector are disabled while
-the lobby link cable is enabled; an active speed-up is cancelled immediately.
-Joining a lobby with the cable off still allows solo fast-forward.
+achieved emulation speed.
 
 Under Sound and picture, Fast forward priority selects Smooth display (shorter
 work slices, no frame batching) or Faster (frame batching). Smooth display may
@@ -188,8 +138,8 @@ compare individual frames with audio-preserving batches. It also verifies that
 batching produces identical audio samples, framebuffer, and save state using the
 local FireRed trade-counter fixture.
 
-The `/play` Playroom puts playback and multiplayer controls under the game,
-with live details and saved items in balanced side rails on desktop. Save & load,
+The `/play` Playroom puts playback controls under the game, with live add-on
+details in balanced side rails on desktop. Save & load,
 Audio & video, and Cartridge tools expand on demand. The view picker offers
 Desk (the complete workspace), Focus (game and live details), and Cinema
 (game screens and essential controls). With the game focused, `Tab`
@@ -200,21 +150,21 @@ and a custom game binding for Tab takes priority.
 With a local web server on port 8878 and Chromium remote debugging on 9223,
 run `node tests/browser_play_ui.mjs` to check file loading and save downloads,
 keyboard playback, tool panels, dialogs, view persistence, and responsive
-layouts. This uses the same local ROM/state fixtures as the trade tests;
+layouts. This uses the same local ROM/state fixtures as the link-cable tests;
 screenshots and downloaded files go to `target/browser-play-ui/`.
 
 ### Website styling
 
 The `/console.css` response bundles three source files in order: `console.css`
 holds the existing console component primitives, `site.css` owns shared design
-tokens, navigation, forms and public page layouts, and `playroom.css` owns the
+tokens, navigation, forms and page layouts, and `playroom.css` owns the
 emulator workspace. Scope public content layouts to `.site-page` and play
 overrides to `[data-play-view]` so one route cannot change another's navigation.
 The OBS overlay keeps its independent `styles.css` for its transparent stream
 surface. CSS is embedded in the server binary; rebuild after editing it.
 
-The browser check above also visits Home, Info, Contact and Tickets at widths
-from 320 to 1440 pixels, checking navigation visibility and horizontal overflow.
+The browser check above also visits the start and add-on pages at widths from
+320 to 1440 pixels, checking navigation visibility and horizontal overflow.
 
 ## Controls
 
@@ -271,9 +221,9 @@ Both examples now auto-use `./gba_bios.bin` when present and the only ROM in `./
 
 ## Game Addons
 
-The browser community manager at `/addons` supports local creation and preview,
-JSON import/export, public releases, per-account installation, and moderation.
-See [Web add-ons](docs/WEB_ADDONS.md) for setup, limits, and the API.
+The browser add-on manager at `/addons` supports creating and previewing
+readers beside a test game, JSON import/export, and enabling or disabling the
+built-in ones. See [Web add-ons](docs/WEB_ADDONS.md) for limits and the format.
 
 Addons read live state out of the running game and publish it through one shared
 schema, so the dashboard, the web overlay, and any external tool all see the same
@@ -332,61 +282,29 @@ The desktop frontend writes a structured snapshot to `stream-data/current-game.j
 
 ## Web
 
-The same core runs in a browser tab. See [`docs/WEB.md`](docs/WEB.md).
-For the single-container VPS deployment behind Cloudflare Tunnel, see
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+The same core runs in a browser tab, served by a local server that listens on
+this machine only. It is for building and testing from a checkout. See
+[`docs/WEB.md`](docs/WEB.md).
 
 ```bash
 # Build the emulator module (one-time target install)
 rustup target add wasm32-unknown-unknown
 cargo build -p tinybird-wasm --target wasm32-unknown-unknown --release
 
-# Serve the site
+# Serve the player
 cargo run -p tinybird-web
 ```
 
 | URL | What |
 |---|---|
-| `http://127.0.0.1:8877/` | Home |
+| `http://127.0.0.1:8877/` | Start: whether this checkout is ready to play |
 | `http://127.0.0.1:8877/play` | Play a ROM in the browser |
-| `http://127.0.0.1:8877/overlay/full` | OBS overlay |
+| `http://127.0.0.1:8877/addons` | Add-ons and the Workshop |
+| `http://127.0.0.1:8877/overlay/full` | OBS overlay (with `TINYBIRD_WEB_OVERLAY=1`) |
 
-`/play` reads ROMs from your local `roms/` folder and, when configured, from
-your asset vault. `/play?rom=<url>&name=<label>` boots straight into one.
-
-### Asset storage
-
-Optional. Backed by the [0xstash media API](https://media.0xstash.dev/docs).
-
-```bash
-cp .env.example .env.development    # set a test TINYBIRD_MEDIA_KEY; run with --mode development
-```
-
-Reads are public and go straight from the browser to the CDN; the API key stays
-on the server and is only used to list the vault and store save states. Without
-a key everything still works from local files.
-
-**Vault reads are public to anyone with the URL.** That is the right trade for
-save states and artwork; the local `roms/` folder exists for anything you would
-rather not publish.
-
-### Contact form
-
-Optional. Backed by the [0xstash contact API](https://contact.0xstash.dev/api/help).
-
-```bash
-cp .env.example .env.development    # set a test TINYBIRD_CONTACT_KEY; run with --mode development
-```
-
-Adds a "get in touch" panel to the home page. Without a key the panel stays
-hidden, because a form that cannot send is worse than no form. The key stays on
-the server: the page posts to `/api/contact` and the server talks to the
-service, the same arrangement as the vault key above.
-
-With accounts configured, sending requires signing in — the account menu is in
-the bar on every page — and the reply address comes from the session rather than
-the form. The name is still asked for, prefilled with the account's username.
-Each account gets three messages an hour with a minute between them.
+`/play` lists ROMs from your local `roms/` folder, or opens one from disk.
+`/play?rom=<url>&name=<label>` boots straight into one. Save states download as
+files; an automatic checkpoint is kept in the browser.
 
 ## Web Overlay
 
@@ -398,7 +316,6 @@ cargo run -p tinybird-web
 
 Useful URLs:
 
-- Preview page: `http://127.0.0.1:8877/`
 - Overlay page: `http://127.0.0.1:8877/overlay`
 - OBS browser source: `http://127.0.0.1:8877/overlay?transparent=1&layout=column`
 
@@ -412,12 +329,12 @@ Overlay query params:
 
 ## Validation
 
-As of August 23, 2026:
-
-- `cargo check --workspace` passes
-- `cargo test --workspace` passes with `440` tests
-- Verified running: Pokemon FireRed and Final Fantasy Tactics Advance, on the
-  desktop and in a browser at 60 fps
+CI runs on every pull request: the Rust test suite, the GBA accuracy ROMs, the
+browser-module tests against a real wasm build, a smoke test of the local
+server, `cargo fmt` and `cargo clippy -D warnings`, and `cargo audit`. Tests that
+need commercial ROMs are `#[ignore]`d there and run locally. Verified running:
+Pokemon FireRed, Emerald, Final Fantasy Tactics Advance, The Minish Cap and
+Super Mario Advance 4, on the desktop and in a browser at 60 fps.
 
 ## Project Structure
 
@@ -432,7 +349,8 @@ crates/
     src/settings.rs  # Persisted settings
   tinybird-wasm/     # The core as a WebAssembly module with a plain C ABI
   tinybird-probe/    # Memory research CLI for writing addons
-  tinybird-web/      # Web frontend: home, browser emulator, OBS overlays
+  tinybird-runtime/  # Headless JSON-lines runtime for scripts and Python
+  tinybird-web/      # Local server: browser player, add-on tools, OBS overlays
 ```
 
 `tinybird-games` sits below both frontends, which is why the browser reports the
@@ -443,7 +361,7 @@ same live game data as the desktop app.
 - `docs/ARCHITECTURE.md` — current state, target module shape, and phase status
 - `docs/UI_UX_PLAN.md` — the classic-shell design spec and progress log
 - `docs/ADDON_DEVELOPMENT.md` — how to find game addresses and write an addon
-- `docs/WEB.md` — the WebAssembly build, the site, and asset storage
+- `docs/WEB.md` — the WebAssembly build, the browser player and the local server
 - `ADDONS.md` — the addon contract and shipped addons
 
 ## License

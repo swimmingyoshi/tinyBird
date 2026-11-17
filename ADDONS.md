@@ -212,7 +212,7 @@ Loading the files is the host's job, and both hosts do it:
 | Host | How |
 |---|---|
 | Desktop | `addon_manifests::install()` at startup reads `addons/*.json`. `TINYBIRD_ADDONS` moves the directory. |
-| Browser | `/addons` manages local readers and account installations. `tb_install_manifests` atomically replaces the session-owned set; readers append sections alongside built-ins. See `docs/WEB_ADDONS.md`. |
+| Browser | `/addons` manages built-in and local readers. `tb_install_manifests` atomically replaces the session-owned set; readers append sections alongside built-ins. See `docs/WEB_ADDONS.md`. |
 
 Desktop installation happens once before its first snapshot. Browser installation
 can happen between frames, including replacement and removal. Its validation

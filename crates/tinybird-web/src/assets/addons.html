@@ -11,20 +11,16 @@
   <header class="bar">
     <a class="bar__mark" href="/">tinyBird</a>
     <nav class="bar__nav" aria-label="Main navigation">
-      <a href="/">Home</a>
+      <a href="/">Start</a>
       <a href="/play">Play</a>
       <a class="is-current" aria-current="page" href="/addons">Add-ons</a>
-      <a href="/info">Info</a>
-      <a href="/contact">Contact</a>
     </nav>
-    <p class="bar__state" id="link-state"><span class="dot" aria-hidden="true"></span><span id="link-label">checking</span></p>
-    <div class="account" id="account" hidden></div>
   </header>
   <main>
     <h1 class="addons-title">Add-ons</h1>
     <p id="addon-message" role="status" aria-live="polite"></p>
-    <nav class="addon-view-nav" aria-label="Add-on workspace"><a href="#manage" data-addon-tab="manage">Manage add-ons</a><a href="#workshop" data-addon-tab="workshop">Workshop</a><a href="#community" data-addon-tab="community">Community</a><a href="#advanced" data-addon-tab="advanced">JSON editor</a></nav>
-    <p class="addons-lede">Create live readers, share them with the community, and add new details beside your game. Your ROM and saves stay on your device. <span id="account-note">Sign in to publish and sync installations. Local add-ons work without an account.</span></p>
+    <nav class="addon-view-nav" aria-label="Add-on workspace"><a href="#manage" data-addon-tab="manage">Manage add-ons</a><a href="#workshop" data-addon-tab="workshop">Workshop</a><a href="#advanced" data-addon-tab="advanced">JSON editor</a></nav>
+    <p class="addons-lede">Create, import and test live readers in this browser. Export your work as JSON to keep or share it.</p>
     <section id="workshop-view" data-addon-view="workshop" hidden aria-label="Add-on workshop">
       <div class="workshop-intro"><h2>Build your game reader</h2><p>Find a value, add a field, and watch it update as you play.</p></div>
       <div class="workshop-layout">
@@ -34,20 +30,10 @@
       </div>
     </section>
     <section class="panel addon-panel" data-addon-view="manage" aria-labelledby="installed-title">
-      <h2 id="installed-title">Your add-ons</h2><p>Enable or remove readers here. Installed releases stay pinned until you choose another version. <a href="/play">Open Play</a> to see live panels.</p>
-      <h3>Preinstalled readers</h3><p>Included with tinyBird. Turn off readers you do not want. These choices are saved for this account in this browser and apply to open games.</p><div id="builtin-list" class="addon-grid"></div>
-      <h3>Community and local readers</h3>
-      <div id="installed-list" class="addon-grid"></div>
+      <h2 id="installed-title">Your add-ons</h2><p>Enable or remove readers here. <a href="/play">Open Play</a> to see live panels.</p>
+      <h3>Preinstalled readers</h3><p>Included with tinyBird. Turn off readers you do not want. These choices are saved in this browser and apply to open games.</p><div id="builtin-list" class="addon-grid"></div>
+      <h3>Local readers</h3>
       <div id="local-list" class="addon-grid"></div>
-      <details><summary>Your published add-ons</summary><div id="published-list" class="addon-grid"></div></details>
-    </section>
-    <section class="panel addon-panel" data-addon-view="community" hidden aria-labelledby="browse-title">
-      <h2 id="browse-title">Community library</h2>
-      <p>Browse runnable readers and shared memory sheets. Search by game code, field name, or memory address.</p>
-      <label>Show<select id="catalog-kind"><option value="">All readers and sheets</option><option value="memory_sheet">Public memory sheets</option></select></label>
-      <form id="addon-search" class="addon-actions"><label>Find an add-on <input id="search-query" maxlength="120" type="search" /></label><button class="key" type="submit">Search</button></form>
-      <div id="catalog" class="addon-grid"></div><button class="key" id="load-more" type="button" hidden>Load more</button>
-      <div id="release-detail" class="addon-detail" hidden></div>
     </section>
     <section class="panel addon-panel" data-addon-view="advanced" hidden aria-labelledby="create-title">
       <h2 id="create-title">Create an add-on</h2>
@@ -72,14 +58,7 @@
         <label class="addon-import">Import JSON<input id="import-addon" type="file" accept=".json,application/json" /></label>
       </div>
       <div id="preview-result" class="addon-detail" hidden></div>
-      <form id="publish-form" class="addon-publish">
-        <label>Description<textarea id="publish-description" maxlength="2000" rows="3" required placeholder="What this reads, tested game versions, and any limitations"></textarea></label>
-        <label>Sharing license<select id="publish-license"><option>MIT</option><option>Apache-2.0</option><option>CC0-1.0</option><option>CC-BY-4.0</option></select></label>
-        <p>Publishing makes this manifest public. Publishing the same add-on ID from your account creates a new immutable release. Include only content you can share.</p>
-        <button class="key" id="publish-addon" type="submit">Publish release</button>
-      </form>
     </section>
-    <section class="panel addon-panel" id="moderation" hidden><h2>Community reports</h2><div id="report-list"></div></section>
   </main>
 </div>
 <script type="module" src="/addons.js"></script>

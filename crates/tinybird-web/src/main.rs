@@ -1,29 +1,16 @@
-use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use std::collections::HashMap;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
-use std::sync::Arc;
 use tinybird_addons::SNAPSHOT_SCHEMA_VERSION;
 use tokio::net::TcpListener;
 
-mod auth;
-mod community_addons;
-mod contact;
-mod deployment;
-mod dotenv;
-mod lobby;
-mod media;
+mod guard;
 mod sprites;
-
-use auth::{AuthConfig, AuthError, Sessions};
-use contact::ContactConfig;
-use lobby::Lobby;
-use media::MediaConfig;
 
 const DEFAULT_HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const DEFAULT_PORT: u16 = 8877;
@@ -31,8 +18,7 @@ const DEFAULT_SNAPSHOT_PATH: &str = "stream-data/current-game.json";
 const DEFAULT_SPRITE_DIR: &str = "stream-data/pokemon-sprites";
 /// Addon manifests, served to the page because the browser has no disk.
 const DEFAULT_ADDON_DIR: &str = "addons";
-/// Local ROM folder offered alongside the vault, so the page is usable before
-/// any storage key exists.
+/// The ROM folder the page lists and loads from.
 const DEFAULT_ROM_DIR: &str = "roms";
 /// BIOS image served to the browser.
 ///
@@ -43,10 +29,7 @@ const DEFAULT_ROM_DIR: &str = "roms";
 const DEFAULT_BIOS_PATH: &str = "gba_bios.bin";
 /// Where `cargo build --target wasm32-unknown-unknown --release` leaves the module.
 const DEFAULT_WASM_PATH: &str = "target/wasm32-unknown-unknown/release/tinybird_wasm.wasm";
-/// Largest save state the browser may push to the vault.
-const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 
-const INDEX_HTML: &str = include_str!("assets/index.html");
 const OVERLAY_HTML: &str = include_str!("assets/overlay.html");
 /// Shown in place of the overlay while it is switched off.
 const OVERLAY_OFF_HTML: &str = concat!(
@@ -59,34 +42,77 @@ const OVERLAY_OFF_HTML: &str = concat!(
     "and has had far less use than the rest of this. It is being reworked.</p>",
     "<p>To switch it on anyway, start the server with <code>TINYBIRD_WEB_OVERLAY=1</code>.</p></div>",
 );
-const PLAY_HTML: &str = include_str!("assets/play.html");
-const CONTACT_HTML: &str = include_str!("assets/contact.html");
-const TICKETS_HTML: &str = include_str!("assets/tickets.html");
-const INFO_HTML: &str = include_str!("assets/info.html");
-const APP_JS: &str = include_str!("assets/app.js");
-const PLAY_JS: &str = include_str!("assets/play.js");
-const HOME_JS: &str = include_str!("assets/home.js");
-const CONTACT_PAGE_JS: &str = include_str!("assets/contact.js");
-const TICKETS_JS: &str = include_str!("assets/tickets.js");
-const TICKET_STATUS_JS: &str = include_str!("assets/ticketstatus.js");
-/// The account menu, imported by every page's own module.
-const ACCOUNT_JS: &str = include_str!("assets/account.js");
-/// The shared header wiring: the account menu and the server-up dot.
-const CHROME_JS: &str = include_str!("assets/chrome.js");
-const INFO_JS: &str = include_str!("assets/info.js");
-const TINYBIRD_JS: &str = include_str!("assets/tinybird.js");
-const SAVEFORMAT_JS: &str = include_str!("assets/saveformat.js");
-const PACING_JS: &str = include_str!("assets/pacing.js");
-const LOBBY_JS: &str = include_str!("assets/lobby.js");
-const LINK_JS: &str = include_str!("assets/link.js");
-const CONTROLS_JS: &str = include_str!("assets/controls.js");
-const THEME_JS: &str = include_str!("assets/theme.js");
-const STYLES_CSS: &str = include_str!("assets/styles.css");
-const CONSOLE_CSS: &str = concat!(
-    include_str!("assets/console.css"),
-    include_str!("assets/site.css"),
-    include_str!("assets/playroom.css"),
-);
+
+const HTML: &str = "text/html; charset=utf-8";
+const JS: &str = "text/javascript; charset=utf-8";
+const CSS: &str = "text/css; charset=utf-8";
+
+/// Every page, script and stylesheet the server hands out unchanged.
+///
+/// One row each, rather than a route and a handler apiece: a new file is a
+/// new line here and nothing else. All of them are compiled into the binary
+/// and served with a content tag, so the browser revalidates instead of
+/// downloading again.
+const ASSETS: &[(&str, &str, &str)] = &[
+    ("/", include_str!("assets/index.html"), HTML),
+    ("/start.js", include_str!("assets/start.js"), JS),
+    ("/play", include_str!("assets/play.html"), HTML),
+    ("/play.js", include_str!("assets/play.js"), JS),
+    ("/tinybird.js", include_str!("assets/tinybird.js"), JS),
+    ("/saveformat.js", include_str!("assets/saveformat.js"), JS),
+    ("/pacing.js", include_str!("assets/pacing.js"), JS),
+    ("/controls.js", include_str!("assets/controls.js"), JS),
+    ("/theme.js", include_str!("assets/theme.js"), JS),
+    ("/recovery.js", include_str!("assets/recovery.js"), JS),
+    (
+        "/memory-sheets.js",
+        include_str!("assets/memory-sheets.js"),
+        JS,
+    ),
+    ("/addons", include_str!("assets/addons.html"), HTML),
+    ("/addon", include_str!("assets/addons.html"), HTML),
+    ("/addons.js", include_str!("assets/addons.js"), JS),
+    (
+        "/addon-client.js",
+        include_str!("assets/addon-client.js"),
+        JS,
+    ),
+    (
+        "/reader-guide",
+        include_str!("assets/reader-guide.html"),
+        HTML,
+    ),
+    ("/workshop.js", include_str!("assets/workshop.js"), JS),
+    (
+        "/workshop-model.js",
+        include_str!("assets/workshop-model.js"),
+        JS,
+    ),
+    (
+        "/workshop-observations.js",
+        include_str!("assets/workshop-observations.js"),
+        JS,
+    ),
+    ("/app.js", include_str!("assets/app.js"), JS),
+    ("/styles.css", include_str!("assets/styles.css"), CSS),
+    (
+        "/console.css",
+        concat!(
+            include_str!("assets/console.css"),
+            include_str!("assets/site.css"),
+            include_str!("assets/playroom.css")
+        ),
+        CSS,
+    ),
+    ("/addons.css", include_str!("assets/addons.css"), CSS),
+    ("/workshop.css", include_str!("assets/workshop.css"), CSS),
+    (
+        "/workshop-player.css",
+        include_str!("assets/workshop-player.css"),
+        CSS,
+    ),
+];
+
 const FFTA_HUMAN_PNG: &[u8] = include_bytes!("assets/ffta-races/human.png");
 const FFTA_BANGAA_PNG: &[u8] = include_bytes!("assets/ffta-races/bangaa.png");
 const FFTA_NU_MOU_PNG: &[u8] = include_bytes!("assets/ffta-races/nu-mou.png");
@@ -140,7 +166,6 @@ const FFTA_JOB_PNGS: [&[u8]; 42] = [
 
 #[derive(Clone, Debug)]
 struct AppState {
-    community_addons: community_addons::Store,
     snapshot_path: PathBuf,
     sprite_dir: PathBuf,
     wasm_path: PathBuf,
@@ -150,308 +175,53 @@ struct AppState {
     overlay_enabled: bool,
     /// Directory of addon manifests served to the page.
     addon_dir: PathBuf,
-    media: MediaConfig,
-    auth: AuthConfig,
-    contact: ContactConfig,
-    /// How much of the contact form's budget this process has spent. Shared,
-    /// or every request would get a fresh allowance.
-    contact_throttle: Arc<contact::Throttle>,
-    /// Signed-in browsers. Shared, because the state is cloned per request.
-    sessions: Arc<Sessions>,
-    /// Open rooms. Shared for the same reason.
-    lobby: Arc<Lobby>,
-    /// Whether to serve ROMs off this machine's disk.
-    ///
-    /// On by default, because running the server for yourself is the ordinary
-    /// case and reading your own ROM folder is the point of it. Off for
-    /// anything reachable from the internet: that folder holds copyrighted
-    /// cartridge dumps, and `/local/{path}` would hand them to whoever found
-    /// the URL.
+    /// Whether to serve ROMs off this machine's disk. On unless
+    /// `TINYBIRD_LOCAL_ROMS=off`.
     serve_local_roms: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
-    let mode = deployment::Mode::from_args(&args)?;
-    if mode == deployment::Mode::Development {
-        dotenv::load(".env.development");
-    }
     let config = Config::from_env_and_args(args);
-    let deployment =
-        deployment::Deployment::new(mode, config.host, env::var("TINYBIRD_PUBLIC_ORIGIN").ok())?;
-    let mut media = MediaConfig::from_env();
-    let mut contact = ContactConfig::from_env();
-    let mut auth = AuthConfig::from_env();
-    if mode == deployment::Mode::Local {
-        media = media.without_credentials();
-        contact = contact.without_credentials();
-        auth = auth.without_credentials();
-    }
-    if mode == deployment::Mode::Production
-        && (media.is_configured() || contact.is_configured())
-        && !auth.is_configured()
-    {
-        return Err("Production media/contact services require configured accounts; shared-owner fallback is local development only.".into());
-    }
-    let contact_configured = contact.is_configured();
-    let contact_label = contact.base_url.clone();
-    let storage_configured = media.is_configured();
-    let storage_label = format!("{} vault \"{}\"", media.base_url, media.vault);
-    let save_project = media.project.clone();
+    guard::check_bind(config.host)?;
     let wasm_ready = config.wasm_path.is_file();
     let wasm_display = config.wasm_path.display().to_string();
     let bios_ready = config.bios_path.is_file();
     let bios_display = config.bios_path.display().to_string();
 
     let state = AppState {
-        community_addons: community_addons::Store::open(&PathBuf::from(
-            if mode == deployment::Mode::Local {
-                ":memory:".into()
-            } else {
-                env::var("TINYBIRD_ADDON_DB")
-                    .unwrap_or_else(|_| "stream-data/community-addons.sqlite3".into())
-            },
-        ))?,
         snapshot_path: config.snapshot_path,
         sprite_dir: config.sprite_dir,
-        overlay_enabled: mode != deployment::Mode::Production && config.overlay_enabled,
+        overlay_enabled: config.overlay_enabled,
         addon_dir: config.addon_dir,
         wasm_path: config.wasm_path.clone(),
         rom_dir: config.rom_dir,
         bios_path: config.bios_path,
-        media,
-        auth,
-        contact,
-        contact_throttle: Arc::new(contact::Throttle::new()),
-        sessions: Arc::new(Sessions::new()),
-        lobby: Arc::new(Lobby::new()),
-        serve_local_roms: mode != deployment::Mode::Production && local_roms_enabled(),
+        serve_local_roms: local_roms_enabled(),
     };
-    let app = Router::new()
-        .route(
-            "/memory-sheets.js",
-            get(|| async {
-                static_text(
-                    include_str!("assets/memory-sheets.js"),
-                    "text/javascript; charset=utf-8",
-                )
-            }),
-        )
-        .route(
-            "/reader-guide",
-            get(|| async { Html(include_str!("assets/reader-guide.html")) }),
-        )
-        .route(
-            "/addon",
-            get(|| async { Html(include_str!("assets/addons.html")) }),
-        )
-        .route(
-            "/workshop-player.css",
-            get(|| async {
-                static_text(
-                    include_str!("assets/workshop-player.css"),
-                    "text/css; charset=utf-8",
-                )
-            }),
-        )
-        .route(
-            "/addons",
-            get(|| async { Html(include_str!("assets/addons.html")) }),
-        )
-        .route(
-            "/addons.js",
-            get(|| async {
-                static_text(
-                    include_str!("assets/addons.js"),
-                    "text/javascript; charset=utf-8",
-                )
-            }),
-        )
-        .route(
-            "/workshop.js",
-            get(|| async {
-                static_text(
-                    include_str!("assets/workshop.js"),
-                    "text/javascript; charset=utf-8",
-                )
-            }),
-        )
-        .route(
-            "/workshop-model.js",
-            get(|| async {
-                static_text(
-                    include_str!("assets/workshop-model.js"),
-                    "text/javascript; charset=utf-8",
-                )
-            }),
-        )
-        .route(
-            "/workshop-observations.js",
-            get(|| async {
-                static_text(
-                    include_str!("assets/workshop-observations.js"),
-                    "text/javascript; charset=utf-8",
-                )
-            }),
-        )
-        .route(
-            "/recovery.js",
-            get(|| async {
-                static_text(
-                    include_str!("assets/recovery.js"),
-                    "text/javascript; charset=utf-8",
-                )
-            }),
-        )
-        .route(
-            "/deployment.js",
-            get(|| async {
-                static_text(
-                    include_str!("assets/deployment.js"),
-                    "text/javascript; charset=utf-8",
-                )
-            }),
-        )
-        .route(
-            "/workshop.css",
-            get(|| async {
-                static_text(
-                    include_str!("assets/workshop.css"),
-                    "text/css; charset=utf-8",
-                )
-            }),
-        )
-        .route(
-            "/addon-client.js",
-            get(|| async {
-                static_text(
-                    include_str!("assets/addon-client.js"),
-                    "text/javascript; charset=utf-8",
-                )
-            }),
-        )
-        .route(
-            "/addons.css",
-            get(|| async {
-                static_text(include_str!("assets/addons.css"), "text/css; charset=utf-8")
-            }),
-        )
-        .route(
-            "/api/community-addons",
-            get(community_addons::catalog)
-                .post(community_addons::publish)
-                .layer(DefaultBodyLimit::max(80 * 1024)),
-        )
-        .route(
-            "/api/community-addons/installed",
-            get(community_addons::installed),
-        )
-        .route(
-            "/api/community-addons/reports",
-            get(community_addons::reports),
-        )
-        .route(
-            "/api/community-addons/{id}",
-            get(community_addons::detail).delete(community_addons::withdraw),
-        )
-        .route(
-            "/api/community-addons/{id}/installation",
-            axum::routing::put(community_addons::install)
-                .delete(community_addons::uninstall)
-                .layer(DefaultBodyLimit::max(4096)),
-        )
-        .route(
-            "/api/community-addons/{id}/reports",
-            axum::routing::post(community_addons::report).layer(DefaultBodyLimit::max(4096)),
-        )
-        .route("/", get(index))
+    let mut app = Router::new();
+    for &(path, body, content_type) in ASSETS {
+        app = app.route(
+            path,
+            get(move || async move { static_text(body, content_type) }),
+        );
+    }
+    let app = app
         .route("/overlay", get(overlay))
         .route("/overlay/{section}", get(overlay))
-        .route("/app.js", get(app_js))
-        .route("/styles.css", get(styles_css))
-        .route("/play", get(play))
-        .route("/play.js", get(play_js))
-        .route("/home.js", get(home_js))
-        .route("/account.js", get(account_js))
-        .route("/chrome.js", get(chrome_js))
-        .route("/contact", get(contact_page))
-        .route("/contact.js", get(contact_page_js))
-        // Both the list and one conversation, because both are the same
-        // document; the path is what it draws from. The ticket URL is the
-        // one the contact service is told about when its portal moves off
-        // hosted mode, so its shape is not ours to vary.
-        .route("/support/tickets", get(tickets_page))
-        .route("/support/tickets/{ticket_id}", get(tickets_page))
-        .route("/tickets.js", get(tickets_js))
-        .route("/ticketstatus.js", get(ticket_status_js))
-        .route("/info", get(info_page))
-        .route("/info.js", get(info_js))
-        .route("/tinybird.js", get(tinybird_js))
-        .route("/saveformat.js", get(saveformat_js))
-        .route("/pacing.js", get(pacing_js))
-        .route("/lobby.js", get(lobby_js))
-        .route("/link.js", get(link_js))
-        .route("/controls.js", get(controls_js))
-        .route("/theme.js", get(theme_js))
-        .route("/console.css", get(console_css))
         .route("/tinybird.wasm", get(wasm_module))
         .route("/bios", get(bios_image))
-        .route("/api/library", get(library))
         .route("/api/local", get(local_roms))
         .route("/local/{*path}", get(local_rom_file))
-        .route(
-            "/api/library/upload",
-            axum::routing::post(library_upload).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        )
-        .route(
-            "/api/saves",
-            get(list_saves)
-                .post(upload_save)
-                .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        )
-        .route("/api/saves/claim", axum::routing::post(claim_saves))
-        .route(
-            "/api/saves/{filename}",
-            axum::routing::delete(delete_save).patch(rename_save),
-        )
-        .route("/api/auth/register", axum::routing::post(auth_register))
-        .route("/api/auth/login", axum::routing::post(auth_login))
-        .route("/api/auth/logout", axum::routing::post(auth_logout))
-        .route("/api/auth/me", get(auth_me))
-        .route(
-            "/api/contact",
-            get(contact_state).post(contact_submit).layer(
-                // A form is text, and the longest field in it is four thousand
-                // characters. Anything past this is not a message.
-                DefaultBodyLimit::max(64 * 1024),
-            ),
-        )
-        .route("/api/tickets", get(ticket_list))
-        .route("/api/tickets/{ticket_id}", get(ticket_detail))
-        .route(
-            "/api/tickets/{ticket_id}/messages",
-            get(ticket_history).post(ticket_send).layer(
-                // A reply is ten thousand characters at the outside, which
-                // is well under this even spelled in four-byte runes.
-                DefaultBodyLimit::max(64 * 1024),
-            ),
-        )
-        .route("/api/lobby", axum::routing::post(create_room))
-        .route("/api/lobby/ws", get(lobby_socket))
-        .route("/api/proxy", get(storage_proxy))
         .route("/api/health", get(health))
         .route("/api/snapshot", get(snapshot))
         .route("/api/addons", get(addon_manifests))
-        .route("/api/shots", get(list_shots).post(upload_shot))
         .route("/sprites/{species_id}", get(sprite_png))
         .route("/ffta/races/{race}", get(ffta_race_png))
         .route("/ffta/jobs/{job}", get(ffta_job_png))
         .with_state(state)
-        .layer(axum::middleware::from_fn_with_state(
-            deployment,
-            deployment::guard,
-        ));
+        .layer(axum::middleware::from_fn(guard::guard));
 
     let addr = SocketAddr::new(config.host, config.port);
     // A port clash is the single most common way this fails to start, usually
@@ -477,27 +247,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("tinyBird web listening on http://{addr}");
-    println!("  mode:       {}", mode.name());
-    println!("  home:       http://{addr}/");
+    println!("  start:      http://{addr}/");
     println!("  play:       http://{addr}/play");
-    println!("  full:       http://{addr}/overlay/full");
-    println!("  party:      http://{addr}/overlay/party");
-    println!("  area:       http://{addr}/overlay/area");
-    println!("  battle:     http://{addr}/overlay/battle");
-    if storage_configured {
-        println!("  storage:    {storage_label}");
-        println!(
-            "  saves:      project \"{save_project}\", {} per game",
-            media::MAX_SAVES_PER_GAME
-        );
-    } else {
-        println!("  storage:    off (set TINYBIRD_MEDIA_KEY in .env to enable the vault)");
-    }
-    if contact_configured {
-        println!("  contact:    {contact_label}");
-    } else {
-        println!("  contact:    off (set TINYBIRD_CONTACT_KEY in .env to show the form)");
-    }
+    println!("  add-ons:    http://{addr}/addons");
     if let Some(age) = wasm_is_behind(&config.wasm_path) {
         println!();
         println!("  The emulator module is {age} older than this server.");
@@ -623,10 +375,6 @@ impl Config {
     }
 }
 
-async fn index() -> Html<&'static str> {
-    Html(INDEX_HTML)
-}
-
 /// The stream overlay, when it is switched on.
 ///
 /// Off by default. The overlay pages still read the desktop app's JSON export
@@ -640,100 +388,6 @@ async fn overlay(State(state): State<AppState>) -> Response {
         return Html(OVERLAY_OFF_HTML).into_response();
     }
     Html(OVERLAY_HTML).into_response()
-}
-
-async fn play() -> Html<&'static str> {
-    Html(PLAY_HTML)
-}
-
-async fn play_js() -> Response {
-    static_text(PLAY_JS, "application/javascript; charset=utf-8")
-}
-
-async fn home_js() -> Response {
-    static_text(HOME_JS, "application/javascript; charset=utf-8")
-}
-
-/// The contact form, on a page of its own.
-///
-/// It used to be a panel at the bottom of the home page, which put a form
-/// nobody had come for under everything they had. Its own page also gives the
-/// sign-in room to be a sign-in rather than a gate.
-async fn contact_page() -> Html<&'static str> {
-    Html(CONTACT_HTML)
-}
-
-async fn contact_page_js() -> Response {
-    static_text(CONTACT_PAGE_JS, "application/javascript; charset=utf-8")
-}
-
-/// The ticket pages: a list, and one conversation.
-///
-/// One document for both. Which it draws it reads off the path, so a link
-/// to a ticket survives being mailed, pasted, and reloaded — see
-/// `tickets.js`.
-async fn tickets_page() -> Html<&'static str> {
-    Html(TICKETS_HTML)
-}
-
-async fn tickets_js() -> Response {
-    static_text(TICKETS_JS, "application/javascript; charset=utf-8")
-}
-
-async fn ticket_status_js() -> Response {
-    static_text(TICKET_STATUS_JS, "application/javascript; charset=utf-8")
-}
-
-async fn account_js() -> Response {
-    static_text(ACCOUNT_JS, "application/javascript; charset=utf-8")
-}
-
-async fn chrome_js() -> Response {
-    static_text(CHROME_JS, "application/javascript; charset=utf-8")
-}
-
-/// What works, what is being worked on, and what is knowingly missing.
-///
-/// Static prose, kept in step with `PROGRESS.md` by hand. It is the honest
-/// answer to "is this thing finished", which an emulator is never quite.
-async fn info_page() -> Html<&'static str> {
-    Html(INFO_HTML)
-}
-
-async fn info_js() -> Response {
-    static_text(INFO_JS, "application/javascript; charset=utf-8")
-}
-
-async fn tinybird_js() -> Response {
-    static_text(TINYBIRD_JS, "application/javascript; charset=utf-8")
-}
-
-async fn saveformat_js() -> Response {
-    static_text(SAVEFORMAT_JS, "application/javascript; charset=utf-8")
-}
-
-async fn pacing_js() -> Response {
-    static_text(PACING_JS, "application/javascript; charset=utf-8")
-}
-
-async fn controls_js() -> Response {
-    static_text(CONTROLS_JS, "application/javascript; charset=utf-8")
-}
-
-async fn theme_js() -> Response {
-    static_text(THEME_JS, "application/javascript; charset=utf-8")
-}
-
-async fn lobby_js() -> Response {
-    static_text(LOBBY_JS, "application/javascript; charset=utf-8")
-}
-
-async fn link_js() -> Response {
-    static_text(LINK_JS, "application/javascript; charset=utf-8")
-}
-
-async fn console_css() -> Response {
-    static_text(CONSOLE_CSS, "text/css; charset=utf-8")
 }
 
 /// Crates compiled into the emulator module.
@@ -833,108 +487,6 @@ async fn wasm_module(State(state): State<AppState>) -> Response {
     }
 }
 
-/// List the vault. The API key stays on this side; the page only ever receives
-/// public asset URLs.
-/// The playable cartridges in the vault.
-///
-/// **Cartridges only.** This route is not scoped to an account — a shared ROM
-/// library is the point of it — so anything it returns is visible to anyone who
-/// can reach the server. Listing the whole vault therefore advertised every
-/// screenshot in it, with a working URL, to every visitor.
-///
-/// The page has always filtered to ROM extensions before drawing anything, so
-/// filtering here as well costs nothing and is the difference between a
-/// private file being unlisted and being one `curl` away.
-async fn library(State(state): State<AppState>) -> Response {
-    let mut response = media::list_assets(&state.media).await;
-    response
-        .assets
-        .retain(|asset| media::is_rom_name(&asset.name));
-
-    match serde_json::to_string(&response) {
-        Ok(json) => text(StatusCode::OK, json, "application/json; charset=utf-8"),
-        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
-}
-
-/// Push a file from the browser into the vault, such as a save state.
-async fn library_upload(State(state): State<AppState>, mut multipart: Multipart) -> Response {
-    if !state.media.is_configured() {
-        return json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Storage is off. Set TINYBIRD_MEDIA_KEY in .env and restart.",
-        );
-    }
-
-    let mut filename = String::new();
-    let mut content_type = String::new();
-    let mut bytes: Vec<u8> = Vec::new();
-    while let Ok(Some(field)) = multipart.next_field().await {
-        if field.name() != Some("file") {
-            continue;
-        }
-        filename = field
-            .file_name()
-            .map(|name| name.to_string())
-            .unwrap_or_else(|| "upload.bin".to_string());
-        // The storage API verifies that the bytes match the declared type, so
-        // the browser's own type has to reach it rather than being replaced.
-        content_type = field
-            .content_type()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        bytes = field.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
-        break;
-    }
-
-    if bytes.is_empty() {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "The request had no file to upload.",
-        );
-    }
-
-    let name = sanitize_filename(&filename);
-    let content_type = if content_type.is_empty() {
-        media::guess_content_type(&name).to_string()
-    } else {
-        content_type
-    };
-
-    match media::upload_asset(&state.media, &name, &content_type, bytes).await {
-        Ok(asset) => text(
-            StatusCode::CREATED,
-            serde_json::to_string(&asset).unwrap_or_else(|_| "{}".to_string()),
-            "application/json; charset=utf-8",
-        ),
-        Err(err) => json_error(StatusCode::BAD_GATEWAY, &err),
-    }
-}
-
-/// Reduce an uploaded name to something safe to put in a URL path.
-///
-/// The browser controls this string, so directory separators and traversal have
-/// to go before it reaches the storage API.
-fn sanitize_filename(name: &str) -> String {
-    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
-    let cleaned: String = base
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let cleaned = cleaned.trim_matches('.').to_string();
-    if cleaned.is_empty() {
-        "upload.bin".to_string()
-    } else {
-        cleaned
-    }
-}
-
 fn json_error(status: StatusCode, message: &str) -> Response {
     text(
         status,
@@ -958,1109 +510,7 @@ async fn bios_image(State(state): State<AppState>) -> Response {
     }
 }
 
-/// Fetch storage bytes for the browser.
-///
-/// The storage CDN sends no `Access-Control-Allow-Origin`, so a page cannot
-/// fetch a ROM or a save directly. This relays the bytes; `media::proxy_fetch`
-/// restricts it to the configured host so it cannot be used to reach anything
-/// else on the network.
-async fn storage_proxy(
-    State(state): State<AppState>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    let Some(url) = params.get("url") else {
-        return json_error(StatusCode::BAD_REQUEST, "No url parameter.");
-    };
-
-    match media::proxy_fetch(&state.media, url).await {
-        Ok((bytes, content_type)) => {
-            let mut response = (StatusCode::OK, bytes).into_response();
-            if let Ok(value) = HeaderValue::from_str(&content_type) {
-                response.headers_mut().insert(header::CONTENT_TYPE, value);
-            }
-            response
-        }
-        Err(err) => json_error(StatusCode::BAD_GATEWAY, &err),
-    }
-}
-
-/// Who this request's saves belong to.
-///
-/// The signed-in user's `sub` when accounts are configured, and the fallback
-/// owner otherwise so a server run by one person with no auth service keeps
-/// working. Never anything the browser sent: a caller who could name the owner
-/// could read and delete anyone's saves.
-async fn save_owner(
-    state: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> Result<String, AuthError> {
-    if !state.auth.is_configured() {
-        return Ok(state.media.default_owner.clone());
-    }
-    auth::current_user(&state.auth, &state.sessions, session_id(headers).as_deref())
-        .await
-        .map(|user| user.id)
-}
-
-/// Saves for one game, newest first.
-///
-/// `?game=BPRE` narrows to a cartridge; without it every stored save is
-/// returned.
-async fn list_saves(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    let owner = match save_owner(&state, &headers).await {
-        Ok(owner) => owner,
-        Err(err) => return auth_error(&err),
-    };
-
-    // `?legacy=1` asks a different question: how many saves from before
-    // accounts are still unclaimed. The page uses it to decide whether
-    // offering to claim them is worth a button.
-    if params.contains_key("legacy") {
-        let legacy = media::list_saves(&state.media, media::LEGACY_OWNER, None).await;
-        return text(
-            StatusCode::OK,
-            serde_json::json!({ "legacy": legacy.saves.len() }).to_string(),
-            "application/json; charset=utf-8",
-        );
-    }
-
-    let game = params.get("game").map(|value| value.as_str());
-    let listing = media::list_saves(&state.media, &owner, game).await;
-    match serde_json::to_string(&listing) {
-        Ok(json) => text(StatusCode::OK, json, "application/json; charset=utf-8"),
-        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
-}
-
-/// Store a save state, then prune that game's oldest beyond the limit.
-async fn upload_save(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    mut multipart: Multipart,
-) -> Response {
-    if !state.media.is_configured() {
-        return json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Storage is off. Set TINYBIRD_MEDIA_KEY in .env and restart.",
-        );
-    }
-
-    let mut bytes: Vec<u8> = Vec::new();
-    let mut game = String::new();
-    let mut label = String::new();
-    // The id of a save to overwrite. Absent for an ordinary save.
-    let mut replace = String::new();
-
-    while let Ok(Some(field)) = multipart.next_field().await {
-        match field.name() {
-            Some("file") => bytes = field.bytes().await.map(|b| b.to_vec()).unwrap_or_default(),
-            Some("game") => game = field.text().await.unwrap_or_default(),
-            Some("label") => label = field.text().await.unwrap_or_default(),
-            Some("replace") => replace = field.text().await.unwrap_or_default(),
-            _ => {}
-        }
-    }
-
-    if bytes.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "The request had no save to store.");
-    }
-    if game.trim().is_empty() {
-        // Without a cartridge code the per-game limit cannot be applied, and
-        // the save could not be listed against the right game later.
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "A game code is required so the save can be filed against a cartridge.",
-        );
-    }
-
-    let saved_at_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
-        .unwrap_or(0);
-
-    let replace = Some(replace.trim()).filter(|id| !id.is_empty());
-    let owner = match save_owner(&state, &headers).await {
-        Ok(owner) => owner,
-        Err(err) => return auth_error(&err),
-    };
-
-    match media::upload_save(
-        &state.media,
-        &owner,
-        &game,
-        &label,
-        saved_at_ms,
-        bytes,
-        replace,
-    )
-    .await
-    {
-        Ok(entry) => text(
-            StatusCode::CREATED,
-            serde_json::to_string(&entry).unwrap_or_else(|_| "{}".to_string()),
-            "application/json; charset=utf-8",
-        ),
-        Err(err) => json_error(StatusCode::BAD_GATEWAY, &err),
-    }
-}
-
-/// Take ownership of the saves that were stored before accounts existed.
-///
-/// A one-time migration, and only for a signed-in caller: the saves have no
-/// owner to check against, so whoever claims them gets them. That is the right
-/// model for a server you run yourself and would not be for a public one.
-async fn claim_saves(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    if !state.media.is_configured() {
-        return json_error(StatusCode::SERVICE_UNAVAILABLE, "Storage is off.");
-    }
-    if !state.auth.is_configured() {
-        return json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Accounts are off, so there is nobody to claim these saves for.",
-        );
-    }
-
-    let owner = match auth::current_user(
-        &state.auth,
-        &state.sessions,
-        session_id(&headers).as_deref(),
-    )
-    .await
-    {
-        Ok(user) => user.id,
-        Err(err) => return auth_error(&err),
-    };
-
-    match media::claim_legacy_saves(&state.media, &owner).await {
-        Ok(result) => text(
-            StatusCode::OK,
-            serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string()),
-            "application/json; charset=utf-8",
-        ),
-        Err(err) => json_error(StatusCode::BAD_GATEWAY, &err),
-    }
-}
-
-/// Delete one stored save.
-/// Rename a stored save.
-///
-/// A PATCH on the save itself rather than a verb of its own: the save already
-/// has a URL, and this changes one field of it.
-async fn rename_save(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Path(filename): Path<String>,
-    body: String,
-) -> Response {
-    if !state.media.is_configured() {
-        return json_error(StatusCode::SERVICE_UNAVAILABLE, "Storage is off.");
-    }
-    let owner = match save_owner(&state, &headers).await {
-        Ok(owner) => owner,
-        Err(err) => return auth_error(&err),
-    };
-
-    let label = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("label")
-                .and_then(|l| l.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_default();
-
-    match media::rename_save(&state.media, &owner, &filename, &label).await {
-        Ok(entry) => text(
-            StatusCode::OK,
-            serde_json::to_string(&entry).unwrap_or_else(|_| "{}".to_string()),
-            "application/json; charset=utf-8",
-        ),
-        Err(err) => json_error(StatusCode::BAD_GATEWAY, &err),
-    }
-}
-
-async fn delete_save(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Path(filename): Path<String>,
-) -> Response {
-    if !state.media.is_configured() {
-        return json_error(StatusCode::SERVICE_UNAVAILABLE, "Storage is off.");
-    }
-    let owner = match save_owner(&state, &headers).await {
-        Ok(owner) => owner,
-        Err(err) => return auth_error(&err),
-    };
-    match media::delete_save(&state.media, &owner, &filename).await {
-        Ok(()) => text(
-            StatusCode::OK,
-            "{\"deleted\":true}".to_string(),
-            "application/json; charset=utf-8",
-        ),
-        // "Not yours" and "not there" answer the same way, so a caller cannot
-        // probe for other people's saves.
-        Err(err) if err.is_not_found() => json_error(StatusCode::NOT_FOUND, &err.message()),
-        Err(err) => json_error(StatusCode::BAD_GATEWAY, &err.message()),
-    }
-}
-
-// ------------------------------------------------------------------- accounts
-//
-// These four routes are the whole surface the browser sees of the auth service.
-// It never learns a token; it gets an opaque first-party session cookie and
-// this server does the rest. See `auth.rs` for why.
-
-/// The session id the caller presented, if any.
-fn session_id(headers: &axum::http::HeaderMap) -> Option<String> {
-    auth::session_from_cookies(headers.get(header::COOKIE).and_then(|v| v.to_str().ok()))
-}
-
-/// Whether this request arrived over a connection a `Secure` cookie may use.
-///
-/// Behind a TLS-terminating proxy the scheme only survives in a header, so both
-/// are consulted before deciding.
-fn is_secure(headers: &axum::http::HeaderMap) -> bool {
-    headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .map(|proto| proto.eq_ignore_ascii_case("https"))
-        .unwrap_or(false)
-}
-
-fn auth_error(err: &AuthError) -> Response {
-    json_error(
-        StatusCode::from_u16(err.status()).unwrap_or(StatusCode::BAD_GATEWAY),
-        &err.message(),
-    )
-}
-
-/// Answer with the signed-in user, optionally establishing the session cookie.
-fn user_response(user: &auth::User, cookie: Option<String>) -> Response {
-    let body = serde_json::json!({ "user": user }).to_string();
-    let mut response = text(StatusCode::OK, body, "application/json; charset=utf-8");
-    if let Some(cookie) = cookie {
-        if let Ok(value) = HeaderValue::from_str(&cookie) {
-            response.headers_mut().append(header::SET_COOKIE, value);
-        }
-    }
-    response
-}
-
-async fn auth_register(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    axum::Json(body): axum::Json<serde_json::Value>,
-) -> Response {
-    sign_in_route(state, headers, body, "/api/auth/register").await
-}
-
-async fn auth_login(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    axum::Json(body): axum::Json<serde_json::Value>,
-) -> Response {
-    sign_in_route(state, headers, body, "/api/auth/login").await
-}
-
-async fn sign_in_route(
-    state: AppState,
-    headers: axum::http::HeaderMap,
-    body: serde_json::Value,
-    path: &str,
-) -> Response {
-    // Check the length here as well as at the service: a local answer is
-    // instant and does not spend one of the caller's rate-limited attempts.
-    let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
-    if password.chars().count() < auth::MIN_PASSWORD_LEN {
-        return json_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            &format!(
-                "That password is too short. It needs at least {} characters.",
-                auth::MIN_PASSWORD_LEN
-            ),
-        );
-    }
-
-    match auth::sign_in(&state.auth, &state.sessions, path, body).await {
-        Ok(auth::SignInOutcome::Session { id, user }) => {
-            let cookie = auth::session_cookie(&id, is_secure(&headers));
-            user_response(&user, Some(cookie))
-        }
-        Ok(auth::SignInOutcome::VerificationRequired { delivery_status }) => text(
-            StatusCode::ACCEPTED,
-            serde_json::json!({
-                "verificationRequired": true,
-                "deliveryStatus": delivery_status,
-            })
-            .to_string(),
-            "application/json; charset=utf-8",
-        ),
-        Err(err) => auth_error(&err),
-    }
-}
-
-async fn auth_logout(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    auth::sign_out(
-        &state.auth,
-        &state.sessions,
-        session_id(&headers).as_deref(),
-    )
-    .await;
-
-    let mut response = text(
-        StatusCode::OK,
-        "{\"ok\":true}".to_string(),
-        "application/json; charset=utf-8",
-    );
-    if let Ok(value) = HeaderValue::from_str(&auth::clear_cookie()) {
-        response.headers_mut().append(header::SET_COOKIE, value);
-    }
-    response
-}
-
-/// Who the caller is, and whether accounts are available at all.
-///
-/// The page asks this on load: it is how a session survives a reload without
-/// the browser holding anything but an opaque cookie.
-async fn auth_me(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    if !state.auth.is_configured() {
-        return text(
-            StatusCode::OK,
-            serde_json::json!({ "configured": false }).to_string(),
-            "application/json; charset=utf-8",
-        );
-    }
-
-    match auth::current_user(
-        &state.auth,
-        &state.sessions,
-        session_id(&headers).as_deref(),
-    )
-    .await
-    {
-        Ok(user) => text(
-            StatusCode::OK,
-            // `tickets` says whether the support portal has anything behind
-            // it, so the account menu can offer the way to it rather than
-            // linking somewhere that would only apologise. It needs a contact
-            // key to name the project and accounts to have a sender at all;
-            // being signed in is implied by there being a user here.
-            serde_json::json!({
-                "configured": true,
-                "user": user,
-                "tickets": state.contact.is_configured(),
-            })
-            .to_string(),
-            "application/json; charset=utf-8",
-        ),
-        // Not being signed in is an ordinary answer here, not an error: the
-        // page needs to know so it can show the sign-in panel.
-        Err(AuthError::NoSession) => text(
-            StatusCode::OK,
-            // Reported signed out as well as signed in: it describes the
-            // server, not the person, and the menu reads it once on load
-            // rather than again on the way through the sign-in form.
-            serde_json::json!({
-                "configured": true,
-                "user": null,
-                "tickets": state.contact.is_configured(),
-            })
-            .to_string(),
-            "application/json; charset=utf-8",
-        ),
-        Err(err) => auth_error(&err),
-    }
-}
-
-// -------------------------------------------------------------------- contact
-//
-// The page never sees the form key. It posts here and this server posts to the
-// contact service. See `contact.rs` for why.
-
-/// Who is sending, when accounts are configured.
-///
-/// `Ok(None)` means accounts are switched off — the server is one person's own
-/// machine, there is nobody to sign in as, and the form takes a name and an
-/// address the way it did before. With accounts on, being signed in is the
-/// price of the form and the session is where the sender's details come from.
-async fn contact_sender(
-    state: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> Result<Option<(contact::Identity, String)>, AuthError> {
-    if !state.auth.is_configured() {
-        return Ok(None);
-    }
-
-    let (user, token) =
-        auth::current_session(&state.auth, &state.sessions, session_id(headers).as_deref()).await?;
-    // The same fallback the lobby uses, so one person is called one thing
-    // across the whole application.
-    let name = user
-        .display_name
-        .clone()
-        .unwrap_or_else(|| user.email.split('@').next().unwrap_or("player").to_string());
-    Ok(Some((
-        contact::Identity {
-            id: user.id,
-            name,
-            email: user.email,
-        },
-        token,
-    )))
-}
-
-async fn contact_state(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    let sender = contact_sender(&state, &headers).await;
-    let signed_in = matches!(sender, Ok(Some(_)));
-    let mut body = serde_json::json!({
-        "configured": state.contact.is_configured(),
-        "requiresAccount": state.auth.is_configured(),
-        "signedIn": signed_in,
-        "minMessage": contact::MIN_MESSAGE_LEN,
-        "maxMessage": contact::MAX_MESSAGE_LEN,
-        // Whether there is anything behind the ticket link. Tickets are read
-        // back as the sender, so they need all three: a key to name the
-        // project, accounts to have a sender at all, and somebody signed in.
-        "tickets": state.contact.is_configured() && state.auth.is_configured() && signed_in,
-        "maxReply": contact::MAX_REPLY_LEN,
-    });
-    // Shown back so the form can say who it is about to send as rather than
-    // offering fields whose contents it would ignore.
-    if let Ok(Some((who, _))) = sender {
-        body["name"] = serde_json::Value::String(who.name);
-        body["email"] = serde_json::Value::String(who.email);
-    }
-    no_store(text(
-        StatusCode::OK,
-        body.to_string(),
-        "application/json; charset=utf-8",
-    ))
-}
-
-/// 202, the same answer the contact service gives.
-///
-/// `ticket` is the id the message was filed under, when there is one to give.
-/// It is what turns "sent" into a way through to the thing that was sent,
-/// rather than a sentence about it existing somewhere.
-fn accepted(ticket: Option<&str>) -> Response {
-    let body = match ticket {
-        Some(id) => serde_json::json!({ "accepted": true, "ticket": id }),
-        None => serde_json::json!({ "accepted": true }),
-    };
-    text(
-        StatusCode::ACCEPTED,
-        body.to_string(),
-        "application/json; charset=utf-8",
-    )
-}
-
-async fn contact_submit(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    axum::Json(body): axum::Json<serde_json::Value>,
-) -> Response {
-    if !state.contact.is_configured() {
-        return contact_error(&contact::ContactError::NotConfigured);
-    }
-
-    let sender = match contact_sender(&state, &headers).await {
-        Ok(sender) => sender,
-        // Not signed in is the ordinary way to arrive here without an account,
-        // so it is answered in the form's words rather than the auth service's.
-        Err(AuthError::NoSession) => return contact_error(&contact::ContactError::NeedsAccount),
-        Err(err) => return auth_error(&err),
-    };
-
-    // Split apart because the two halves are wanted in different places:
-    // parsing takes the identity, and the call to the service takes the token
-    // that proves it.
-    let (who, token) = sender.unzip();
-
-    // Checked here as well as at the service: a local answer is instant, says
-    // which field is wrong in this page's own words, and costs nobody a
-    // rate-limited attempt.
-    let message = match contact::parse(&body, who.as_ref()) {
-        Ok(contact::Submission::Message(message)) => message,
-        // A bot gets the same 202 a person does, and nothing is sent.
-        //
-        // Not quite the same shape any more: a real message from a signed-in
-        // sender comes back with a ticket id and this does not. Telling them
-        // apart needs a bot that has registered, verified an address, signed in,
-        // and then filled in a field it cannot see — at which point it is
-        // already inside the per-account quota, which is the limit that
-        // actually holds. Worth the link.
-        Ok(contact::Submission::Spam) => return accepted(None),
-        Err(why) => return json_error(StatusCode::UNPROCESSABLE_ENTITY, &why),
-    };
-
-    // After validation, so a malformed request cannot burn an allowance, and
-    // before the network, which is the thing being rationed. Without accounts
-    // there is one sender, which is the truth on a machine somebody runs for
-    // themselves.
-    let sender_id = who.as_ref().map_or("anonymous", |who| who.id.as_str());
-    if let Err(err) = state.contact_throttle.check(sender_id) {
-        return contact_error(&err);
-    }
-
-    match contact::submit(&state.contact, &message, token.as_deref()).await {
-        // Only offered with a session behind it. Without one the message was
-        // never bound to an account, so the ticket is not this sender's to read
-        // and the link would lead to a panel saying so.
-        Ok(ticket) if token.is_some() => accepted(ticket.as_deref()),
-        Ok(_) => accepted(None),
-        Err(err) => contact_error(&err),
-    }
-}
-
-fn contact_error(err: &contact::ContactError) -> Response {
-    let mut response = json_error(
-        StatusCode::from_u16(err.status()).unwrap_or(StatusCode::BAD_GATEWAY),
-        &err.message(),
-    );
-    // A 429 that says when is worth more than one that says no, and anything
-    // in front of this server — a proxy, a script — reads the header rather
-    // than the sentence.
-    if let Some(seconds) = err.retry_after() {
-        if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
-            response.headers_mut().insert(header::RETRY_AFTER, value);
-        }
-    }
-    response
-}
-
-// -------------------------------------------------------------------- tickets
-//
-// A sent message becomes a ticket, and this is how it is read back. The service
-// holds the conversation; these four relay it, the same way `/api/contact`
-// relays a submission and for the same reason — the credentials belong to this
-// machine, not to the page.
-//
-// What travels differs, though. A submission goes out under this server's form
-// key; a ticket read goes out under the *sender's* access token, which lives in
-// their session here and is what the service introspects to decide whose
-// tickets these are. So the browser is never given either credential, and the
-// answer it gets is only ever its own account's.
-
-/// Answer with whatever the service said, unchanged.
-fn ticket_answer(value: &serde_json::Value) -> Response {
-    no_store(text(
-        StatusCode::OK,
-        value.to_string(),
-        "application/json; charset=utf-8",
-    ))
-}
-
-/// `limit` and `offset` out of a query string, if they are there and are numbers.
-fn page_bounds(query: &HashMap<String, String>) -> (Option<usize>, usize) {
-    let read = |key: &str| query.get(key).and_then(|value| value.parse::<usize>().ok());
-    (read("limit"), read("offset").unwrap_or(0))
-}
-
-/// Run one ticket-API call as the signed-in person, retrying once if their
-/// token turns out to be stale.
-///
-/// The retry is the contract's, and the "once" is the important half of it: the
-/// stored token looked current and the service disagreed, which a fresh one
-/// settles. A second refusal is an answer. Looping here would spend a refresh
-/// token per attempt and never stop.
-async fn ticket_call<F, Fut>(state: &AppState, headers: &axum::http::HeaderMap, call: F) -> Response
-where
-    F: Fn(String) -> Fut,
-    Fut: std::future::Future<Output = Result<serde_json::Value, contact::ContactError>>,
-{
-    if !state.contact.is_configured() {
-        return contact_error(&contact::ContactError::NotConfigured);
-    }
-    // With accounts off there is nobody for the service to have filed a ticket
-    // under, so there is nothing to show rather than nothing configured. Said
-    // here rather than borrowing the form's `NeedsAccount`: that one tells you
-    // to sign in, and on a server with accounts switched off there is nothing
-    // to sign in to.
-    if !state.auth.is_configured() {
-        return json_error(
-            StatusCode::UNAUTHORIZED,
-            "This server has accounts switched off, so nothing sent from it is filed under one.",
-        );
-    }
-
-    let session = session_id(headers);
-    let token = match auth::current_session(&state.auth, &state.sessions, session.as_deref()).await
-    {
-        Ok((_, token)) => token,
-        Err(AuthError::NoSession) => {
-            return json_error(StatusCode::UNAUTHORIZED, "Sign in to read your tickets.")
-        }
-        Err(err) => return auth_error(&err),
-    };
-
-    match call(token).await {
-        Ok(value) => ticket_answer(&value),
-        Err(contact::ContactError::TokenRejected) => {
-            match auth::renew_access_token(&state.auth, &state.sessions, session.as_deref()).await {
-                Ok(fresh) => match call(fresh).await {
-                    Ok(value) => ticket_answer(&value),
-                    Err(err) => contact_error(&err),
-                },
-                // The refresh failed, which means the session is over. Said in
-                // those terms rather than the auth service's, because from the
-                // page's side this is one thing: sign in again.
-                Err(_) => contact_error(&contact::ContactError::TokenRejected),
-            }
-        }
-        Err(err) => contact_error(&err),
-    }
-}
-
-async fn ticket_list(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Query(query): Query<HashMap<String, String>>,
-) -> Response {
-    let (limit, offset) = page_bounds(&query);
-    ticket_call(&state, &headers, |token| {
-        let state = state.clone();
-        async move { contact::tickets(&state.contact, &token, limit, offset).await }
-    })
-    .await
-}
-
-async fn ticket_detail(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Path(ticket_id): Path<String>,
-) -> Response {
-    ticket_call(&state, &headers, |token| {
-        let state = state.clone();
-        let id = ticket_id.clone();
-        async move { contact::ticket(&state.contact, &token, &id).await }
-    })
-    .await
-}
-
-async fn ticket_history(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Path(ticket_id): Path<String>,
-    Query(query): Query<HashMap<String, String>>,
-) -> Response {
-    let (limit, offset) = page_bounds(&query);
-    ticket_call(&state, &headers, |token| {
-        let state = state.clone();
-        let id = ticket_id.clone();
-        async move { contact::ticket_messages(&state.contact, &token, &id, limit, offset).await }
-    })
-    .await
-}
-
-async fn ticket_send(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Path(ticket_id): Path<String>,
-    axum::Json(body): axum::Json<serde_json::Value>,
-) -> Response {
-    // Read before anything is sent, so an empty box or a missing key costs
-    // nothing and says which it was.
-    let (message, key) = match contact::parse_reply(&body) {
-        Ok(reply) => reply,
-        Err(why) => return json_error(StatusCode::UNPROCESSABLE_ENTITY, &why),
-    };
-
-    ticket_call(&state, &headers, |token| {
-        let state = state.clone();
-        let id = ticket_id.clone();
-        let message = message.clone();
-        // Carried through the retry unchanged: that is what makes a second
-        // attempt land as the same message rather than a second one.
-        let key = key.clone();
-        async move { contact::ticket_reply(&state.contact, &token, &id, &message, &key).await }
-    })
-    .await
-}
-
-// ---------------------------------------------------------------------- lobby
-//
-// Everyone in a room runs their own emulator; this server only relays what they
-// publish. See `lobby.rs`.
-
-/// How often to ping an idle lobby socket, to stop a proxy closing it.
-const LOBBY_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Who is asking, for the lobby.
-///
-/// With accounts configured this is the signed-in user and nothing else will
-/// do: the name a member is shown under has to come from the session, not from
-/// the browser, or anyone can appear as anyone. Without accounts the server is
-/// yours alone, and a name the page supplies is fine.
-async fn lobby_identity(
-    state: &AppState,
-    headers: &axum::http::HeaderMap,
-    offered_name: &str,
-) -> Result<lobby::Identity, AuthError> {
-    if !state.auth.is_configured() {
-        return Ok(lobby::Identity::guest(offered_name));
-    }
-
-    let user =
-        auth::current_user(&state.auth, &state.sessions, session_id(headers).as_deref()).await?;
-    let name = user
-        .display_name
-        .clone()
-        .unwrap_or_else(|| user.email.split('@').next().unwrap_or("player").to_string());
-    Ok(lobby::Identity::account(&user.id, &name))
-}
-
-/// Open a room.
-///
-/// A room exists because somebody made one. Joining a code that was never
-/// created is an error rather than a new room, so a mistyped code says so.
-async fn create_room(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    let who = match lobby_identity(&state, &headers, "host").await {
-        Ok(who) => who,
-        Err(err) => return auth_error(&err),
-    };
-
-    match state.lobby.create(who.user.as_deref()) {
-        Ok(room) => text(
-            StatusCode::OK,
-            serde_json::json!({ "room": room }).to_string(),
-            "application/json; charset=utf-8",
-        ),
-        Err(refused) => json_error(StatusCode::SERVICE_UNAVAILABLE, refused.message()),
-    }
-}
-
-/// Join a room over a WebSocket.
-///
-/// `?room=CODE` and `?name=…`. The name is whatever the page offers, cleaned
-/// before anyone else sees it; a signed-in caller's account name is used when
-/// the page sends one, but this is a room you share a code for, not a
-/// permission boundary, so it is not required.
-async fn lobby_socket(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    Query(params): Query<HashMap<String, String>>,
-    ws: axum::extract::ws::WebSocketUpgrade,
-) -> Response {
-    let code = params.get("room").cloned().unwrap_or_default();
-    if lobby::normalise_code(&code).is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "A room code is required.");
-    }
-
-    // Refuse before the upgrade rather than after: a browser can read a status
-    // and a message here, where a socket that opens and immediately closes
-    // tells the page nothing it can show anyone.
-    let offered = params.get("name").cloned().unwrap_or_default();
-    let who = match lobby_identity(&state, &headers, &offered).await {
-        Ok(who) => who,
-        Err(err) => return auth_error(&err),
-    };
-
-    ws.on_upgrade(move |socket| run_lobby_member(socket, state, code, who))
-}
-
-/// One member's connection, for as long as they hold it.
-async fn run_lobby_member(
-    socket: axum::extract::ws::WebSocket,
-    state: AppState,
-    code: String,
-    who: lobby::Identity,
-) {
-    use axum::extract::ws::Message;
-    use futures_util::{SinkExt, StreamExt};
-
-    let (mut sink, mut stream) = socket.split();
-    let joined = match state.lobby.join(&code, &who) {
-        Ok(joined) => joined,
-        Err(refused) => {
-            // Say why, then close: a socket that stays open without a room is
-            // worse than one that never opened.
-            let message = lobby::Outgoing::Error {
-                message: refused.message().to_string(),
-            };
-            if let Ok(text) = serde_json::to_string(&message) {
-                let _ = sink.send(Message::Text(text.into())).await;
-            }
-            return;
-        }
-    };
-    let (room, me) = (joined.room.clone(), joined.member_id.clone());
-
-    // Tell the new arrival who they are and who else is here.
-    let welcome = lobby::Outgoing::Welcome {
-        room: room.clone(),
-        you: me.clone(),
-        members: joined.members.clone(),
-    };
-    if let Ok(text) = serde_json::to_string(&welcome) {
-        if sink.send(Message::Text(text.into())).await.is_err() {
-            state.lobby.leave(&room, &me);
-            return;
-        }
-    }
-    // And everyone else that the list changed.
-    state.lobby.broadcast(
-        &room,
-        &lobby::Outgoing::Members {
-            members: joined.members,
-        },
-    );
-
-    // Fan the room's messages out to this socket, and keep it warm.
-    //
-    // A member with no game loaded publishes nothing, and a proxy in front of
-    // this server will close a connection that has been silent for a minute or
-    // two — Cloudflare does. The page reconnects on its own, but a room that
-    // drops everyone every hundred seconds and quietly rebuilds itself is not
-    // something to leave in. A ping costs nothing and browsers answer it
-    // without any page code.
-    let mut receiver = joined.receiver;
-    let writer = tokio::spawn(async move {
-        let mut keepalive = tokio::time::interval(LOBBY_PING_INTERVAL);
-        // The first tick fires immediately; a ping before the welcome is
-        // pointless.
-        keepalive.tick().await;
-        loop {
-            let outgoing = tokio::select! {
-                message = receiver.recv() => match message {
-                    Ok(text) => Message::Text(text.into()),
-                    // Lagged behind: the buffer holds snapshots, which are worth
-                    // nothing once stale, so skipping ahead is right.
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(_) => break,
-                },
-                _ = keepalive.tick() => Message::Ping(Vec::new().into()),
-            };
-            if sink.send(outgoing).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    while let Some(Ok(message)) = stream.next().await {
-        let Message::Text(text) = message else {
-            // Binary, ping and close frames need no handling here.
-            continue;
-        };
-        if text.len() > lobby::MAX_MESSAGE_BYTES {
-            state.lobby.broadcast(
-                &room,
-                &lobby::Outgoing::Error {
-                    message: "That message was too large.".to_string(),
-                },
-            );
-            continue;
-        }
-
-        match serde_json::from_str::<lobby::Incoming>(&text) {
-            Ok(lobby::Incoming::Playing { playing, game_code }) => {
-                if let Some(members) = state.lobby.set_playing(&room, &me, playing, game_code) {
-                    state
-                        .lobby
-                        .broadcast(&room, &lobby::Outgoing::Members { members });
-                }
-            }
-            Ok(lobby::Incoming::Lock { locked }) => {
-                // Ignored for anyone but the host, and silently: a member who
-                // is not the host has no business being told the room's rules.
-                if state.lobby.set_locked(&room, &me, locked).is_some() {
-                    state
-                        .lobby
-                        .broadcast(&room, &lobby::Outgoing::Locked { locked });
-                }
-            }
-            Ok(lobby::Incoming::Snapshot { snapshot }) => {
-                state.lobby.broadcast(
-                    &room,
-                    &lobby::Outgoing::Snapshot {
-                        from: me.clone(),
-                        snapshot,
-                    },
-                );
-            }
-            // The link cable. The server relays halfwords and never looks at
-            // one: it has no idea what a transfer means and does not need to.
-            //
-            // What it does enforce is who may drive. A cable has one parent,
-            // and letting any member announce a transfer or publish its result
-            // would let them step on somebody else's game — corrupting a trade
-            // is a real thing to lose, so the check is here rather than in the
-            // page, where it would be advice.
-            Ok(lobby::Incoming::LinkTick { frame }) => {
-                // Only the parent has a clock worth following.
-                if state.lobby.is_link_parent(&room, &me) {
-                    state
-                        .lobby
-                        .broadcast(&room, &lobby::Outgoing::LinkTick { frame });
-                }
-            }
-            Ok(lobby::Incoming::LinkStart { seq, frame, offset }) => {
-                if state.lobby.is_link_parent(&room, &me) {
-                    state
-                        .lobby
-                        .broadcast(&room, &lobby::Outgoing::LinkStart { seq, frame, offset });
-                }
-            }
-            Ok(lobby::Incoming::LinkData {
-                seq,
-                values,
-                cycles,
-            }) => {
-                if state.lobby.is_link_parent(&room, &me) {
-                    state.lobby.broadcast(
-                        &room,
-                        &lobby::Outgoing::LinkData {
-                            seq,
-                            values,
-                            cycles,
-                        },
-                    );
-                }
-            }
-            Ok(lobby::Incoming::LinkValue { seq, value }) => {
-                // Anyone may answer, because answering is all a child does.
-                // The parent decides which answers belong to which seat.
-                state.lobby.broadcast(
-                    &room,
-                    &lobby::Outgoing::LinkValue {
-                        from: me.clone(),
-                        seq,
-                        value,
-                    },
-                );
-            }
-            // Lockstep. The server's job shrinks here rather than grows: it
-            // relays inputs and fingerprints and never sees a halfword, because
-            // in a lockstep session the cable is resolved inside each browser.
-            //
-            // The parent check is the same one as above and is here for the
-            // same reason. Opening a session decides which state every console
-            // in the room restores from, and letting a bystander do that would
-            // let them replace somebody's game with one of their choosing.
-            Ok(lobby::Incoming::LinkBegin {
-                session,
-                seed,
-                delay,
-                seats,
-            }) => {
-                if state.lobby.is_link_parent(&room, &me) {
-                    state.lobby.broadcast(
-                        &room,
-                        &lobby::Outgoing::LinkBegin {
-                            session,
-                            seed,
-                            delay,
-                            seats,
-                        },
-                    );
-                }
-            }
-            Ok(lobby::Incoming::LinkHello {
-                seat,
-                rom_hash,
-                rom_name,
-                game_code,
-                state: cartridge_state,
-            }) => {
-                // Anyone seated may describe their own console. Which seat they
-                // are is the room's to say, so the page checks the claim
-                // against the roster rather than trusting this field.
-                state.lobby.broadcast(
-                    &room,
-                    &lobby::Outgoing::LinkHello {
-                        from: me.clone(),
-                        seat,
-                        rom_hash,
-                        rom_name,
-                        game_code,
-                        state: cartridge_state,
-                    },
-                );
-            }
-            Ok(lobby::Incoming::LinkInput {
-                session,
-                frame,
-                keys,
-            }) => {
-                state.lobby.broadcast(
-                    &room,
-                    &lobby::Outgoing::LinkInput {
-                        from: me.clone(),
-                        session,
-                        frame,
-                        keys,
-                    },
-                );
-            }
-            Ok(lobby::Incoming::LinkHash {
-                session,
-                frame,
-                hash,
-            }) => {
-                state.lobby.broadcast(
-                    &room,
-                    &lobby::Outgoing::LinkHash {
-                        from: me.clone(),
-                        session,
-                        frame,
-                        hash,
-                    },
-                );
-            }
-            Ok(lobby::Incoming::LinkBye { session }) => {
-                state.lobby.broadcast(
-                    &room,
-                    &lobby::Outgoing::LinkBye {
-                        from: me.clone(),
-                        session,
-                    },
-                );
-            }
-            Ok(lobby::Incoming::LinkSkip { seq }) => {
-                // Relayed like an answer, and for the same reason: saying "not
-                // me" is something any console may do about its own seat.
-                state.lobby.broadcast(
-                    &room,
-                    &lobby::Outgoing::LinkSkip {
-                        from: me.clone(),
-                        seq,
-                    },
-                );
-            }
-            Ok(lobby::Incoming::Frame { frame }) => {
-                // Relayed as-is. The server has no idea what a frame looks
-                // like and does not need one: it is a string to everyone here.
-                state.lobby.broadcast(
-                    &room,
-                    &lobby::Outgoing::Frame {
-                        from: me.clone(),
-                        frame,
-                    },
-                );
-            }
-            // A message this server does not understand is ignored rather than
-            // closing the connection: a newer page talking to an older server
-            // should lose the feature, not the room.
-            Err(_) => {}
-        }
-    }
-
-    writer.abort();
-    if let Some(members) = state.lobby.leave(&room, &me) {
-        state
-            .lobby
-            .broadcast(&room, &lobby::Outgoing::Members { members });
-    }
-}
-
 /// Names of ROMs in the local folder.
-///
-/// Offered next to the vault so the page works with no storage configured, and
-/// so a ROM you would rather not upload can still be played.
 async fn local_roms(State(state): State<AppState>) -> Response {
     if !state.serve_local_roms {
         // An empty library rather than an error: this server simply has
@@ -2135,6 +585,12 @@ fn encode_path(relative: &str) -> String {
     out
 }
 
+/// Whether a file name looks like a GBA ROM.
+fn is_rom_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".gba") || lower.ends_with(".bin") || lower.ends_with(".agb")
+}
+
 /// One ROM found on disk.
 struct LocalRom {
     /// Path relative to the ROM folder, always with `/` separators.
@@ -2146,9 +602,8 @@ struct LocalRom {
 
 /// Whether the local ROM folder should be served.
 ///
-/// `TINYBIRD_LOCAL_ROMS=off` switches it off. A public deployment wants that:
-/// everything else this server offers is either public already or scoped to an
-/// account, and the ROM folder is neither.
+/// `TINYBIRD_LOCAL_ROMS=off` switches it off, for a server whose only job is
+/// the add-on tools or the overlay.
 fn local_roms_enabled() -> bool {
     match env::var("TINYBIRD_LOCAL_ROMS") {
         Ok(value) => !matches!(
@@ -2201,7 +656,7 @@ async fn collect_roms(dir: &FsPath, prefix: Option<&str>, roms: &mut Vec<LocalRo
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !media::is_rom_name(name) {
+        if !is_rom_name(name) {
             continue;
         }
         roms.push(LocalRom {
@@ -2215,20 +670,37 @@ async fn collect_roms(dir: &FsPath, prefix: Option<&str>, roms: &mut Vec<LocalRo
     }
 }
 
-async fn app_js() -> Response {
-    static_text(APP_JS, "application/javascript; charset=utf-8")
-}
-
-async fn styles_css() -> Response {
-    static_text(STYLES_CSS, "text/css; charset=utf-8")
-}
-
+/// Whether this checkout is ready to play, for the start page.
+///
+/// Reports facts about the files on disk, not claims: whether the emulator
+/// module has been built and is current with its sources, whether a BIOS dump
+/// is in place, and how many ROMs and add-on manifests were found.
 async fn health(State(state): State<AppState>) -> Response {
     let snapshot_exists = FsPath::new(&state.snapshot_path).is_file();
     let sprites_exist = FsPath::new(&state.sprite_dir).is_dir();
-    let rooms = state.lobby.room_count();
+    let wasm_ready = state.wasm_path.is_file();
+    let wasm_behind = match wasm_is_behind(&state.wasm_path) {
+        Some(age) => format!("\"{}\"", escape_json_string(&age)),
+        None => "null".to_string(),
+    };
+    let bios_ready = state.bios_path.is_file();
+    let roms = if state.serve_local_roms {
+        scan_rom_dir(&state.rom_dir).await.len()
+    } else {
+        0
+    };
+    let addons = std::fs::read_dir(&state.addon_dir)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+                .count()
+        })
+        .unwrap_or(0);
     let body = format!(
-        "{{\"ok\":true,\"rooms\":{rooms},\"snapshot_exists\":{snapshot_exists},\"sprites_exist\":{sprites_exist},\"snapshot_path\":\"{}\",\"sprite_dir\":\"{}\"}}",
+        "{{\"ok\":true,\"wasm_ready\":{wasm_ready},\"wasm_behind\":{wasm_behind},\"bios_ready\":{bios_ready},\"roms\":{roms},\"roms_served\":{},\"rom_dir\":\"{}\",\"addons\":{addons},\"snapshot_exists\":{snapshot_exists},\"sprites_exist\":{sprites_exist},\"snapshot_path\":\"{}\",\"sprite_dir\":\"{}\"}}",
+        state.serve_local_roms,
+        escape_json_string(&state.rom_dir.display().to_string()),
         escape_json_string(&state.snapshot_path.display().to_string()),
         escape_json_string(&state.sprite_dir.display().to_string()),
     );
@@ -2250,109 +722,6 @@ async fn snapshot(State(state): State<AppState>) -> Response {
 
 fn empty_snapshot_json() -> String {
     format!("{{\n  \"schema_version\": {SNAPSHOT_SCHEMA_VERSION}\n}}")
-}
-
-/// A species picture for the addon read-out.
-///
-/// Served from the on-disk cache when it is there and fetched once when it is
-/// not, so the first run of a server populates itself and every run after it
-/// works offline. A miss is a plain 404: the page hides the picture and keeps
-/// the card, which is why the addon also sends the species name in words.
-/// This account's screenshots, newest first.
-///
-/// Scoped to the caller. `/api/library` lists the whole vault, which is right
-/// for ROMs — they are shared on purpose — and wrong for pictures of somebody
-/// else's game.
-async fn list_shots(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
-    let owner = match shot_owner(&state, &headers).await {
-        Ok(owner) => owner,
-        Err(err) => return auth_error(&err),
-    };
-
-    let listing = media::list_shots(&state.media, &owner).await;
-    match serde_json::to_string(&listing) {
-        Ok(json) => text(StatusCode::OK, json, "application/json; charset=utf-8"),
-        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string()),
-    }
-}
-
-/// Store a screenshot against the caller's account.
-///
-/// **The name is built here, not taken from the browser.** The owner is a
-/// field in the stored filename, so a caller that could choose the name could
-/// file a picture under somebody else's account — or, worse, read theirs by
-/// asking for a listing of it.
-async fn upload_shot(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-    mut multipart: Multipart,
-) -> Response {
-    if !state.media.is_configured() {
-        return json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Storage is off. Set TINYBIRD_MEDIA_KEY in .env and restart.",
-        );
-    }
-
-    let owner = match shot_owner(&state, &headers).await {
-        Ok(owner) => owner,
-        Err(err) => return auth_error(&err),
-    };
-
-    let mut game_code = String::new();
-    let mut bytes: Vec<u8> = Vec::new();
-    while let Ok(Some(field)) = multipart.next_field().await {
-        match field.name() {
-            Some("game") => {
-                game_code = field.text().await.unwrap_or_default();
-            }
-            Some("file") => {
-                bytes = match field.bytes().await {
-                    Ok(bytes) => bytes.to_vec(),
-                    Err(err) => return json_error(StatusCode::BAD_REQUEST, &err.to_string()),
-                };
-            }
-            _ => continue,
-        }
-    }
-
-    if bytes.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "No picture in the request.");
-    }
-    // A screenshot is a PNG. Checking the signature stops the picture route
-    // being a way to put arbitrary files in the vault under a name that will
-    // later be served as an image.
-    if !bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
-        return json_error(StatusCode::BAD_REQUEST, "That is not a PNG.");
-    }
-
-    let taken_at_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_millis() as u64)
-        .unwrap_or(0);
-    let name = media::shot_name(&owner, &game_code, taken_at_ms);
-
-    match media::upload_asset(&state.media, &name, "image/png", bytes).await {
-        Ok(asset) => {
-            let url = escape_json_string(&asset.url);
-            let name = escape_json_string(&asset.name);
-            text(
-                StatusCode::OK,
-                format!("{{\"ok\":true,\"name\":\"{name}\",\"url\":\"{url}\"}}"),
-                "application/json; charset=utf-8",
-            )
-        }
-        Err(err) => json_error(StatusCode::BAD_GATEWAY, &err),
-    }
-}
-
-/// Whose screenshots these are. The same rule as saves, for the same reason:
-/// never anything the browser sent.
-async fn shot_owner(
-    state: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> Result<String, AuthError> {
-    save_owner(state, headers).await
 }
 
 /// Addon manifests, as one array the page can hand straight to the emulator.
@@ -2389,6 +758,12 @@ async fn addon_manifests(State(state): State<AppState>) -> Response {
     text(StatusCode::OK, body, "application/json; charset=utf-8")
 }
 
+/// A species picture for the addon read-out.
+///
+/// Served from the on-disk cache when it is there and fetched once when it is
+/// not, so the first run of a server populates itself and every run after it
+/// works offline. A miss is a plain 404: the page hides the picture and keeps
+/// the card, which is why the addon also sends the species name in words.
 async fn sprite_png(Path(species_id): Path<u16>, State(state): State<AppState>) -> Response {
     match sprites::fetch(&state.sprite_dir, species_id).await {
         sprites::Sprite::Png(bytes) => {
@@ -2476,15 +851,6 @@ fn text(status: StatusCode, body: String, content_type: &'static str) -> Respons
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    response
-}
-
-/// Keep account-specific responses out of browser and intermediary caches.
-fn no_store(mut response: Response) -> Response {
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-store"),
-    );
     response
 }
 
@@ -2612,7 +978,7 @@ mod tests {
     /// 240x160 with "no cartridge" over it, with no error anywhere.
     #[test]
     fn the_play_page_looks_up_each_element_under_one_name() {
-        let block = PLAY_JS
+        let block = asset("/play.js")
             .split_once("const el = {")
             .and_then(|(_, rest)| {
                 rest.split_once(
@@ -2652,26 +1018,11 @@ mod tests {
     /// much later as a property access on null rather than at the lookup.
     #[test]
     fn every_element_the_play_page_looks_up_exists_in_the_markup() {
-        let missing = missing_ids(PLAY_JS, PLAY_HTML);
+        let missing = missing_ids(asset("/play.js"), asset("/play"));
         assert!(
             missing.is_empty(),
             "play.js looks up ids the page has not got: {missing:?}"
         );
-    }
-
-    #[test]
-    fn shared_lobby_screens_live_in_one_workspace() {
-        let workspace = PLAY_HTML
-            .split_once("id=\"lobby-workspace\"")
-            .and_then(|(_, rest)| rest.split_once("</section>"))
-            .expect("the play page should contain the lobby workspace")
-            .0;
-
-        assert!(workspace.contains("id=\"screen\""));
-        assert!(workspace.contains("id=\"lobby-watch\""));
-        assert!(CONSOLE_CSS.contains(".screens[data-view=\"shared\"]"));
-        assert!(PLAY_JS.contains("el.lobbyWorkspace.dataset.view = \"shared\""));
-        assert!(PLAY_JS.contains("el.lobbyWorkspace.dataset.view = \"solo\""));
     }
 
     /// Ids a script reaches for with `$("...")` that the markup has not got.
@@ -2689,53 +1040,47 @@ mod tests {
     }
 
     #[test]
-    fn every_element_the_contact_page_looks_up_exists_in_the_markup() {
-        let missing = missing_ids(CONTACT_PAGE_JS, CONTACT_HTML);
+    fn every_element_the_start_page_looks_up_exists_in_the_markup() {
+        let missing = missing_ids(asset("/start.js"), asset("/"));
         assert!(
             missing.is_empty(),
-            "contact.js looks up ids the page has not got: {missing:?}"
+            "start.js looks up ids the page has not got: {missing:?}"
         );
     }
 
-    /// The ticket page has the same trap and one of its own: the panel's views
-    /// are shown and hidden through a list of ids rather than a lookup each, so
-    /// those names never appear in a `$("...")` and would go unchecked.
+    /// The table is the whole static surface, so a path listed twice would be
+    /// a route axum refuses at startup rather than in a test.
     #[test]
-    fn every_element_the_ticket_page_looks_up_exists_in_the_markup() {
-        let mut missing = missing_ids(TICKETS_JS, TICKETS_HTML);
+    fn every_asset_path_is_listed_once() {
+        let mut paths: Vec<&str> = ASSETS.iter().map(|(path, _, _)| *path).collect();
+        paths.sort();
+        let before = paths.len();
+        paths.dedup();
+        assert_eq!(before, paths.len());
+    }
 
-        let views = TICKETS_JS
-            .split_once("const VIEWS = [")
-            .and_then(|(_, rest)| rest.split_once(']'))
-            .expect("tickets.js should declare `const VIEWS = [ ... ]`")
-            .0;
-        for id in views.split('"').skip(1).step_by(2) {
-            if !TICKETS_HTML.contains(&format!("id=\"{id}\"")) && !missing.contains(&id) {
-                missing.push(id);
+    /// The hosted site's pages and scripts are not part of this server.
+    #[test]
+    fn nothing_links_to_the_hosted_site() {
+        for (path, body, _) in ASSETS {
+            for gone in [
+                "/api/auth",
+                "/api/saves",
+                "/api/lobby",
+                "/api/library",
+                "/contact",
+                "/support/tickets",
+            ] {
+                assert!(!body.contains(gone), "{path} still mentions {gone}");
             }
         }
-
-        assert!(
-            missing.is_empty(),
-            "tickets.js looks up ids the page has not got: {missing:?}"
-        );
     }
 
-    /// The ticket route is the one the contact service is told about when its
-    /// portal stops being hosted, so the page and the link have to agree on it.
-    #[test]
-    fn the_ticket_page_and_its_script_agree_on_where_tickets_live() {
-        assert!(TICKETS_JS.contains("const ROOT = \"/support/tickets\""));
-        assert!(TICKETS_HTML.contains("href=\"/support/tickets\""));
-        assert!(CONTACT_HTML.contains("href=\"/support/tickets\""));
-    }
-
-    #[test]
-    fn ticket_answers_are_never_cached() {
-        let response = ticket_answer(&serde_json::json!({ "tickets": [] }));
-        assert_eq!(
-            response.headers().get(header::CACHE_CONTROL),
-            Some(&HeaderValue::from_static("private, no-store"))
-        );
+    fn asset(path: &str) -> &'static str {
+        ASSETS
+            .iter()
+            .find(|(candidate, _, _)| *candidate == path)
+            .map(|(_, body, _)| *body)
+            .unwrap_or_else(|| panic!("no asset at {path}"))
     }
 }
