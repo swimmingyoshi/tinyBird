@@ -126,6 +126,9 @@ pub async fn guard(
     if !deployment.permits(&request) {
         return (StatusCode::FORBIDDEN, "Request origin is not allowed.").into_response();
     }
+    let revalidating = matches!(*request.method(), Method::GET | Method::HEAD)
+        .then(|| request.headers().get(header::IF_NONE_MATCH).cloned())
+        .flatten();
     let path = request.uri().path();
     let mut response = if path == "/api/deployment" {
         Json(serde_json::json!({"mode": deployment.mode.name(), "hosted": deployment.mode != Mode::Local})).into_response()
@@ -181,8 +184,50 @@ pub async fn guard(
             HeaderValue::from_static("max-age=31536000"),
         );
     }
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
+    cache_policy(response, revalidating.as_ref())
+}
+
+/// Decide what a browser may keep, last, after every handler has had its say.
+///
+/// **Nothing is cached unless a handler asked for it.** A response that says
+/// nothing about caching gets `no-store`, so a new route is private until
+/// someone decides otherwise. A handler that did set `Cache-Control` is left
+/// alone: this used to overwrite every response with `no-store`, which threw
+/// away the `immutable` on sprites and made the browser download the emulator
+/// module and a couple of hundred kilobytes of script again on every page.
+///
+/// A response carrying an `ETag` the browser already holds is answered with an
+/// empty 304. Static assets are served `no-cache` with one, so the browser
+/// still asks every time — a rebuilt server is picked up at once — but only
+/// pays for the bytes when they have changed.
+fn cache_policy(mut response: Response, if_none_match: Option<&HeaderValue>) -> Response {
+    let headers = response.headers_mut();
+    if !headers.contains_key(header::CACHE_CONTROL) {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+    let unchanged = response.status() == StatusCode::OK
+        && etag_matches(if_none_match, response.headers().get(header::ETAG));
+    if !unchanged {
+        return response;
+    }
+    let (mut parts, _) = response.into_parts();
+    parts.status = StatusCode::NOT_MODIFIED;
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.remove(header::CONTENT_TYPE);
+    Response::from_parts(parts, axum::body::Body::empty())
+}
+
+/// Whether `If-None-Match` names this entity tag. The header may list several
+/// and may mark them weak; for a GET the weak comparison is the right one.
+fn etag_matches(if_none_match: Option<&HeaderValue>, etag: Option<&HeaderValue>) -> bool {
+    let (Some(wanted), Some(etag)) = (if_none_match, etag) else {
+        return false;
+    };
+    let (Ok(wanted), Ok(etag)) = (wanted.to_str(), etag.to_str()) else {
+        return false;
+    };
+    let strong = |tag: &str| tag.trim().trim_start_matches("W/").to_owned();
+    wanted.split(',').any(|tag| strong(tag) == strong(etag))
 }
 
 #[cfg(test)]
@@ -226,6 +271,66 @@ mod tests {
             Some("http://localhost:8878"),
             true
         )));
+    }
+    const TAG: &str = "\"abc\"";
+    fn answer(cache_control: Option<&'static str>, etag: Option<&'static str>) -> Response {
+        let mut response = (StatusCode::OK, "body").into_response();
+        if let Some(value) = cache_control {
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
+        }
+        if let Some(value) = etag {
+            response
+                .headers_mut()
+                .insert(header::ETAG, HeaderValue::from_static(value));
+        }
+        response
+    }
+    fn cache_control(response: &Response) -> &str {
+        response.headers()[header::CACHE_CONTROL].to_str().unwrap()
+    }
+    #[test]
+    fn a_response_that_says_nothing_about_caching_is_never_stored() {
+        let response = cache_policy(answer(None, None), None);
+        assert_eq!(cache_control(&response), "no-store");
+    }
+    #[test]
+    fn a_handlers_own_cache_policy_survives() {
+        let immutable = "public, max-age=31536000, immutable";
+        for policy in [immutable, "no-cache", "private, no-store"] {
+            let response = cache_policy(answer(Some(policy), None), None);
+            assert_eq!(cache_control(&response), policy);
+        }
+    }
+    #[test]
+    fn an_asset_the_browser_already_holds_is_not_sent_again() {
+        let held = HeaderValue::from_static(TAG);
+        let response = cache_policy(answer(Some("no-cache"), Some(TAG)), Some(&held));
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(cache_control(&response), "no-cache");
+        assert_eq!(response.headers()[header::ETAG], TAG);
+        assert!(!response.headers().contains_key(header::CONTENT_TYPE));
+
+        let listed = HeaderValue::from_static("\"old\", W/\"abc\"");
+        let response = cache_policy(answer(Some("no-cache"), Some(TAG)), Some(&listed));
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    }
+    #[test]
+    fn a_changed_or_untagged_asset_is_sent_in_full() {
+        let stale = HeaderValue::from_static("\"old\"");
+        let changed = cache_policy(answer(Some("no-cache"), Some(TAG)), Some(&stale));
+        assert_eq!(changed.status(), StatusCode::OK);
+        let untagged = cache_policy(answer(None, None), Some(&stale));
+        assert_eq!(untagged.status(), StatusCode::OK);
+
+        let mut missing = answer(Some("no-cache"), Some(TAG));
+        *missing.status_mut() = StatusCode::NOT_FOUND;
+        let held = HeaderValue::from_static(TAG);
+        assert_eq!(
+            cache_policy(missing, Some(&held)).status(),
+            StatusCode::NOT_FOUND
+        );
     }
     #[test]
     fn unsafe_deployments_fail_closed() {
