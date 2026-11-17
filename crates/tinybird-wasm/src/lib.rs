@@ -643,11 +643,24 @@ pub extern "C" fn tb_cycle_count() -> f64 {
 /// `data` must point to `len` readable bytes containing UTF-8 JSON.
 #[no_mangle]
 pub unsafe extern "C" fn tb_set_disabled_builtins(data: *const u8, len: usize) -> i32 {
-    if data.is_null() || len == 0 || len > 4096 { return TB_ERR_BAD_ARGUMENT; }
-    let Ok(ids) = serde_json::from_slice::<Vec<String>>(std::slice::from_raw_parts(data, len)) else { return TB_ERR_BAD_ARGUMENT; };
+    if data.is_null() || len == 0 || len > 4096 {
+        return TB_ERR_BAD_ARGUMENT;
+    }
+    let Ok(ids) = serde_json::from_slice::<Vec<String>>(std::slice::from_raw_parts(data, len))
+    else {
+        return TB_ERR_BAD_ARGUMENT;
+    };
     let known = tinybird_games::describe_addon_status(None).registered;
-    if ids.len() > known.len() || ids.iter().any(|id| !known.iter().any(|info| info.addon_id == id)) { return TB_ERR_BAD_ARGUMENT; }
-    let Some(emu) = emulator() else { return TB_ERR_NOT_INITIALISED; };
+    if ids.len() > known.len()
+        || ids
+            .iter()
+            .any(|id| !known.iter().any(|info| info.addon_id == id))
+    {
+        return TB_ERR_BAD_ARGUMENT;
+    }
+    let Some(emu) = emulator() else {
+        return TB_ERR_NOT_INITIALISED;
+    };
     emu.disabled_builtins = ids;
     TB_OK
 }
@@ -659,12 +672,19 @@ pub unsafe extern "C" fn tb_set_disabled_builtins(data: *const u8, len: usize) -
 #[no_mangle]
 pub unsafe extern "C" fn tb_read_memory(address: u32, out: *mut u8, len: usize) -> i32 {
     let end = u64::from(address) + len as u64;
-    let allowed = [(0x0200_0000u32, 0x0204_0000u64), (0x0300_0000, 0x0300_8000),
-        (0x0800_0000, 0x0a00_0000)].iter().any(|&(start, stop)| address >= start && end <= stop);
+    let allowed = [
+        (0x0200_0000u32, 0x0204_0000u64),
+        (0x0300_0000, 0x0300_8000),
+        (0x0800_0000, 0x0a00_0000),
+    ]
+    .iter()
+    .any(|&(start, stop)| address >= start && end <= stop);
     if out.is_null() || len == 0 || len > 0x40000 || !allowed {
         return TB_ERR_BAD_ARGUMENT;
     }
-    let Some(emu) = emulator() else { return TB_ERR_NOT_INITIALISED; };
+    let Some(emu) = emulator() else {
+        return TB_ERR_NOT_INITIALISED;
+    };
     let bytes = std::slice::from_raw_parts_mut(out, len);
     for (offset, byte) in bytes.iter_mut().enumerate() {
         *byte = emu.gba.read_u8(address + offset as u32);
@@ -682,7 +702,8 @@ pub extern "C" fn tb_refresh_snapshot() -> i32 {
         let Some(emu) = emulator() else {
             return TB_ERR_NOT_INITIALISED;
         };
-        let mut snapshot = capture_stream_snapshot_excluding(Some(emu.gba.as_ref()), &emu.disabled_builtins);
+        let mut snapshot =
+            capture_stream_snapshot_excluding(Some(emu.gba.as_ref()), &emu.disabled_builtins);
         let mut statuses = Vec::new();
         if let Some(rom) = &snapshot.rom {
             let memory = tinybird_games::GbaMemory(emu.gba.as_ref());
@@ -716,8 +737,12 @@ pub extern "C" fn tb_refresh_snapshot() -> i32 {
                 }
                 if !sections.is_empty() && snapshot.addon.is_none() {
                     snapshot.addon = Some(tinybird_addons::AddonSnapshot {
-                        addon_id: "community", display_name: "Community readers", version: None,
-                        capabilities: Vec::new(), sections: Vec::new(), overlay_lines: Vec::new(),
+                        addon_id: "community",
+                        display_name: "Community readers",
+                        version: None,
+                        capabilities: Vec::new(),
+                        sections: Vec::new(),
+                        overlay_lines: Vec::new(),
                         data: tinybird_games::AddonData::default(),
                     });
                 }
@@ -729,7 +754,8 @@ pub extern "C" fn tb_refresh_snapshot() -> i32 {
         match serde_json::to_value(&snapshot) {
             Ok(mut value) => {
                 value["community_addons"] = serde_json::json!(statuses);
-                value["builtin_addons"] = serde_json::json!(tinybird_games::describe_addon_status(None).registered);
+                value["builtin_addons"] =
+                    serde_json::json!(tinybird_games::describe_addon_status(None).registered);
                 emu.snapshot = value.to_string();
                 TB_OK
             }

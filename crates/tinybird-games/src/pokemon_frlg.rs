@@ -17,8 +17,8 @@ use tinybird_addons::schema::{
 };
 use tinybird_addons::{AddonInfo, GameAddon, MemoryView, RomIdentity};
 
-use tinybird_addons::gen3_names;
 use crate::{AddonData, AddonSnapshot};
+use tinybird_addons::gen3_names;
 
 const ADDON_VERSION: &str = "0.2.0";
 

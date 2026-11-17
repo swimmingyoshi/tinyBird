@@ -14,8 +14,8 @@ use tokio::net::TcpListener;
 mod auth;
 mod community_addons;
 mod contact;
-mod dotenv;
 mod deployment;
+mod dotenv;
 mod lobby;
 mod media;
 mod sprites;
@@ -174,16 +174,24 @@ struct AppState {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     let mode = deployment::Mode::from_args(&args)?;
-    if mode == deployment::Mode::Development { dotenv::load(".env.development"); }
+    if mode == deployment::Mode::Development {
+        dotenv::load(".env.development");
+    }
     let config = Config::from_env_and_args(args);
-    let deployment = deployment::Deployment::new(mode, config.host, env::var("TINYBIRD_PUBLIC_ORIGIN").ok())?;
+    let deployment =
+        deployment::Deployment::new(mode, config.host, env::var("TINYBIRD_PUBLIC_ORIGIN").ok())?;
     let mut media = MediaConfig::from_env();
     let mut contact = ContactConfig::from_env();
     let mut auth = AuthConfig::from_env();
     if mode == deployment::Mode::Local {
-        media = media.without_credentials(); contact = contact.without_credentials(); auth = auth.without_credentials();
+        media = media.without_credentials();
+        contact = contact.without_credentials();
+        auth = auth.without_credentials();
     }
-    if mode == deployment::Mode::Production && (media.is_configured() || contact.is_configured()) && !auth.is_configured() {
+    if mode == deployment::Mode::Production
+        && (media.is_configured() || contact.is_configured())
+        && !auth.is_configured()
+    {
         return Err("Production media/contact services require configured accounts; shared-owner fallback is local development only.".into());
     }
     let contact_configured = contact.is_configured();
@@ -198,8 +206,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = AppState {
         community_addons: community_addons::Store::open(&PathBuf::from(
-            if mode == deployment::Mode::Local { ":memory:".into() } else { env::var("TINYBIRD_ADDON_DB")
-                .unwrap_or_else(|_| "stream-data/community-addons.sqlite3".into()) },
+            if mode == deployment::Mode::Local {
+                ":memory:".into()
+            } else {
+                env::var("TINYBIRD_ADDON_DB")
+                    .unwrap_or_else(|_| "stream-data/community-addons.sqlite3".into())
+            },
         ))?,
         snapshot_path: config.snapshot_path,
         sprite_dir: config.sprite_dir,
@@ -217,10 +229,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         serve_local_roms: mode != deployment::Mode::Production && local_roms_enabled(),
     };
     let app = Router::new()
-        .route("/memory-sheets.js", get(|| async { static_text(include_str!("assets/memory-sheets.js"), "text/javascript; charset=utf-8") }))
-        .route("/reader-guide", get(|| async { Html(include_str!("assets/reader-guide.html")) }))
-        .route("/addon", get(|| async { Html(include_str!("assets/addons.html")) }))
-        .route("/workshop-player.css", get(|| async { static_text(include_str!("assets/workshop-player.css"), "text/css; charset=utf-8") }))
+        .route(
+            "/memory-sheets.js",
+            get(|| async {
+                static_text(
+                    include_str!("assets/memory-sheets.js"),
+                    "text/javascript; charset=utf-8",
+                )
+            }),
+        )
+        .route(
+            "/reader-guide",
+            get(|| async { Html(include_str!("assets/reader-guide.html")) }),
+        )
+        .route(
+            "/addon",
+            get(|| async { Html(include_str!("assets/addons.html")) }),
+        )
+        .route(
+            "/workshop-player.css",
+            get(|| async {
+                static_text(
+                    include_str!("assets/workshop-player.css"),
+                    "text/css; charset=utf-8",
+                )
+            }),
+        )
         .route(
             "/addons",
             get(|| async { Html(include_str!("assets/addons.html")) }),
@@ -228,19 +262,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/addons.js",
             get(|| async {
-                static_text(include_str!("assets/addons.js"), "text/javascript; charset=utf-8")
+                static_text(
+                    include_str!("assets/addons.js"),
+                    "text/javascript; charset=utf-8",
+                )
             }),
         )
-        .route("/workshop.js", get(|| async { static_text(include_str!("assets/workshop.js"), "text/javascript; charset=utf-8") }))
-        .route("/workshop-model.js", get(|| async { static_text(include_str!("assets/workshop-model.js"), "text/javascript; charset=utf-8") }))
-        .route("/workshop-observations.js", get(|| async { static_text(include_str!("assets/workshop-observations.js"), "text/javascript; charset=utf-8") }))
-        .route("/recovery.js", get(|| async { static_text(include_str!("assets/recovery.js"), "text/javascript; charset=utf-8") }))
-        .route("/deployment.js", get(|| async { static_text(include_str!("assets/deployment.js"), "text/javascript; charset=utf-8") }))
-        .route("/workshop.css", get(|| async { static_text(include_str!("assets/workshop.css"), "text/css; charset=utf-8") }))
+        .route(
+            "/workshop.js",
+            get(|| async {
+                static_text(
+                    include_str!("assets/workshop.js"),
+                    "text/javascript; charset=utf-8",
+                )
+            }),
+        )
+        .route(
+            "/workshop-model.js",
+            get(|| async {
+                static_text(
+                    include_str!("assets/workshop-model.js"),
+                    "text/javascript; charset=utf-8",
+                )
+            }),
+        )
+        .route(
+            "/workshop-observations.js",
+            get(|| async {
+                static_text(
+                    include_str!("assets/workshop-observations.js"),
+                    "text/javascript; charset=utf-8",
+                )
+            }),
+        )
+        .route(
+            "/recovery.js",
+            get(|| async {
+                static_text(
+                    include_str!("assets/recovery.js"),
+                    "text/javascript; charset=utf-8",
+                )
+            }),
+        )
+        .route(
+            "/deployment.js",
+            get(|| async {
+                static_text(
+                    include_str!("assets/deployment.js"),
+                    "text/javascript; charset=utf-8",
+                )
+            }),
+        )
+        .route(
+            "/workshop.css",
+            get(|| async {
+                static_text(
+                    include_str!("assets/workshop.css"),
+                    "text/css; charset=utf-8",
+                )
+            }),
+        )
         .route(
             "/addon-client.js",
             get(|| async {
-                static_text(include_str!("assets/addon-client.js"), "text/javascript; charset=utf-8")
+                static_text(
+                    include_str!("assets/addon-client.js"),
+                    "text/javascript; charset=utf-8",
+                )
             }),
         )
         .route(
@@ -360,7 +448,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/ffta/races/{race}", get(ffta_race_png))
         .route("/ffta/jobs/{job}", get(ffta_job_png))
         .with_state(state)
-        .layer(axum::middleware::from_fn_with_state(deployment, deployment::guard));
+        .layer(axum::middleware::from_fn_with_state(
+            deployment,
+            deployment::guard,
+        ));
 
     let addr = SocketAddr::new(config.host, config.port);
     // A port clash is the single most common way this fails to start, usually

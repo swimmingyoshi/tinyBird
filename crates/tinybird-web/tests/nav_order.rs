@@ -44,7 +44,9 @@ fn nav_links(html: &str) -> Vec<(String, String)> {
     let mut rest = nav;
     while let Some(anchor) = rest.find("<a ") {
         rest = &rest[anchor..];
-        let Some(href_at) = rest.find("href=\"") else { break };
+        let Some(href_at) = rest.find("href=\"") else {
+            break;
+        };
         let after = &rest[href_at + 6..];
         let href = &after[..after.find('"').expect("href is closed")];
         let Some(text_at) = rest.find('>') else { break };
@@ -116,15 +118,16 @@ fn every_page_marks_itself_as_the_current_one() {
 /// Every link in the nav has to go somewhere the server actually serves.
 #[test]
 fn the_header_never_links_somewhere_that_is_not_routed() {
-    let routes = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
-    )
-    .expect("read main.rs");
+    let routes = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+        .expect("read main.rs");
 
     for name in PAGES {
         for (href, text) in nav_links(&page(name)) {
             let routed = href == "/" || routes.contains(&format!("\"{href}\""));
-            assert!(routed, "{name} links to {text} at {href}, which main.rs does not route");
+            assert!(
+                routed,
+                "{name} links to {text} at {href}, which main.rs does not route"
+            );
         }
     }
 }
@@ -148,7 +151,9 @@ fn tickets_are_reachable_from_the_account_menu() {
     // And the contact page leads with the verb rather than burying the link
     // in a sentence about what is behind it.
     let contact = page("contact.html");
-    let start = contact.find("contact__tickets").expect("contact tickets block");
+    let start = contact
+        .find("contact__tickets")
+        .expect("contact tickets block");
     let block = &contact[start..start + 400];
     assert!(
         block.contains("View your tickets"),

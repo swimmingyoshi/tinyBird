@@ -437,8 +437,11 @@ mod tests {
                 rtc.write(GPIO_DATA, u16::from(PIN_CS));
                 let low = rtc.read(GPIO_DATA) & u16::from(PIN_SIO);
                 rtc.write(GPIO_DATA, u16::from(PIN_CS | PIN_SCK));
-                assert_eq!(rtc.read(GPIO_DATA) & u16::from(PIN_SIO), low,
-                    "RTC response must stay stable across rising SCK");
+                assert_eq!(
+                    rtc.read(GPIO_DATA) & u16::from(PIN_SIO),
+                    low,
+                    "RTC response must stay stable across rising SCK"
+                );
                 if rtc.read(GPIO_DATA) as u8 & PIN_SIO != 0 {
                     byte |= 1 << bit;
                 }
