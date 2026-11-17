@@ -582,8 +582,15 @@ impl Gba {
             self.cpu.step(&mut self.bus) as u64
         };
         self.total_cycles += cpu_cycles;
-        if self.audio_enabled {
-            self.sync_io_to_apu();
+        // A sound register written by this instruction reaches the APU now,
+        // before the timers below can pop a FIFO sample it may have refilled,
+        // and only after the chip has been ticked up to this instruction.
+        //
+        // This used to hand the write over directly. That consumed the dirty
+        // range, so the batched flush further down never saw the write, and
+        // the register landed before up to a batch of cycles that preceded it.
+        if self.audio_enabled && self.bus.audio_io_dirty() {
+            self.flush_apu();
         }
 
         // Check if HALT was requested via HALTCNT (I/O offset 0x301).
