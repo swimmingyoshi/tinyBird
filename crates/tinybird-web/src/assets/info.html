@@ -119,11 +119,21 @@
               <dt>tinybird-probe</dt>
               <dd>The address-finding tool: diffing, scanning, text search.</dd>
             </div>
+            <div>
+              <dt>tinybird-runtime</dt>
+              <dd>
+                The core without a window: <code>tinybird-headless</code> takes
+                JSON commands and answers with frames and named memory
+                observations. The Python client and the optional training
+                tools drive it.
+              </dd>
+            </div>
           </dl>
           <p class="panel__foot">
-            Roughly 650 Rust tests and 74 browser-module tests. CI builds and
+            Roughly 760 Rust tests and 110 browser-module tests. CI builds and
             tests the non-windowing crates, runs the GBA accuracy suite as a
-            gate, and builds the WebAssembly module.
+            gate, and builds the WebAssembly module. Formatting, lints and
+            dependency advisories are gates too.
           </p>
         </section>
 

@@ -1,6 +1,6 @@
 # tinyBird — where things stand
 
-Last updated: 27 August 2026.
+Last updated: 16 November 2026.
 
 This file is also the source for the site's `/info` page
 ([`crates/tinybird-web/src/assets/info.html`](crates/tinybird-web/src/assets/info.html)),
@@ -11,6 +11,11 @@ This is the short version. The long versions live in
 [`docs/WEB.md`](docs/WEB.md) (the browser build and the site),
 [`ADDONS.md`](ADDONS.md) (the addon contract), and
 [`docs/ADDON_DEVELOPMENT.md`](docs/ADDON_DEVELOPMENT.md) (how to write one).
+Newer ground has its own pages:
+[`docs/deployment-modes.md`](docs/deployment-modes.md) (local, development and
+production), [`docs/automation.md`](docs/automation.md) (headless control),
+[`docs/local-training.md`](docs/local-training.md) (reinforcement learning),
+and [`docs/session-recovery.md`](docs/session-recovery.md).
 
 ## What works
 
@@ -18,13 +23,14 @@ This is the short version. The long versions live in
 |---|---|
 | `tinybird-core` | CPU, bus, BIOS HLE, DMA, timers, PPU, APU, save types, savestates, link cable. Five commercial ROMs boot, render, and save. |
 | `tinybird-desktop` | Windowed runner: audio, keyboard and gamepad, battery saves, quicksave, stream overlay, addon dashboard. |
-| `tinybird-web` | Axum server: the browser build, save vault, accounts, rooms. |
+| `tinybird-web` | Axum server: the browser build, save vault, accounts, rooms, the addon Workshop and community addons. Runs in one of three modes — `local` (the default, loopback only, no cloud services), `development`, or `production`. |
 | `tinybird-wasm` | The core as a WebAssembly module with a plain C ABI. No `wasm-bindgen`. |
 | `tinybird-addons` | The addon contract: schema, memory view, registry, and manifests — addons written as JSON, loaded from `addons/` on the desktop and over `/api/addons` in the browser. |
 | `tinybird-games` | Shipped addons: FireRed/LeafGreen, FFTA, and a cartridge fallback. |
 | `tinybird-probe` | The address-finding tool: diffing, scanning, text search. |
+| `tinybird-runtime` | The core without a window: `tinybird-headless` takes JSON commands on stdin and answers with frames and named memory observations. The Python client and the optional Gymnasium training tools in `examples/python` drive it. |
 
-Roughly 650 Rust tests and 72 browser-module tests. CI builds and tests the
+Roughly 760 Rust tests and 110 browser-module tests. CI builds and tests the
 non-windowing crates, runs the GBA accuracy suite as a gate, and builds the
 WebAssembly module. `cargo fmt --check`, `cargo clippy -D warnings` and
 `cargo audit` are gates too.
