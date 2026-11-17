@@ -276,11 +276,18 @@ impl<T> AddonRegistry<T> {
     }
 
     /// Disabled readers are skipped before either matching or reading memory.
-    pub fn detect_excluding(&self, memory: &dyn MemoryView, rom: &RomIdentity, disabled: &[String]) -> Detection<T> {
+    pub fn detect_excluding(
+        &self,
+        memory: &dyn MemoryView,
+        rom: &RomIdentity,
+        disabled: &[String],
+    ) -> Detection<T> {
         let mut first_claim = None;
 
         for addon in &self.addons {
-            if disabled.iter().any(|id| id == addon.info().addon_id) { continue; }
+            if disabled.iter().any(|id| id == addon.info().addon_id) {
+                continue;
+            }
             if !addon.supports(rom) {
                 continue;
             }

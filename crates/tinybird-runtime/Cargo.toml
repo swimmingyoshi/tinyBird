@@ -12,3 +12,6 @@ serde_json.workspace = true
 [[bin]]
 name = "tinybird-headless"
 path = "src/main.rs"
+
+[lints]
+workspace = true

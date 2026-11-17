@@ -136,6 +136,7 @@ struct LegacySavestateV1 {
 /// of calls by roughly the average instruction length.
 pub(crate) const APU_TICK_BATCH_CYCLES: u32 = 64;
 
+/// One Game Boy Advance: CPU, bus, video, audio, timers and the link port.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Gba {
     /// CPU core
@@ -1288,9 +1289,9 @@ impl Gba {
         if overflowed.iter().any(|&count| count != 0) {
             let ime = self.bus.read_io_direct_u16(0x208);
             let ie = self.bus.read_io_direct_u16(0x200);
-            for i in 0..4 {
-                if self.audio_enabled && overflowed[i] != 0 && i < 2 {
-                    for _ in 0..overflowed[i] {
+            for (i, &overflows) in overflowed.iter().enumerate() {
+                if self.audio_enabled && overflows != 0 && i < 2 {
+                    for _ in 0..overflows {
                         let (need_a, need_b) = self.apu.on_timer_overflow(i as u8);
                         if need_a {
                             self.service_sound_fifo_dma(0);
@@ -1300,7 +1301,7 @@ impl Gba {
                         }
                     }
                 }
-                if overflowed[i] != 0 && self.timers.timers[i].irq_enabled() {
+                if overflows != 0 && self.timers.timers[i].irq_enabled() {
                     let bit = 1u16 << (3 + i);
                     self.request_irq(bit);
                     if ime != 0 && (ie & bit) != 0 {
@@ -1508,15 +1509,15 @@ impl Gba {
         // BG0CNT-BG3CNT (0x04000008-0x0400000E)
         for i in 0..4 {
             let bgcnt = self.bus.read_io_direct_u16(0x008 + i * 2);
-            self.ppu.write_bgcnt(i as usize, bgcnt);
+            self.ppu.write_bgcnt(i, bgcnt);
         }
 
         // BG scroll registers (0x04000010-0x0400001E)
         for i in 0..4 {
             let hofs = self.bus.read_io_direct_u16(0x010 + i * 4);
             let vofs = self.bus.read_io_direct_u16(0x012 + i * 4);
-            self.ppu.write_bghofs(i as usize, hofs);
-            self.ppu.write_bgvofs(i as usize, vofs);
+            self.ppu.write_bghofs(i, hofs);
+            self.ppu.write_bgvofs(i, vofs);
         }
 
         // Affine BG2 matrix and reference point (0x04000020-0x0400002F)
@@ -1593,7 +1594,7 @@ impl Gba {
         if Self::io_range_dirty(0x008, 0x010, dirty_start, dirty_end) {
             for i in 0..4 {
                 let bgcnt = self.bus.read_io_direct_u16(0x008 + i * 2);
-                self.ppu.write_bgcnt(i as usize, bgcnt);
+                self.ppu.write_bgcnt(i, bgcnt);
             }
         }
 
@@ -1601,8 +1602,8 @@ impl Gba {
             for i in 0..4 {
                 let hofs = self.bus.read_io_direct_u16(0x010 + i * 4);
                 let vofs = self.bus.read_io_direct_u16(0x012 + i * 4);
-                self.ppu.write_bghofs(i as usize, hofs);
-                self.ppu.write_bgvofs(i as usize, vofs);
+                self.ppu.write_bghofs(i, hofs);
+                self.ppu.write_bgvofs(i, vofs);
             }
         }
 
@@ -1806,7 +1807,7 @@ impl Gba {
         if let Some((start, end)) = palette_dirty {
             let bus_palette = self.bus.get_palette_slice();
             let start_idx = (start / 2).min(self.ppu.palette.len());
-            let end_idx = ((end + 1) / 2).min(self.ppu.palette.len());
+            let end_idx = end.div_ceil(2).min(self.ppu.palette.len());
             for i in start_idx..end_idx {
                 let lo = i * 2;
                 if lo + 1 < bus_palette.len() {

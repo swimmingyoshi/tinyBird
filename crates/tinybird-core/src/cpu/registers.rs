@@ -554,8 +554,6 @@ mod tests {
         assert_ne!(regs.cpsr() & CpsrFlags::F.bits(), 0);
     }
 
-    use super::*;
-
     #[test]
     fn test_register_basic() {
         let mut regs = Registers::new();

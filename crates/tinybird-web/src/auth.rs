@@ -57,7 +57,10 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
-    pub fn without_credentials(mut self) -> Self { self.secret = None; self }
+    pub fn without_credentials(mut self) -> Self {
+        self.secret = None;
+        self
+    }
     pub fn from_env() -> Self {
         let read = |name: &str| {
             env::var(name)

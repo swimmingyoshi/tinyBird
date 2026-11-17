@@ -555,13 +555,38 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let value = body(response).await;
         let id = value["id"].as_str().unwrap().to_string();
-        let found = body(catalog(State(state.clone()), Query(Search { q: "02000000".into(), kind: "memory_sheet".into(), offset: 0 })).await).await;
+        let found = body(
+            catalog(
+                State(state.clone()),
+                Query(Search {
+                    q: "02000000".into(),
+                    kind: "memory_sheet".into(),
+                    offset: 0,
+                }),
+            )
+            .await,
+        )
+        .await;
         assert_eq!(found["addons"].as_array().unwrap().len(), 1);
         assert_eq!(found["addons"][0]["kind"], "memory_sheet");
-        let absent = body(catalog(State(state.clone()), Query(Search { q: "missing-field".into(), kind: "memory_sheet".into(), offset: 0 })).await).await;
+        let absent = body(
+            catalog(
+                State(state.clone()),
+                Query(Search {
+                    q: "missing-field".into(),
+                    kind: "memory_sheet".into(),
+                    offset: 0,
+                }),
+            )
+            .await,
+        )
+        .await;
         assert!(absent["addons"].as_array().unwrap().is_empty());
         let sheet_detail = body(detail(State(state.clone()), Path(id.clone())).await).await;
-        assert_eq!(sheet_detail["releases"][0]["manifest"]["$comment"]["kind"], "memory_sheet");
+        assert_eq!(
+            sheet_detail["releases"][0]["manifest"]["$comment"]["kind"],
+            "memory_sheet"
+        );
         let response = install(
             State(state.clone()),
             Path(id.clone()),

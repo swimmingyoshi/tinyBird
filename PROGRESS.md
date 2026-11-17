@@ -26,7 +26,8 @@ This is the short version. The long versions live in
 
 Roughly 650 Rust tests and 72 browser-module tests. CI builds and tests the
 non-windowing crates, runs the GBA accuracy suite as a gate, and builds the
-WebAssembly module.
+WebAssembly module. `cargo fmt --check`, `cargo clippy -D warnings` and
+`cargo audit` are gates too.
 
 ## Known gaps
 
@@ -62,9 +63,6 @@ Each of these is written up where it belongs; this is the index.
   name, so they are right for any build including ROM hacks. The numbers beside
   them live in differently-shaped structures and have not had the same
   treatment.
-- **Lint and format backlogs.** `cargo clippy` runs in CI as reporting only,
-  and there is no `cargo fmt --check`, because the tree predates both. The
-  reasoning and the path to turning them on are in `.github/workflows/ci.yml`.
 
 ## Running it
 

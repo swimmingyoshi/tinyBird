@@ -82,7 +82,10 @@ pub struct MediaConfig {
 }
 
 impl MediaConfig {
-    pub fn without_credentials(mut self) -> Self { self.key = None; self }
+    pub fn without_credentials(mut self) -> Self {
+        self.key = None;
+        self
+    }
     /// Build from the environment.
     ///
     /// | variable | meaning | default |
@@ -759,7 +762,7 @@ pub async fn list_shots(config: &MediaConfig, owner: &str) -> ShotsResponse {
         })
         .collect();
 
-    shots.sort_by(|a, b| b.taken_at_ms.cmp(&a.taken_at_ms));
+    shots.sort_by_key(|shot| std::cmp::Reverse(shot.taken_at_ms));
 
     ShotsResponse {
         configured: true,

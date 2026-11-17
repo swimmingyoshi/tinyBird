@@ -323,7 +323,7 @@ impl FftaUnit {
         JOBS.get(self.job_id as usize)
             .copied()
             .filter(|name| !name.is_empty())
-            .or_else(|| match self.job_id {
+            .or(match self.job_id {
                 0x47 => Some("Titania"),
                 0x4D => Some("Official"),
                 0x53 => Some("Runeseeker"),

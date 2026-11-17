@@ -361,7 +361,9 @@ fn validate_value(value: &Value) -> Result<(), String> {
             at
         }
     };
-    let width = if matches!(address, Address::Chain { .. }) { 4 } else {
+    let width = if matches!(address, Address::Chain { .. }) {
+        4
+    } else {
         match value {
             Value::U8(_) => 1,
             Value::U16(_) => 2,
@@ -580,8 +582,7 @@ pub enum Gen3Field {
 impl Gen3Field {
     /// Whether this field reads as a name out of the cartridge's own tables.
     fn needs_names(self) -> bool {
-        matches!(self, Gen3Field::Species | Gen3Field::HeldItem)
-            || self.move_slot().is_some()
+        matches!(self, Gen3Field::Species | Gen3Field::HeldItem) || self.move_slot().is_some()
     }
 
     fn move_slot(self) -> Option<usize> {
@@ -647,7 +648,10 @@ impl Gen3Field {
             Gen3Field::IvTotal => (boxed.iv_total(), None),
             Gen3Field::Nature => {
                 let index = boxed.nature();
-                (index, Some(crate::gen3::NATURES[index as usize].to_string()))
+                (
+                    index,
+                    Some(crate::gen3::NATURES[index as usize].to_string()),
+                )
             }
             Gen3Field::AbilitySlot => (boxed.ability_slot(), None),
             Gen3Field::Pokerus => (boxed.pokerus(), None),
@@ -1226,35 +1230,35 @@ mod tests {
                 BASE,
                 loaded_record(personality, 0x1234_5678, 21, &[0xCD, 0xFF]),
             );
-            let reader = addon(&format!(
-                r#"{{
+            let reader = addon(
+                r#"{
                   "manifest_version": 2,
                   "addon_id": "custom.detail",
                   "display_name": "Detail",
-                  "matches": {{ "game_code": ["BPRE"], "revision": [0] }},
-                  "sections": [{{
+                  "matches": { "game_code": ["BPRE"], "revision": [0] },
+                  "sections": [{
                     "id": "party", "title": "Party", "kind": "cards",
-                    "repeat": {{ "count": 1, "stride": 100 }},
-                    "card": {{
-                      "title": {{ "gen3": {{ "at": "0x02024284", "field": "species" }} }},
+                    "repeat": { "count": 1, "stride": 100 },
+                    "card": {
+                      "title": { "gen3": { "at": "0x02024284", "field": "species" } },
                       "fields": [
-                        {{ "label": "Move 1", "read": {{ "gen3": {{ "at": "0x02024284", "field": "move1" }} }} }},
-                        {{ "label": "Move 2", "read": {{ "gen3": {{ "at": "0x02024284", "field": "move2" }} }} }},
-                        {{ "label": "PP 1", "read": {{ "gen3": {{ "at": "0x02024284", "field": "pp1" }} }} }},
-                        {{ "label": "HP EV", "read": {{ "gen3": {{ "at": "0x02024284", "field": "ev_hp" }} }},
-                          "max": {{ "const": 252 }} }},
-                        {{ "label": "EV total", "read": {{ "gen3": {{ "at": "0x02024284", "field": "ev_total" }} }},
-                          "max": {{ "const": 510 }} }},
-                        {{ "label": "Atk IV", "read": {{ "gen3": {{ "at": "0x02024284", "field": "iv_attack" }} }},
-                          "max": {{ "const": 31 }} }},
-                        {{ "label": "Nature", "read": {{ "gen3": {{ "at": "0x02024284", "field": "nature" }} }} }},
-                        {{ "label": "Friendship", "read": {{ "gen3": {{ "at": "0x02024284", "field": "friendship" }} }} }},
-                        {{ "label": "Egg", "read": {{ "gen3": {{ "at": "0x02024284", "field": "is_egg" }} }} }}
+                        { "label": "Move 1", "read": { "gen3": { "at": "0x02024284", "field": "move1" } } },
+                        { "label": "Move 2", "read": { "gen3": { "at": "0x02024284", "field": "move2" } } },
+                        { "label": "PP 1", "read": { "gen3": { "at": "0x02024284", "field": "pp1" } } },
+                        { "label": "HP EV", "read": { "gen3": { "at": "0x02024284", "field": "ev_hp" } },
+                          "max": { "const": 252 } },
+                        { "label": "EV total", "read": { "gen3": { "at": "0x02024284", "field": "ev_total" } },
+                          "max": { "const": 510 } },
+                        { "label": "Atk IV", "read": { "gen3": { "at": "0x02024284", "field": "iv_attack" } },
+                          "max": { "const": 31 } },
+                        { "label": "Nature", "read": { "gen3": { "at": "0x02024284", "field": "nature" } } },
+                        { "label": "Friendship", "read": { "gen3": { "at": "0x02024284", "field": "friendship" } } },
+                        { "label": "Egg", "read": { "gen3": { "at": "0x02024284", "field": "is_egg" } } }
                       ]
-                    }}
-                  }}]
-                }}"#
-            ));
+                    }
+                  }]
+                }"#,
+            );
 
             let snapshot = read_of(&reader, &memory).expect("detail should report");
             let AddonSectionContent::Cards(cards) = &snapshot.sections[0].content else {
@@ -1383,10 +1387,30 @@ mod tests {
     /// tests do not carry a second copy of the twenty-four orders.
     fn substruct_order(personality: u32) -> [usize; 4] {
         const ORDERS: [[usize; 4]; 24] = [
-            [0, 1, 2, 3], [0, 1, 3, 2], [0, 2, 1, 3], [0, 3, 1, 2], [0, 2, 3, 1], [0, 3, 2, 1],
-            [1, 0, 2, 3], [1, 0, 3, 2], [2, 0, 1, 3], [3, 0, 1, 2], [2, 0, 3, 1], [3, 0, 2, 1],
-            [1, 2, 0, 3], [1, 3, 0, 2], [2, 1, 0, 3], [3, 1, 0, 2], [2, 3, 0, 1], [3, 2, 0, 1],
-            [1, 2, 3, 0], [1, 3, 2, 0], [2, 1, 3, 0], [3, 1, 2, 0], [2, 3, 1, 0], [3, 2, 1, 0],
+            [0, 1, 2, 3],
+            [0, 1, 3, 2],
+            [0, 2, 1, 3],
+            [0, 3, 1, 2],
+            [0, 2, 3, 1],
+            [0, 3, 2, 1],
+            [1, 0, 2, 3],
+            [1, 0, 3, 2],
+            [2, 0, 1, 3],
+            [3, 0, 1, 2],
+            [2, 0, 3, 1],
+            [3, 0, 2, 1],
+            [1, 2, 0, 3],
+            [1, 3, 0, 2],
+            [2, 1, 0, 3],
+            [3, 1, 0, 2],
+            [2, 3, 0, 1],
+            [3, 2, 0, 1],
+            [1, 2, 3, 0],
+            [1, 3, 2, 0],
+            [2, 1, 3, 0],
+            [3, 1, 2, 0],
+            [2, 3, 1, 0],
+            [3, 2, 1, 0],
         ];
         ORDERS[(personality % 24) as usize]
     }
@@ -1419,7 +1443,12 @@ mod tests {
         // Two live slots and a third that was never filled.
         memory = memory.with(
             BASE,
-            party_record(7, 0x1234_5678, 21, &[0xCD, 0xCA, 0xBF, 0xBB, 0xCC, 0xC9, 0xD1, 0xFF]),
+            party_record(
+                7,
+                0x1234_5678,
+                21,
+                &[0xCD, 0xCA, 0xBF, 0xBB, 0xCC, 0xC9, 0xD1, 0xFF],
+            ),
         );
         memory = memory.with(BASE + 100, party_record(19, 0x1234_5678, 25, &[0xFF]));
         memory = memory.with(BASE + 200, vec![0u8; 100]);
@@ -1504,26 +1533,46 @@ mod tests {
         let manifest = Manifest::parse(&value.to_string()).unwrap();
         assert!(manifest.supports(&rom("BPRE")));
         assert!(!manifest.supports(&rom("BPRJ")));
-        let mut revision = rom("BPRE"); revision.revision = 1;
+        let mut revision = rom("BPRE");
+        revision.revision = 1;
         assert!(!manifest.supports(&revision));
-        value["sections"][0]["fields"][0]["read"] = serde_json::json!({"u32":{"at":"0x03000000","deref":[0]}});
-        value["sections"][0]["fields"].as_array_mut().unwrap().truncate(1);
+        value["sections"][0]["fields"][0]["read"] =
+            serde_json::json!({"u32":{"at":"0x03000000","deref":[0]}});
+        value["sections"][0]["fields"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
         let manifest = Manifest::parse(&value.to_string()).unwrap();
         let memory = SparseMemory::new().with(0x03000000, 0x04000000u32.to_le_bytes().to_vec());
-        assert!(manifest.sections(&memory).is_empty(), "an indirect pointer cannot expose IO registers");
+        assert!(
+            manifest.sections(&memory).is_empty(),
+            "an indirect pointer cannot expose IO registers"
+        );
         value["sections"][0]["fields"][0]["read"] = serde_json::json!({"u8":"0x03007fff"});
-        assert!(Manifest::parse(&value.to_string()).is_ok(), "the last RAM byte is valid for u8");
+        assert!(
+            Manifest::parse(&value.to_string()).is_ok(),
+            "the last RAM byte is valid for u8"
+        );
         value["sections"][0]["fields"][0]["read"] = serde_json::json!({"u32":"0x03007fff"});
-        assert!(Manifest::parse(&value.to_string()).is_err(), "wide reads must stay in bounds");
+        assert!(
+            Manifest::parse(&value.to_string()).is_err(),
+            "wide reads must stay in bounds"
+        );
         value["sections"][0]["fields"][0]["read"] = serde_json::json!({"u8":"0x02000000"});
         value["matches"]["revisions"] = serde_json::json!([0]);
-        assert!(Manifest::parse(&value.to_string()).is_err(), "misspelled compatibility rules must not be ignored");
+        assert!(
+            Manifest::parse(&value.to_string()).is_err(),
+            "misspelled compatibility rules must not be ignored"
+        );
     }
 
     #[test]
     fn full_width_meters_do_not_overflow() {
         assert_eq!(AddonMeter::new(u32::MAX, u32::MAX).percent(), 100);
-        assert_eq!(AddonTone::from_fraction(u32::MAX, u32::MAX), AddonTone::Good);
+        assert_eq!(
+            AddonTone::from_fraction(u32::MAX, u32::MAX),
+            AddonTone::Good
+        );
     }
 
     #[test]

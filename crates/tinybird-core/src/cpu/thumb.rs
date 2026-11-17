@@ -28,12 +28,12 @@ fn decode_thumb_instruction(opcode: u16) -> Option<DecodedInstruction> {
     }
 
     // Format 2: Add/Subtract (00011x) - bits [15:10] = 0b00011x
-    if top_bits >= 0b000110 && top_bits < 0b001000 {
+    if (0b000110..0b001000).contains(&top_bits) {
         return decode_add_sub(opcode);
     }
 
     // Format 3: Move/Compare/Add immediate (001xx) - bits [15:11] = 0b001xx
-    if top_bits >= 0b001000 && top_bits < 0b010000 {
+    if (0b001000..0b010000).contains(&top_bits) {
         return decode_move_compare(opcode);
     }
 
@@ -48,33 +48,33 @@ fn decode_thumb_instruction(opcode: u16) -> Option<DecodedInstruction> {
     }
 
     // Format 6: PC-relative load (01001) - bits [15:11] = 0b01001
-    if top_bits >= 0b010010 && top_bits < 0b010100 {
+    if (0b010010..0b010100).contains(&top_bits) {
         return decode_ldr_pc(opcode);
     }
 
     // Format 7: Load/Store with register offset (0101) - bits [15:12] = 0b0101
-    if top_bits >= 0b010100 && top_bits < 0b011000 {
+    if (0b010100..0b011000).contains(&top_bits) {
         return decode_ldr_str_reg(opcode);
     }
 
     // Format 9: Load/Store word/byte with immediate offset (011x) - bits [15:13] = 0b011
-    if top_bits >= 0b011000 && top_bits < 0b100000 {
+    if (0b011000..0b100000).contains(&top_bits) {
         // Bit 12 (B flag): 0 = word transfer (offset*4), 1 = byte transfer (offset)
         return decode_ldr_str_imm_offset(opcode);
     }
 
     // Format 10: Load/Store halfword (1000) - bits [15:12] = 0b1000
-    if top_bits >= 0b100000 && top_bits < 0b100100 {
+    if (0b100000..0b100100).contains(&top_bits) {
         return decode_ldr_str_half_imm(opcode);
     }
 
     // Format 10: Stack load/store (1001) - bits [15:11] = 0b1001x
-    if top_bits >= 0b100100 && top_bits < 0b101000 {
+    if (0b100100..0b101000).contains(&top_bits) {
         return decode_stack(opcode);
     }
 
     // Format 12: Load address (1010x) - bits [15:12] = 0b1010
-    if top_bits >= 0b101000 && top_bits < 0b101100 {
+    if (0b101000..0b101100).contains(&top_bits) {
         if (opcode & 0x0800) == 0 {
             return decode_add_pc(opcode); // ADD Rd, PC, #imm
         } else {
@@ -93,12 +93,12 @@ fn decode_thumb_instruction(opcode: u16) -> Option<DecodedInstruction> {
     }
 
     // Format 15: Multiple load/store (1100) - bits [15:12] = 0b1100
-    if top_bits >= 0b110000 && top_bits < 0b110100 {
+    if (0b110000..0b110100).contains(&top_bits) {
         return decode_ldm_stm(opcode);
     }
 
     // Format 16: Conditional branch (1101) - bits [15:12] = 0b1101
-    if top_bits >= 0b110100 && top_bits < 0b111000 {
+    if (0b110100..0b111000).contains(&top_bits) {
         // Check for SWI (11011111)
         if (opcode & 0xFF00) == 0xDF00 {
             return decode_swi(opcode);
@@ -107,7 +107,7 @@ fn decode_thumb_instruction(opcode: u16) -> Option<DecodedInstruction> {
     }
 
     // Format 17: Unconditional branch (11100) - bits [15:11] = 0b11100
-    if top_bits >= 0b111000 && top_bits < 0b111010 {
+    if (0b111000..0b111010).contains(&top_bits) {
         return decode_uncond_branch(opcode);
     }
 
@@ -454,7 +454,7 @@ fn decode_stack(opcode: u16) -> Option<DecodedInstruction> {
         rn: Some(13), // SP-relative
         rm: None,
         shift: None,
-        immediate: Some(imm8 as u32 * 4),
+        immediate: Some(imm8 * 4),
         branch_target: None,
         writes_back: false,
     })
@@ -471,7 +471,7 @@ fn decode_add_pc(opcode: u16) -> Option<DecodedInstruction> {
         rn: None,
         rm: None,
         shift: None,
-        immediate: Some(imm8 as u32 * 4),
+        immediate: Some(imm8 * 4),
         branch_target: None,
         writes_back: false,
     })
@@ -489,7 +489,7 @@ fn decode_add_sp_imm(opcode: u16) -> Option<DecodedInstruction> {
         rn: None, // rn=None signals SP-relative in exec_add_sub
         rm: None,
         shift: None,
-        immediate: Some(imm8 as u32 * 4),
+        immediate: Some(imm8 * 4),
         branch_target: None,
         writes_back: false,
     })
@@ -500,7 +500,7 @@ fn decode_add_sp_imm(opcode: u16) -> Option<DecodedInstruction> {
 fn decode_adjust_sp(opcode: u16) -> Option<DecodedInstruction> {
     let is_sub = (opcode & 0x0080) != 0;
     let imm7 = bits(opcode as u32, 6, 0);
-    let offset = imm7 as u32 * 4;
+    let offset = imm7 * 4;
     Some(DecodedInstruction {
         category: InstructionCategory::ThumbAddSub,
         condition: 0xE,
@@ -533,7 +533,7 @@ fn decode_push_pop(opcode: u16) -> Option<DecodedInstruction> {
         rn: None,
         rm: None,
         shift: None,
-        immediate: Some(rlist as u32),
+        immediate: Some(rlist),
         branch_target: Some(flags),
         writes_back: true,
     })
@@ -557,7 +557,7 @@ fn decode_ldm_stm(opcode: u16) -> Option<DecodedInstruction> {
         rn: None,
         rm: None,
         shift: None,
-        immediate: Some(rlist as u32),
+        immediate: Some(rlist),
         branch_target: None,
         writes_back: true,
     })
@@ -590,7 +590,7 @@ fn decode_swi(opcode: u16) -> Option<DecodedInstruction> {
         rn: None,
         rm: None,
         shift: None,
-        immediate: Some(imm8 as u32),
+        immediate: Some(imm8),
         branch_target: None,
         writes_back: false,
     })
@@ -792,9 +792,9 @@ fn exec_shift(regs: &mut Registers, decoded: &DecodedInstruction) {
 
     // For register shifts (ALU Format 4): get shift amount from register
     // The value being shifted is Rd (rn field = rd for ALU ops)
-    let (value, register_shift_amount) = if shift.shift_reg.is_some() {
+    let (value, register_shift_amount) = if let Some(shift_reg) = shift.shift_reg {
         // ALU register shift: value = Rd, amount from Rs (low byte)
-        let shift_amount = regs.get_reg(shift.shift_reg.unwrap() as usize) & 0xFF;
+        let shift_amount = regs.get_reg(shift_reg as usize) & 0xFF;
         shift.amount = shift_amount as u8;
         (
             decoded.rd.map(|r| regs.get_reg(r as usize)).unwrap_or(0),
@@ -841,7 +841,6 @@ fn exec_add_sub(regs: &mut Registers, decoded: &DecodedInstruction) {
         if let Some(rd) = decoded.rd {
             regs.set_reg(rd as usize, result);
         }
-        return;
     }
 
     // Should not reach here - Format 2 add/sub now uses Add/Sub categories
@@ -999,17 +998,17 @@ fn exec_ldr<B: Bus>(
     is_byte: bool,
     is_half: bool,
 ) {
-    let addr = if decoded.rn.is_none() {
-        // PC-relative LDR: addr = (PC & ~2) + imm
-        let pc = pipeline.pc() & !2;
-        pc.wrapping_add(decoded.immediate.unwrap_or(0))
-    } else {
-        let base = regs.get_reg(decoded.rn.unwrap() as usize);
+    let addr = if let Some(rn) = decoded.rn {
+        let base = regs.get_reg(rn as usize);
         let offset = decoded
             .rm
             .map(|r| regs.get_reg(r as usize))
             .unwrap_or(decoded.immediate.unwrap_or(0));
         base.wrapping_add(offset)
+    } else {
+        // PC-relative LDR: addr = (PC & ~2) + imm
+        let pc = pipeline.pc() & !2;
+        pc.wrapping_add(decoded.immediate.unwrap_or(0))
     };
 
     let value = if is_byte {

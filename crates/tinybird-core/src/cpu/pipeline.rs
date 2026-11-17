@@ -259,7 +259,7 @@ impl Pipeline {
     pub fn fetch<B: Bus>(&mut self, bus: &B) -> Instruction {
         let addr = self.fetch_addr;
 
-        let instruction = if self.thumb_mode {
+        if self.thumb_mode {
             // Thumb instructions are 16-bit aligned
             let opcode = bus.read_opcode_u16(addr & !1);
             Instruction::thumb(opcode)
@@ -267,9 +267,7 @@ impl Pipeline {
             // ARM instructions are 32-bit aligned
             let opcode = bus.read_opcode_u32(addr & !3);
             Instruction::arm(opcode)
-        };
-
-        instruction
+        }
     }
 
     /// Advance the pipeline by one stage

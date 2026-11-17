@@ -143,7 +143,9 @@ impl Framebuffer {
             front_buffer: vec![Pixel::default(); pixel_count],
             back_buffer: vec![Pixel::default(); pixel_count],
             window_masks: vec![WINDOW_MASK_ALL_LAYERS; pixel_count],
-            line_buffers: vec![Vec::with_capacity(SCREEN_WIDTH); 4], // 4 priority levels
+            // One per priority level. Built one at a time: cloning an empty
+            // vector does not carry its capacity over.
+            line_buffers: (0..4).map(|_| Vec::with_capacity(SCREEN_WIDTH)).collect(),
         }
     }
 
@@ -181,7 +183,9 @@ impl Framebuffer {
             self.window_masks = vec![WINDOW_MASK_ALL_LAYERS; PIXEL_COUNT];
         }
         if self.line_buffers.len() != 4 {
-            self.line_buffers = vec![Vec::with_capacity(SCREEN_WIDTH); 4];
+            // One per priority level. Built one at a time: cloning an empty
+            // vector does not carry its capacity over.
+            self.line_buffers = (0..4).map(|_| Vec::with_capacity(SCREEN_WIDTH)).collect();
         }
     }
 

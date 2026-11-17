@@ -905,8 +905,8 @@ fn arm_ldr_str_addr(regs: &mut Registers, decoded: &DecodedInstruction) -> (u32,
     let base = decoded.rn.map(|r| regs.get_reg(r as usize)).unwrap_or(0);
 
     // Get offset: either immediate (already sign-adjusted for !up) or register+shift
-    let offset = if decoded.immediate.is_some() {
-        decoded.immediate.unwrap()
+    let offset = if let Some(immediate) = decoded.immediate {
+        immediate
     } else {
         let op2 = get_operand2(regs, decoded);
         if is_up {

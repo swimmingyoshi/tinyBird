@@ -1777,17 +1777,15 @@ impl App {
                 EventType::Connected => {
                     self.active_gamepad.get_or_insert(event.id);
                 }
-                EventType::Disconnected => {
-                    if self.active_gamepad == Some(event.id) {
-                        self.active_gamepad = None;
-                        self.gamepad_buttons = GbaButton::empty();
-                        self.gamepad_axis_buttons = GbaButton::empty();
-                        self.gamepad_left_x = 0.0;
-                        self.gamepad_left_y = 0.0;
-                        self.gamepad_dpad_x = 0.0;
-                        self.gamepad_dpad_y = 0.0;
-                        changed = true;
-                    }
+                EventType::Disconnected if self.active_gamepad == Some(event.id) => {
+                    self.active_gamepad = None;
+                    self.gamepad_buttons = GbaButton::empty();
+                    self.gamepad_axis_buttons = GbaButton::empty();
+                    self.gamepad_left_x = 0.0;
+                    self.gamepad_left_y = 0.0;
+                    self.gamepad_dpad_x = 0.0;
+                    self.gamepad_dpad_y = 0.0;
+                    changed = true;
                 }
                 _ => {}
             }
@@ -2170,15 +2168,13 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                let max_catchup_frames = if self.speed_multiplier > 1 {
-                    1
-                } else if self
+                let audio_backed_up = self
                     .audio_handler
                     .as_ref()
                     .map(|audio_handler| audio_handler.buffered_millis())
                     .unwrap_or(0)
-                    >= AUDIO_BACKPRESSURE_MILLIS
-                {
+                    >= AUDIO_BACKPRESSURE_MILLIS;
+                let max_catchup_frames = if self.speed_multiplier > 1 || audio_backed_up {
                     1
                 } else {
                     FRAME_CATCHUP_LIMIT

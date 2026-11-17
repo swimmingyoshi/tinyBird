@@ -402,8 +402,13 @@ mod tests {
     #[test]
     fn text_survives_a_round_trip() {
         for original in [
-            "POUND", "MASTER BALL", "POKé BALL", "X-SCISSOR", "DON'T",
-            "NIDORAN\u{2642}", "NIDORAN\u{2640}",
+            "POUND",
+            "MASTER BALL",
+            "POKé BALL",
+            "X-SCISSOR",
+            "DON'T",
+            "NIDORAN\u{2642}",
+            "NIDORAN\u{2640}",
         ] {
             assert_eq!(decode(&encode(original)), original, "{original}");
         }

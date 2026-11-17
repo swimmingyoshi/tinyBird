@@ -11,3 +11,6 @@ tinybird-addons.workspace = true
 tinybird-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

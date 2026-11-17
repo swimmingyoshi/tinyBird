@@ -19,9 +19,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
 
@@ -48,18 +45,45 @@ jobs:
           python -m pip install "gymnasium>=1.0,<2"
           python examples/python/test_training.py
 
-      # Reporting only. The core carries a lint backlog that predates this
-      # workflow, and because the crates share a workspace its warnings surface
-      # when the others are linted too — so there is no subset that could be
-      # gated honestly today. Clear the backlog, then add `-- -D warnings`.
-      # A gate nobody can pass gets switched off rather than fixed.
-      - name: Clippy
-        continue-on-error: true
-        run: cargo clippy --workspace --all-targets
+  lint:
+    name: Format and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      # No `cargo fmt --check` yet: the tree predates one and a formatting pass
-      # would bury real changes under a diff nobody can review. Run `cargo fmt`
-      # once on a quiet commit, then add the gate here.
+      # Pinned, unlike the other jobs. A new stable release brings new lints,
+      # and a gate that starts failing on a commit that changed nothing teaches
+      # people to ignore it. Raise this deliberately, with the fixes it asks for.
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy, rustfmt
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # A gate. What is deliberately allowed is listed once, with reasons, under
+      # `[workspace.lints.clippy]` in Cargo.toml. The desktop frontend is left
+      # out for the same reason it is not built above: it needs a windowing and
+      # audio stack this runner does not have. Lint it locally with
+      # `cargo clippy --workspace --all-targets -- -D warnings`.
+      - name: Clippy
+        run: cargo clippy --locked --workspace --exclude tinybird-desktop --all-targets -- -D warnings
+
+      - name: Clippy (WebAssembly)
+        run: cargo clippy --locked -p tinybird-wasm --target wasm32-unknown-unknown -- -D warnings
+
+  audit:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@cargo-audit
+      # Checks Cargo.lock against the RustSec advisory database.
+      - name: cargo audit
+        run: cargo audit
 
   accuracy:
     name: Accuracy (GBA test ROMs)

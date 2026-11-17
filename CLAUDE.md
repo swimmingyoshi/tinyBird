@@ -93,9 +93,18 @@ Roughly 650 Rust tests and 72 browser-module tests. CI builds and tests the
 non-windowing crates, runs the GBA accuracy suite as a gate, and builds the
 WebAssembly module.
 
-`cargo clippy` is reporting-only and there is no `cargo fmt --check`, because the
-tree predates both. Do not reformat files you are not otherwise changing: it
-buries the real diff.
+`cargo fmt --all -- --check` and `cargo clippy -- -D warnings` are CI gates, on a
+pinned toolchain, alongside `cargo audit`. Run both before pushing:
+
+```bash
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+A lint that is allowed on purpose goes under `[workspace.lints.clippy]` in
+`Cargo.toml` with its reason, not in a scattered `#[allow]`. CI cannot lint
+`tinybird-desktop` (no windowing stack on the runner), so that crate depends on
+the local run.
 
 The release profile sets `lto = "fat"` and `codegen-units = 1` for a wasm module
 about 14% smaller, at roughly ten times the build time. `panic = "abort"` is

@@ -155,15 +155,17 @@ impl GameAddon<AddonData> for FftaAddon {
             && !clan.is_empty()
             && !field.is_empty();
         let field_is_current = setup_enemy_roster || field.iter().any(&belongs_to_clan);
-        let field_enemies = field_is_current
-            .then(|| {
+        let field_enemies = if field_is_current {
+            {
                 field
                     .iter()
                     .filter(|unit| !unit.player && !unit.is_judge() && !belongs_to_clan(unit))
                     .cloned()
                     .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+            }
+        } else {
+            Default::default()
+        };
 
         let (units, enemies, base) = if in_battle {
             // Selection belongs to the fixed clan list. Current HP/MP belongs
